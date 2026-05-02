@@ -160,7 +160,7 @@ df_summary["Final_RS_Rank"] = (
     + 0.4 * df_summary["Rank_RS_1M"]
 )
 
-df_out = df_summary.sort_values("Final_RS_Rank").reset_index(drop=True)
+df_out = df_summary.sort_values("Final_RS_Rank").head(10).reset_index(drop=True)
 df_out["Position"] = np.arange(1, len(df_out) + 1)
 
 out_path = Path(__file__).resolve().parent / "momentum_rs_etfs_ranked.xlsx"

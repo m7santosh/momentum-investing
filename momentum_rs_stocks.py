@@ -1,17 +1,19 @@
+"""
+Stock relative strength vs Nifty 50 (^NSEI): excess returns (stock % - index %) over 1M / 3M / 6M / 9M
+(~21 / 63 / 126 / 189 trading days). Hard-coded ticker list matches momentum_stocks.py (keep both in sync manually).
+"""
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 
+NIFTY50_BENCHMARK = "^NSEI"
 
-def _symbol_for_excel(yahoo_ticker: str) -> str:
-    """Strip Yahoo India suffix for display (NSE .NS / BSE .BO)."""
-    if yahoo_ticker.endswith(".NS"):
-        return yahoo_ticker[: -len(".NS")]
-    if yahoo_ticker.endswith(".BO"):
-        return yahoo_ticker[: -len(".BO")]
-    return yahoo_ticker
+LB_1M = 21
+LB_3M = 63
+LB_6M = 126
+LB_9M = 189
 
 # BSE LargeMidcap 250 EQ constituents
 tickers = [
@@ -292,8 +294,22 @@ tickers = [
 ]
 
 
-# Function to fetch historical data
-def get_data(ticker, start_date, end_date):
+def _symbol_for_excel(yahoo_ticker: str) -> str:
+    if yahoo_ticker.endswith(".NS"):
+        return yahoo_ticker[: -len(".NS")]
+    if yahoo_ticker.endswith(".BO"):
+        return yahoo_ticker[: -len(".BO")]
+    return yahoo_ticker
+
+
+def _adj_close_series(df: pd.DataFrame) -> pd.Series:
+    s = df["Adj Close"]
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    return s.squeeze()
+
+
+def get_data(ticker: str, start_date, end_date):
     return yf.download(
         ticker,
         start=start_date,
@@ -303,118 +319,142 @@ def get_data(ticker, start_date, end_date):
         progress=False,
     )
 
-# Set dates
-end_date = datetime.today()
-start_date = end_date - timedelta(days=365 * 2)  # 2 year of data for moving averages
 
-# Data dictionary to hold stock data
-data = {}
+def main() -> None:
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=365 * 2)
 
-# Fetch data for all tickers
-for t in tickers:
-    sym = t["symbol"]
+    data = {}
+    for t in tickers:
+        sym = t["symbol"]
+        try:
+            stock_data = get_data(sym, start_date, end_date)
+            if len(stock_data) > 0:
+                data[sym] = stock_data
+        except Exception as e:
+            print(f"Error fetching data for {sym}: {e}")
+
     try:
-        stock_data = get_data(sym, start_date, end_date)
-        if len(stock_data) > 0:
-            data[sym] = stock_data
+        nifty_df = get_data(NIFTY50_BENCHMARK, start_date, end_date)
+        if len(nifty_df) == 0:
+            raise RuntimeError("empty history")
+        nifty_adj = _adj_close_series(nifty_df)
     except Exception as e:
-        print(f"Error fetching data for {sym}: {e}")
+        print(f"Error: Nifty 50 benchmark {NIFTY50_BENCHMARK} ({e})")
+        raise SystemExit(1)
 
-industry_by_symbol = {t["symbol"]: t["industry"] for t in tickers}
+    industry_by_symbol = {t["symbol"]: t["industry"] for t in tickers}
 
-# Create a DataFrame for summary
-summary = []
+    summary = []
+    for ticker, df in data.items():
+        try:
+            adj = _adj_close_series(df)
+            n = len(adj)
+            if n < LB_1M:
+                print(f"Skip {ticker}: insufficient history ({n} rows).")
+                continue
 
-# Analyze each stock
-for ticker, df in data.items():
-    try:
-        adj = df["Adj Close"]
-        if isinstance(adj, pd.DataFrame):
-            adj = adj.iloc[:, 0]
-        adj = adj.squeeze()
-        n = len(adj)
-        if n < 21:
-            continue
-
-        df = df.copy()
-        df["EMA200"] = adj.ewm(span=200).mean()
-
-        # Last 1-year return (needs 252 sessions; newer listings may have less Yahoo history)
-        if n >= 252:
-            one_year_return = (adj.iloc[-1] / adj.iloc[-252] - 1) * 100
-        else:
-            one_year_return = float("nan")
-
-        # 52-week high (up to 252 sessions, or all available bars)
-        high_52_week = adj.iloc[-min(252, n) :].max()
-        within_25_pct_high = adj.iloc[-1] >= high_52_week * 0.75  # within 25% of the 52-week high
-
-        # More than 45% up days in the last 6 months (126 trading days)
-        six_month_data = adj.iloc[-126:]
-        up_days = (six_month_data.pct_change() > 0).sum()
-        up_days_pct = up_days / len(six_month_data) * 100  # percentage of up days
-
-        # Filtering criteria
-        if (
-            adj.iloc[-1] >= df["EMA200"].iloc[-1]
-            and one_year_return >= 6.5
-            and within_25_pct_high
-            and up_days_pct > 45
-        ):
-
-            # Calculate returns (guard lookbacks if history is ever borderline)
-            return_9m = (
-                (adj.iloc[-1] / adj.iloc[-189] - 1) * 100 if n >= 189 else float("nan")
+            return_1m = (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100
+            return_3m = (
+                (adj.iloc[-1] / adj.iloc[-LB_3M] - 1) * 100 if n >= LB_3M else float("nan")
             )
             return_6m = (
-                (adj.iloc[-1] / adj.iloc[-126] - 1) * 100 if n >= 126 else float("nan")
+                (adj.iloc[-1] / adj.iloc[-LB_6M] - 1) * 100 if n >= LB_6M else float("nan")
             )
-            return_3m = (adj.iloc[-1] / adj.iloc[-63] - 1) * 100 if n >= 63 else float("nan")
-            return_1m = (adj.iloc[-1] / adj.iloc[-21] - 1) * 100 if n >= 21 else float("nan")
+            return_9m = (
+                (adj.iloc[-1] / adj.iloc[-LB_9M] - 1) * 100 if n >= LB_9M else float("nan")
+            )
 
-            summary.append({
-                "Symbol": _symbol_for_excel(ticker),
-                'Industry': industry_by_symbol.get(ticker, ''),
-                'Return_9M': return_9m,
-                'Return_6M': return_6m,
-                'Return_3M': return_3m,
-                'Return_1M': return_1m,
-            })
-    except Exception as e:
-        print(f"Error analyzing {ticker}: {e}")
+            rs_1m = rs_3m = rs_6m = rs_9m = float("nan")
+            if len(nifty_adj) >= LB_1M:
+                nx = nifty_adj.reindex(adj.index).ffill()
 
-# Convert summary to DataFrame
-df_summary = pd.DataFrame(summary)
-if df_summary.empty:
-    print("No tickers passed filters; no Excel file written.")
-    raise SystemExit(0)
+                def _nifty_ret_pct(lookback: int) -> float:
+                    if n < lookback:
+                        return float("nan")
+                    sl = nx.iloc[-lookback:]
+                    if sl.isna().any() or not (sl > 0).all():
+                        return float("nan")
+                    return (nx.iloc[-1] / nx.iloc[-lookback] - 1) * 100
 
-# Round off returns to 1 decimal place
-df_summary['Return_9M'] = df_summary['Return_9M'].round(1)
-df_summary['Return_6M'] = df_summary['Return_6M'].round(1)
-df_summary['Return_3M'] = df_summary['Return_3M'].round(1)
-df_summary['Return_1M'] = df_summary['Return_1M'].round(1)
+                rn1 = _nifty_ret_pct(LB_1M)
+                rn3 = _nifty_ret_pct(LB_3M)
+                rn6 = _nifty_ret_pct(LB_6M)
+                rn9 = _nifty_ret_pct(LB_9M)
+                if pd.notna(rn1):
+                    rs_1m = return_1m - rn1
+                if pd.notna(rn3):
+                    rs_3m = return_3m - rn3
+                if pd.notna(rn6):
+                    rs_6m = return_6m - rn6
+                if pd.notna(rn9):
+                    rs_9m = return_9m - rn9
 
-# Ranking based on returns
-df_summary['Rank_9M'] = df_summary['Return_9M'].rank(ascending=False)
-df_summary['Rank_6M'] = df_summary['Return_6M'].rank(ascending=False)
-df_summary['Rank_3M'] = df_summary['Return_3M'].rank(ascending=False)
-#df_summary['Rank_1M'] = df_summary['Return_1M'].rank(ascending=False)
+            summary.append(
+                {
+                    "Symbol": _symbol_for_excel(ticker),
+                    "Industry": industry_by_symbol.get(ticker, ""),
+                    "Return_1M": return_1m,
+                    "Return_3M": return_3m,
+                    "Return_6M": return_6m,
+                    "Return_9M": return_9m,
+                    "RS_1M_vs_N50": rs_1m,
+                    "RS_3M_vs_N50": rs_3m,
+                    "RS_6M_vs_N50": rs_6m,
+                    "RS_9M_vs_N50": rs_9m,
+                }
+            )
+        except Exception as e:
+            print(f"Error analyzing {ticker}: {e}")
 
-# Calculate final rank
-df_summary['Final_Rank'] = 0.50*df_summary['Rank_3M'] + 0.30*df_summary['Rank_6M'] + 0.20*df_summary['Rank_9M'] # calculate the final rank based on the return in the last 3 months, 6 months and 9 months
+    df_summary = pd.DataFrame(summary)
+    if df_summary.empty:
+        print("No rows; no Excel file written.")
+        raise SystemExit(0)
 
-# Sort by final rank and get top 30
-df_summary_sorted = df_summary.sort_values('Final_Rank').head(30)
+    for c in (
+        "Return_1M",
+        "Return_3M",
+        "Return_6M",
+        "Return_9M",
+        "RS_1M_vs_N50",
+        "RS_3M_vs_N50",
+        "RS_6M_vs_N50",
+        "RS_9M_vs_N50",
+    ):
+        df_summary[c] = df_summary[c].round(1)
 
-# Assign position based on final rank
-df_summary_sorted['Position'] = np.arange(1, len(df_summary_sorted) + 1)
+    for c in ("Return_1M", "Return_3M", "Return_6M", "Return_9M"):
+        df_summary[f"Rank_{c.replace('Return_', '')}"] = df_summary[c].rank(
+            ascending=False, na_option="bottom"
+        )
 
-out_path = Path(__file__).resolve().parent / "momentum_stocks_ranked.xlsx"
-try:
-    df_summary_sorted.to_excel(out_path, index=False, engine="openpyxl")
-except ImportError:
-    print("Missing dependency: pip install openpyxl")
-    raise
-print(f"Wrote {len(df_summary_sorted)} rows -> {out_path}")
+    for c, rc in (
+        ("RS_1M_vs_N50", "Rank_RS_1M"),
+        ("RS_3M_vs_N50", "Rank_RS_3M"),
+        ("RS_6M_vs_N50", "Rank_RS_6M"),
+        ("RS_9M_vs_N50", "Rank_RS_9M"),
+    ):
+        df_summary[rc] = df_summary[c].rank(ascending=False, na_option="bottom")
 
+    df_summary["Final_RS_Rank"] = (
+        0.25 * df_summary["Rank_RS_1M"]
+        + 0.25 * df_summary["Rank_RS_3M"]
+        + 0.25 * df_summary["Rank_RS_6M"]
+        + 0.25 * df_summary["Rank_RS_9M"]
+    )
+
+    df_out = df_summary.sort_values("Final_RS_Rank").head(40).reset_index(drop=True)
+    df_out["Position"] = np.arange(1, len(df_out) + 1)
+
+    out_path = Path(__file__).resolve().parent / "momentum_rs_stocks_ranked.xlsx"
+    try:
+        df_out.to_excel(out_path, index=False, engine="openpyxl")
+    except ImportError:
+        print("Missing dependency: pip install openpyxl")
+        raise
+    print(f"Wrote {len(df_out)} rows -> {out_path}")
+
+
+if __name__ == "__main__":
+    main()
