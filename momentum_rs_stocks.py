@@ -1,12 +1,15 @@
 """
-Stock relative strength vs Nifty 50 (^NSEI): excess returns (stock % - index %) over 1M / 3M / 6M / 9M
-(~21 / 63 / 126 / 189 trading days). Hard-coded ticker list matches momentum_stocks.py (keep both in sync manually).
+Same universe as momentum_stocks.py; filters: price vs 200 EMA and within 25% of 52-week high (no 1Y return or up-day % gates).
+Then 1M / 3M / 6M / 9M total returns (~21 / 63 / 126 / 189 sessions) and Final_Rank = 0.5*Rank_3M + 0.3*Rank_6M + 0.2*Rank_9M, top 30.
+Relative strength vs Nifty 50 (^NSEI) = stock % return minus index % over the same horizons.
+Ticker list must stay in sync with momentum_stocks.py.
 """
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from pathlib import Path
+
+from utils.output_paths import FINAL_RESULT_DIR
 
 NIFTY50_BENCHMARK = "^NSEI"
 
@@ -351,103 +354,124 @@ def main() -> None:
             adj = _adj_close_series(df)
             n = len(adj)
             if n < LB_1M:
-                print(f"Skip {ticker}: insufficient history ({n} rows).")
                 continue
 
-            return_1m = (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100
-            return_3m = (
-                (adj.iloc[-1] / adj.iloc[-LB_3M] - 1) * 100 if n >= LB_3M else float("nan")
-            )
-            return_6m = (
-                (adj.iloc[-1] / adj.iloc[-LB_6M] - 1) * 100 if n >= LB_6M else float("nan")
-            )
-            return_9m = (
-                (adj.iloc[-1] / adj.iloc[-LB_9M] - 1) * 100 if n >= LB_9M else float("nan")
-            )
+            df = df.copy()
+            df["EMA200"] = adj.ewm(span=200).mean()
 
-            rs_1m = rs_3m = rs_6m = rs_9m = float("nan")
-            if len(nifty_adj) >= LB_1M:
-                nx = nifty_adj.reindex(adj.index).ffill()
+            high_52_week = adj.iloc[-min(252, n) :].max()
+            within_30_pct_high = adj.iloc[-1] >= high_52_week * 0.7
 
-                def _nifty_ret_pct(lookback: int) -> float:
-                    if n < lookback:
-                        return float("nan")
-                    sl = nx.iloc[-lookback:]
-                    if sl.isna().any() or not (sl > 0).all():
-                        return float("nan")
-                    return (nx.iloc[-1] / nx.iloc[-lookback] - 1) * 100
+            if adj.iloc[-1] >= df["EMA200"].iloc[-1] and within_30_pct_high:
+                return_9m = (
+                    (adj.iloc[-1] / adj.iloc[-LB_9M] - 1) * 100
+                    if n >= LB_9M
+                    else float("nan")
+                )
+                return_6m = (
+                    (adj.iloc[-1] / adj.iloc[-LB_6M] - 1) * 100
+                    if n >= LB_6M
+                    else float("nan")
+                )
+                return_3m = (
+                    (adj.iloc[-1] / adj.iloc[-LB_3M] - 1) * 100
+                    if n >= LB_3M
+                    else float("nan")
+                )
+                return_1m = (
+                    (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100
+                    if n >= LB_1M
+                    else float("nan")
+                )
 
-                rn1 = _nifty_ret_pct(LB_1M)
-                rn3 = _nifty_ret_pct(LB_3M)
-                rn6 = _nifty_ret_pct(LB_6M)
-                rn9 = _nifty_ret_pct(LB_9M)
-                if pd.notna(rn1):
-                    rs_1m = return_1m - rn1
-                if pd.notna(rn3):
-                    rs_3m = return_3m - rn3
-                if pd.notna(rn6):
-                    rs_6m = return_6m - rn6
-                if pd.notna(rn9):
-                    rs_9m = return_9m - rn9
+                rs_1m = rs_3m = rs_6m = rs_9m = float("nan")
+                if len(nifty_adj) >= LB_1M:
+                    nx = nifty_adj.reindex(adj.index).ffill()
 
-            summary.append(
-                {
-                    "Symbol": _symbol_for_excel(ticker),
-                    "Industry": industry_by_symbol.get(ticker, ""),
-                    "Return_1M": return_1m,
-                    "Return_3M": return_3m,
-                    "Return_6M": return_6m,
-                    "Return_9M": return_9m,
-                    "RS_1M_vs_N50": rs_1m,
-                    "RS_3M_vs_N50": rs_3m,
-                    "RS_6M_vs_N50": rs_6m,
-                    "RS_9M_vs_N50": rs_9m,
-                }
-            )
+                    def _nifty_ret_pct(lookback: int) -> float:
+                        if n < lookback:
+                            return float("nan")
+                        sl = nx.iloc[-lookback:]
+                        if sl.isna().any() or not (sl > 0).all():
+                            return float("nan")
+                        return (nx.iloc[-1] / nx.iloc[-lookback] - 1) * 100
+
+                    rn1 = _nifty_ret_pct(LB_1M)
+                    rn3 = _nifty_ret_pct(LB_3M)
+                    rn6 = _nifty_ret_pct(LB_6M)
+                    rn9 = _nifty_ret_pct(LB_9M)
+                    if pd.notna(rn1):
+                        rs_1m = return_1m - rn1
+                    if pd.notna(rn3):
+                        rs_3m = return_3m - rn3
+                    if pd.notna(rn6):
+                        rs_6m = return_6m - rn6
+                    if pd.notna(rn9):
+                        rs_9m = return_9m - rn9
+
+                summary.append(
+                    {
+                        "Symbol": _symbol_for_excel(ticker),
+                        "Industry": industry_by_symbol.get(ticker, ""),
+                        "Return_9M": return_9m,
+                        "Return_6M": return_6m,
+                        "Return_3M": return_3m,
+                        "Return_1M": return_1m,
+                        "RS_9M_vs_N50": rs_9m,
+                        "RS_6M_vs_N50": rs_6m,
+                        "RS_3M_vs_N50": rs_3m,
+                        "RS_1M_vs_N50": rs_1m,
+                    }
+                )
         except Exception as e:
             print(f"Error analyzing {ticker}: {e}")
 
     df_summary = pd.DataFrame(summary)
     if df_summary.empty:
-        print("No rows; no Excel file written.")
+        print("No tickers passed filters; no Excel file written.")
         raise SystemExit(0)
 
     for c in (
-        "Return_1M",
-        "Return_3M",
-        "Return_6M",
         "Return_9M",
-        "RS_1M_vs_N50",
-        "RS_3M_vs_N50",
-        "RS_6M_vs_N50",
+        "Return_6M",
+        "Return_3M",
+        "Return_1M",
         "RS_9M_vs_N50",
+        "RS_6M_vs_N50",
+        "RS_3M_vs_N50",
+        "RS_1M_vs_N50",
     ):
         df_summary[c] = df_summary[c].round(1)
 
-    for c in ("Return_1M", "Return_3M", "Return_6M", "Return_9M"):
-        df_summary[f"Rank_{c.replace('Return_', '')}"] = df_summary[c].rank(
-            ascending=False, na_option="bottom"
-        )
+    df_summary["Rank_9M"] = df_summary["Return_9M"].rank(ascending=False)
+    df_summary["Rank_6M"] = df_summary["Return_6M"].rank(ascending=False)
+    df_summary["Rank_3M"] = df_summary["Return_3M"].rank(ascending=False)
+
+    df_summary["Final_Rank"] = (
+        0.50 * df_summary["Rank_3M"]
+        + 0.30 * df_summary["Rank_6M"]
+        + 0.20 * df_summary["Rank_9M"]
+    )
 
     for c, rc in (
-        ("RS_1M_vs_N50", "Rank_RS_1M"),
-        ("RS_3M_vs_N50", "Rank_RS_3M"),
-        ("RS_6M_vs_N50", "Rank_RS_6M"),
         ("RS_9M_vs_N50", "Rank_RS_9M"),
+        ("RS_6M_vs_N50", "Rank_RS_6M"),
+        ("RS_3M_vs_N50", "Rank_RS_3M"),
+        ("RS_1M_vs_N50", "Rank_RS_1M"),
     ):
         df_summary[rc] = df_summary[c].rank(ascending=False, na_option="bottom")
 
-    df_summary["Final_RS_Rank"] = (
-        0.25 * df_summary["Rank_RS_1M"]
-        + 0.25 * df_summary["Rank_RS_3M"]
-        + 0.25 * df_summary["Rank_RS_6M"]
-        + 0.25 * df_summary["Rank_RS_9M"]
+    df_summary["Final_RS_Rank"] = (        
+        0.5 * df_summary["Rank_RS_3M"]
+        + 0.3 * df_summary["Rank_RS_6M"]
+        + 0.2 * df_summary["Rank_RS_9M"]
     )
 
-    df_out = df_summary.sort_values("Final_RS_Rank").head(40).reset_index(drop=True)
+    df_out = df_summary.sort_values("Final_Rank").head(40).reset_index(drop=True)
     df_out["Position"] = np.arange(1, len(df_out) + 1)
 
-    out_path = Path(__file__).resolve().parent / "momentum_rs_stocks_ranked.xlsx"
+    FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = FINAL_RESULT_DIR / "momentum_rs_stocks_ranked.xlsx"
     try:
         df_out.to_excel(out_path, index=False, engine="openpyxl")
     except ImportError:

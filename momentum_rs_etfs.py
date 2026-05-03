@@ -1,12 +1,19 @@
 """
-ETF relative strength vs Nifty 50 (^NSEI): excess returns (ETF % − index %) over 1W / 2W / 1M,
-ranked on the same horizons. Same universe as momentum_etfs.py (keep lists in sync manually).
+ETF relative strength vs Nifty 50 (^NSEI): excess returns (ETF % − index %) over 1W / 2W / 1M.
+
+Two composites (same idea as momentum_rs_stocks.py):
+- Final_Rank: weighted rank on raw returns only — same weights as momentum_etfs.py (0.3·1W + 0.3·2W + 0.4·1M).
+- Final_RS_Rank: same weights on RS vs N50 ranks.
+
+Output is sorted by Final_Rank (primary momentum ordering); Final_RS_Rank is the RS-only lens.
+Same universe as momentum_etfs.py (keep lists in sync manually).
 """
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from pathlib import Path
+
+from utils.output_paths import FINAL_RESULT_DIR
 
 NIFTY50_BENCHMARK = "^NSEI"
 
@@ -147,6 +154,12 @@ for c in ("Return_1W", "Return_2W", "Return_1M", "RS_1W_vs_N50", "RS_2W_vs_N50",
 for c in ("Return_1W", "Return_2W", "Return_1M"):
     df_summary[f"Rank_{c.replace('Return_', '')}"] = df_summary[c].rank(ascending=False)
 
+df_summary["Final_Rank"] = (
+    0.3 * df_summary["Rank_1W"]
+    + 0.3 * df_summary["Rank_2W"]
+    + 0.4 * df_summary["Rank_1M"]
+)
+
 for c, rc in (
     ("RS_1W_vs_N50", "Rank_RS_1W"),
     ("RS_2W_vs_N50", "Rank_RS_2W"),
@@ -155,15 +168,16 @@ for c, rc in (
     df_summary[rc] = df_summary[c].rank(ascending=False, na_option="bottom")
 
 df_summary["Final_RS_Rank"] = (
-    0.3 * df_summary["Rank_RS_1W"]
-    + 0.3 * df_summary["Rank_RS_2W"]
+    0.2 * df_summary["Rank_RS_1W"]
+    + 0.4 * df_summary["Rank_RS_2W"]
     + 0.4 * df_summary["Rank_RS_1M"]
 )
 
-df_out = df_summary.sort_values("Final_RS_Rank").head(10).reset_index(drop=True)
+df_out = df_summary.sort_values("Final_Rank").head(10).reset_index(drop=True)
 df_out["Position"] = np.arange(1, len(df_out) + 1)
 
-out_path = Path(__file__).resolve().parent / "momentum_rs_etfs_ranked.xlsx"
+FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
+out_path = FINAL_RESULT_DIR / "momentum_rs_etfs_ranked.xlsx"
 try:
     df_out.to_excel(out_path, index=False, engine="openpyxl")
 except ImportError:

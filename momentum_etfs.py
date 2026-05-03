@@ -6,7 +6,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from pathlib import Path
+
+from utils.output_paths import FINAL_RESULT_DIR
 
 
 def _symbol_for_excel(yahoo_ticker: str) -> str:
@@ -125,7 +126,8 @@ df_summary_sorted = df_summary.sort_values('Final_Rank').head(10) # get the top 
 # Assign position based on final rank
 df_summary_sorted['Position'] = np.arange(1, len(df_summary_sorted) + 1) # assign the position based on the final rank
 
-out_path = Path(__file__).resolve().parent / "momentum_etfs_ranked.xlsx" # save the result to an Excel file
+FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
+out_path = FINAL_RESULT_DIR / "momentum_etfs_ranked.xlsx"
 try:
     df_summary_sorted.to_excel(out_path, index=False, engine="openpyxl")
 except ImportError:
