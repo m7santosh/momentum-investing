@@ -1,82 +1,97 @@
 """
-ETF relative strength vs Nifty 50 (^NSEI): excess returns (ETF % − index %) over 1W / 2W / 1M.
+ETF relative strength vs Nifty 500 (^CRSLDX): excess returns vs index over multiple horizons.
 
-Two composites (same idea as momentum_rs_stocks.py):
-- Final_Rank: weighted rank on raw returns only — same weights as momentum_etfs.py (0.3·1W + 0.3·2W + 0.4·1M).
-- Final_RS_Rank: same weights on RS vs N50 ranks.
+Trend filters:
+1. Price must be above the 200-day EMA.
+2. Price must be within 30% of its 52-week high (last close >= 70% of trailing ~252-session high).
 
-Output is sorted by Final_Rank (primary momentum ordering); Final_RS_Rank is the RS-only lens.
-Same universe as momentum_etfs.py (keep lists in sync manually).
+Ranking (swing / all-weather blend):
+- Horizons: 1W, 2W, 1M, 3M (trading sessions). Weights favor 3M; 6M omitted for ETFs (less idiosyncratic drift vs single stocks; 200 EMA / 52w already anchor slower trend).
+- Abs_Momentum_Rank / Relative_Strength_Rank from weighted average of period ranks, then reranked.
+- Blended_Rank: average of the two. Lower is better.
+
+Market_Regime: ^CRSLDX vs 50 / 200 EMA (Trend_Up / Trend_Down / Mixed_Above50 / Mixed_Below50 / Unknown).
+
+Close_Below_9EMA: per ETF, Yes if last adj close is below the 9 EMA (short swing soft warning), else No.
+
+How to read Volatility_Score (informational):
+- It is stdev of daily % returns over the last LB_1M sessions, ×100; higher = choppier last month.
+- Use it only vs other names on the same output: lower = smoother when you already like the rank/RS story.
+- Tiny differences (e.g. 1.1 vs 1.2) are noise; wide gaps (e.g. 0.9 vs 2.5) matter more.
+- Broad index-style ETFs often ~0.5–2.0; thematic/commodity sleeves can be higher without being "bad".
+- Tie-break or sizing hint, not a primary buy/sell rule (says nothing about gaps or tail risk).
+
+How to read Rank_vs_Peak (informational):
+- Built from adj close vs (1) trailing ~52-week high and (2) max adj close in the download window (~2y); score = average of the two ratios; then ranked across the filtered universe.
+- Rank 1 = closest to those peaks (strongest “printing highs” posture in this data); larger rank = farther from peaks.
+- Compare only within the same run: same date, same universe after trend filters.
+- “ATH” here is max over downloaded history, not necessarily since listing; 52w uses LB_52W sessions.
+- Not a buy rule on its own; use with Blended_Rank, RS, and trend filters.
+
+Excel: Return_1W / Return_2W / Return_1M / Return_3M and matching RS_* columns (1W/2W use LB_1W/LB_2W session offsets, not calendar weeks).
 """
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-
 import sys
 from pathlib import Path
+
+# Setup project root for utility imports
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.output_paths import FINAL_RESULT_DIR
 
-NIFTY50_BENCHMARK = "^NSEI"
+# --- Configuration ---
+BENCHMARK_TICKER = "^CRSLDX"
 
-# Same universe as momentum_etfs.py
+# Lookback offsets (sessions from last bar)
+LB_1W = 6
+LB_2W = 11
+LB_1M = 21
+LB_3M = 63
+
+# Ranking weights (sum = 1): short windows + dominant 3M (no 6M)
+W_1W, W_2W, W_1M, W_3M = 0.10, 0.10, 0.25, 0.55
+
+EMA_SPAN = 200
+LB_52W = 252
+PROXIMITY_OF_52W_HIGH = 0.7
+
+# Benchmark regime (^CRSLDX): slow / fast EMA spans
+BENCH_EMA_FAST = 50
+BENCH_EMA_SLOW = 200
+
+# Short EMA for per-ETF “close below 9?” flag (adj close)
+ETF_EMA_9 = 9
+
+TOP_N = 10
+OUT_FILENAME = "momentum_rs_etfs.xlsx"
+
+RETURN_SUFFIXES = ("1W", "2W", "1M", "3M")
+
+# --- Ticker universe ---
 tickers = [
-    "ALPHA.NS",
-    "AUTOBEES.NS",
-    "BANKBEES.NS",
-    "CONSUMBEES.NS",
-    "CPSEETF.NS",
-    "MOENERGY.NS",
-    "FMCGIETF.NS",
-    "GOLDBEES.NS",
-    "GROWWPOWER.NS",
-    "GROWWRAIL.NS",
-    "HDFCSML250.NS",
-    "HEALTHIETF.NS",
-    "HNGSNGBEES.NS",
-    "ICICIB22.NS",
-    "INFRABEES.NS",
-    "ITBEES.NS",
-    "LIQUIDCASE.NS",
-    "MAFANG.NS",
-    "MAHKTECH.NS",
-    "METALIETF.NS",
-    "MIDCAPETF.NS",
-    "MOCAPITAL.NS",
-    "MODEFENCE.NS",
-    "MON100.NS",
-    "MOREALTY.NS",
-    "MOTOUR.NS",
-    "MOVALUE.NS",
-    "NEXT50IETF.NS",
-    "NIFTYBEES.NS",
-    "OILIETF.NS",
-    "PHARMABEES.NS",
-    "PSUBNKBEES.NS",
-    "PVTBANIETF.NS",
-    "MOMIDMTM.NS",
-    "SILVERBEES.NS",
-    "SMALLCAP.NS",
+    "ALPHA.NS", "AUTOBEES.NS", "BANKBEES.NS", "CONSUMBEES.NS", "CPSEETF.NS",
+    "MOENERGY.NS", "FMCGIETF.NS", "GOLDBEES.NS", "GROWWPOWER.NS", "GROWWRAIL.NS",
+    "HEALTHIETF.NS", "HNGSNGBEES.NS", "ICICIB22.NS", "INFRABEES.NS", "ITBEES.NS",
+    "LIQUIDCASE.NS", "MAHKTECH.NS", "METALIETF.NS", "MIDCAPETF.NS", "MOCAPITAL.NS",
+    "MODEFENCE.NS", "MON100.NS", "MOREALTY.NS", "MOTOUR.NS", "MOVALUE.NS",
+    "NEXT50IETF.NS", "NIFTYBEES.NS", "OILIETF.NS", "PHARMABEES.NS", "PSUBNKBEES.NS",
+    "PVTBANIETF.NS", "MOMIDMTM.NS", "SILVERBEES.NS", "SMALLCAP.NS",
 ]
 
 
 def _symbol_for_excel(yahoo_ticker: str) -> str:
-    if yahoo_ticker.endswith(".NS"):
-        return yahoo_ticker[: -len(".NS")]
-    if yahoo_ticker.endswith(".BO"):
-        return yahoo_ticker[: -len(".BO")]
-    return yahoo_ticker
+    return yahoo_ticker.replace(".NS", "").replace(".BO", "")
 
 
 def _adj_close_series(df: pd.DataFrame) -> pd.Series:
     s = df["Adj Close"]
-    if isinstance(s, pd.DataFrame):
-        s = s.iloc[:, 0]
-    return s.squeeze()
+    return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
 
 
 def get_data(ticker: str, start_date, end_date):
@@ -90,103 +105,205 @@ def get_data(ticker: str, start_date, end_date):
     )
 
 
-end_date = datetime.today()
-start_date = end_date - timedelta(days=365 * 2)
+def classify_ema_regime(close: pd.Series, fast_span: int, slow_span: int) -> str:
+    """Benchmark only: last vs EMA(fast) and EMA(slow); fast_span < slow_span. (50/200) uses legacy Mixed_*50 names."""
+    # Quadrant rule on price vs two EMAs (same structure if reused elsewhere with other spans).
+    if fast_span >= slow_span:
+        raise ValueError("fast_span must be less than slow_span")
+    if len(close) < slow_span:
+        return "Unknown"
+    last = float(close.iloc[-1])
+    e_fast = float(close.ewm(span=fast_span, adjust=False).mean().iloc[-1])
+    e_slow = float(close.ewm(span=slow_span, adjust=False).mean().iloc[-1])
+    mixed_above = "Mixed_Above50"
+    mixed_below = "Mixed_Below50"
+    if last >= e_slow and last >= e_fast:
+        return "Trend_Up"
+    if last < e_slow and last < e_fast:
+        return "Trend_Down"
+    if last >= e_fast:
+        return mixed_above
+    return mixed_below
 
-data = {}
-for ticker in tickers:
+
+def main() -> None:
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=365 * 2)  # ~2y history for 52w / EMA / RS
+
+    # --- Benchmark: RS anchor + Market_Regime (one series for whole run) ---
     try:
-        stock_data = get_data(ticker, start_date, end_date)
-        if len(stock_data) > 0:
-            data[ticker] = stock_data
-    except Exception as e:
-        print(f"Error fetching data for {ticker}: {e}")
-
-nifty_adj: pd.Series | None = None
-try:
-    nifty_df = get_data(NIFTY50_BENCHMARK, start_date, end_date)
-    if len(nifty_df) > 0:
+        nifty_df = get_data(BENCHMARK_TICKER, start_date, end_date)
+        if len(nifty_df) == 0:
+            print(f"Error: No rows for benchmark {BENCHMARK_TICKER}")
+            return
         nifty_adj = _adj_close_series(nifty_df)
-except Exception as e:
-    print(f"Error: Nifty 50 benchmark {NIFTY50_BENCHMARK} ({e})")
-    raise SystemExit(1)
-
-summary = []
-for ticker, df in data.items():
-    try:
-        adj = _adj_close_series(df)
-        n = len(adj)
-        if n < 21:
-            print(f"Skip {ticker}: insufficient history ({n} rows).")
-            continue
-
-        return_1m = (adj.iloc[-1] / adj.iloc[-21] - 1) * 100
-        return_1w = (adj.iloc[-1] / adj.iloc[-6] - 1) * 100
-        return_2w = (adj.iloc[-1] / adj.iloc[-11] - 1) * 100
-
-        rs_1w = rs_2w = rs_1m = float("nan")
-        if len(nifty_adj) >= 21:
-            nx = nifty_adj.reindex(adj.index).ffill()
-            if not nx.iloc[-21:].isna().any() and (nx.iloc[-21:] > 0).all():
-                ret_n_1w = (nx.iloc[-1] / nx.iloc[-6] - 1) * 100
-                ret_n_2w = (nx.iloc[-1] / nx.iloc[-11] - 1) * 100
-                ret_n_1m = (nx.iloc[-1] / nx.iloc[-21] - 1) * 100
-                rs_1w = return_1w - ret_n_1w
-                rs_2w = return_2w - ret_n_2w
-                rs_1m = return_1m - ret_n_1m
-
-        summary.append(
-            {
-                "Symbol": _symbol_for_excel(ticker),
-                "Return_1W": return_1w,
-                "Return_2W": return_2w,
-                "Return_1M": return_1m,
-                "RS_1W_vs_N50": rs_1w,
-                "RS_2W_vs_N50": rs_2w,
-                "RS_1M_vs_N50": rs_1m,
-            }
-        )
     except Exception as e:
-        print(f"Error analyzing {ticker}: {e}")
+        print(f"Error: Benchmark {BENCHMARK_TICKER} ({e})")
+        return
 
-df_summary = pd.DataFrame(summary)
-if df_summary.empty:
-    print("No rows; no Excel file written.")
-    raise SystemExit(0)
+    market_regime = classify_ema_regime(nifty_adj, BENCH_EMA_FAST, BENCH_EMA_SLOW)
 
-for c in ("Return_1W", "Return_2W", "Return_1M", "RS_1W_vs_N50", "RS_2W_vs_N50", "RS_1M_vs_N50"):
-    df_summary[c] = df_summary[c].round(1)
+    # --- Per ETF: fetch, trend gate, returns/RS/vol, append row ---
+    summary = []
+    for sym in tickers:
+        try:
+            df = get_data(sym, start_date, end_date)
+            if len(df) < LB_52W:
+                continue
 
-for c in ("Return_1W", "Return_2W", "Return_1M"):
-    df_summary[f"Rank_{c.replace('Return_', '')}"] = df_summary[c].rank(ascending=False)
+            adj = _adj_close_series(df)
 
-df_summary["Final_Rank"] = (
-    0.3 * df_summary["Rank_1W"]
-    + 0.3 * df_summary["Rank_2W"]
-    + 0.4 * df_summary["Rank_1M"]
-)
+            # Trend gate: 200 EMA + within PROXIMITY_OF_52W_HIGH of trailing 52w high
+            ema200 = adj.ewm(span=EMA_SPAN).mean().iloc[-1]
+            high_52w = adj.iloc[-min(LB_52W, len(adj)):].max()
+            last = adj.iloc[-1]
+            if last < ema200 or last < (high_52w * PROXIMITY_OF_52W_HIGH):
+                continue
 
-for c, rc in (
-    ("RS_1W_vs_N50", "Rank_RS_1W"),
-    ("RS_2W_vs_N50", "Rank_RS_2W"),
-    ("RS_1M_vs_N50", "Rank_RS_1M"),
-):
-    df_summary[rc] = df_summary[c].rank(ascending=False, na_option="bottom")
+            # Short swing flag vs 9 EMA (does not replace the 200 EMA gate)
+            ema9 = float(adj.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
+            close_below_9ema = "Yes" if float(last) < ema9 else "No"
 
-df_summary["Final_RS_Rank"] = (
-    0.2 * df_summary["Rank_RS_1W"]
-    + 0.4 * df_summary["Rank_RS_2W"]
-    + 0.4 * df_summary["Rank_RS_1M"]
-)
+            # Peak proximity: avg(last/52w_high, last/max_in_window) → Rank_vs_Peak later
+            high_ath = float(adj.max())
+            ratio_52w = last / high_52w
+            ratio_ath = last / high_ath if high_ath > 0 else float("nan")
+            peak_proximity_score = (ratio_52w + ratio_ath) / 2.0
 
-df_out = df_summary.sort_values("Final_Rank").head(10).reset_index(drop=True)
-df_out["Position"] = np.arange(1, len(df_out) + 1)
+            # Trailing total returns (%), session offsets LB_* (see config)
+            return_1w = (adj.iloc[-1] / adj.iloc[-LB_1W] - 1) * 100
+            return_2w = (adj.iloc[-1] / adj.iloc[-LB_2W] - 1) * 100
+            return_1m = (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100
+            return_3m = (adj.iloc[-1] / adj.iloc[-LB_3M] - 1) * 100
 
-FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
-out_path = FINAL_RESULT_DIR / "momentum_rs_etfs_ranked.xlsx"
-try:
+            daily_returns = adj.pct_change()
+            # Volatility_Score — see module docstring "How to read Volatility_Score".
+            vol_score = daily_returns.tail(LB_1M).std() * 100
+
+            # RS = ETF return minus same-horizon benchmark return (aligned calendar via reindex/ffill)
+            rs_1w = rs_2w = rs_1m = rs_3m = float("nan")
+            if len(nifty_adj) >= LB_3M:
+                nx = nifty_adj.reindex(adj.index).ffill()
+                tail = nx.iloc[-LB_3M:]
+                if not tail.isna().any() and (tail > 0).all():
+                    ret_n_1w = (nx.iloc[-1] / nx.iloc[-LB_1W] - 1) * 100
+                    ret_n_2w = (nx.iloc[-1] / nx.iloc[-LB_2W] - 1) * 100
+                    ret_n_1m = (nx.iloc[-1] / nx.iloc[-LB_1M] - 1) * 100
+                    ret_n_3m = (nx.iloc[-1] / nx.iloc[-LB_3M] - 1) * 100
+                    rs_1w = return_1w - ret_n_1w
+                    rs_2w = return_2w - ret_n_2w
+                    rs_1m = return_1m - ret_n_1m
+                    rs_3m = return_3m - ret_n_3m
+
+            summary.append(
+                {
+                    "Symbol": _symbol_for_excel(sym),
+                    "Close_Below_9EMA": close_below_9ema,
+                    "Peak_Proximity_Score": peak_proximity_score,
+                    "Return_1W": return_1w,
+                    "Return_2W": return_2w,
+                    "Return_1M": return_1m,
+                    "Return_3M": return_3m,
+                    "RS_1W_vs_N500": rs_1w,
+                    "RS_2W_vs_N500": rs_2w,
+                    "RS_1M_vs_N500": rs_1m,
+                    "RS_3M_vs_N500": rs_3m,
+                    "Volatility_Score": vol_score,
+                }
+            )
+        except Exception as e:
+            print(f"Error analyzing {sym}: {e}")
+
+    df_summary = pd.DataFrame(summary)
+    if df_summary.empty:
+        print("No ETFs passed the trend filters.")
+        return
+
+    # Round numeric columns before ranks (stable ordering / Excel display)
+    round_cols = [
+        "Peak_Proximity_Score",
+        "Return_1W",
+        "Return_2W",
+        "Return_1M",
+        "Return_3M",
+        "RS_1W_vs_N500",
+        "RS_2W_vs_N500",
+        "RS_1M_vs_N500",
+        "RS_3M_vs_N500",
+        "Volatility_Score",
+    ]
+    for c in round_cols:
+        df_summary[c] = df_summary[c].round(2)
+
+    # Rank_vs_Peak — see module docstring "How to read Rank_vs_Peak".
+    df_summary["Rank_vs_Peak"] = df_summary["Peak_Proximity_Score"].rank(
+        ascending=False, method="min"
+    ).astype(int)
+
+    # --- Ranking: per-horizon ranks → weighted Abs_Score / RS_Score → rerank → Blended_Rank ---
+    for suf in RETURN_SUFFIXES:
+        df_summary[f"Rank_{suf}"] = df_summary[f"Return_{suf}"].rank(ascending=False)
+
+    for suf in RETURN_SUFFIXES:
+        df_summary[f"Rank_RS_{suf}"] = df_summary[f"RS_{suf}_vs_N500"].rank(
+            ascending=False, na_option="bottom"
+        )
+
+    # Weighted average of horizon ranks (W_* in config); lower composite → better after rerank
+    df_summary["Abs_Score"] = (
+        W_1W * df_summary["Rank_1W"]
+        + W_2W * df_summary["Rank_2W"]
+        + W_1M * df_summary["Rank_1M"]
+        + W_3M * df_summary["Rank_3M"]
+    )
+    df_summary["RS_Score"] = (
+        W_1W * df_summary["Rank_RS_1W"]
+        + W_2W * df_summary["Rank_RS_2W"]
+        + W_1M * df_summary["Rank_RS_1M"]
+        + W_3M * df_summary["Rank_RS_3M"]
+    )
+
+    df_summary["Abs_Momentum_Rank"] = df_summary["Abs_Score"].rank(ascending=True)
+    df_summary["Relative_Strength_Rank"] = df_summary["RS_Score"].rank(ascending=True)
+    # Mean of absolute-momentum rank and RS rank; lower Blended_Rank = better
+    df_summary["Blended_Rank"] = (
+        df_summary["Abs_Momentum_Rank"] + df_summary["Relative_Strength_Rank"]
+    ) / 2
+    df_summary["Market_Regime"] = market_regime
+
+    # --- Excel: top TOP_N by Blended_Rank; column order for scan (regime → rank → vol → returns/RS) ---
+    df_out = df_summary.sort_values("Blended_Rank").head(TOP_N).reset_index(drop=True)
+    df_out.insert(0, "Position", np.arange(1, len(df_out) + 1))
+
+    final_cols = [
+        "Position",
+        "Symbol",
+        # "Market_Regime",
+        "Close_Below_9EMA",
+        # "Blended_Rank",
+        "Rank_vs_Peak",
+        "Volatility_Score",
+        "Return_1W",
+        "Return_2W",
+        "Return_1M",
+        "Return_3M",
+        # "RS_1W_vs_N500",
+        # "RS_2W_vs_N500",
+        # "RS_1M_vs_N500",
+        # "RS_3M_vs_N500"
+    ]
+    df_out = df_out[final_cols]
+
+    # df_out["Blended_Rank"] = df_out["Blended_Rank"].round(2)
+
+    FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = FINAL_RESULT_DIR / OUT_FILENAME
+    # openpyxl required for .xlsx write on most pandas installs
     df_out.to_excel(out_path, index=False, engine="openpyxl")
-except ImportError:
-    print("Missing dependency: pip install openpyxl")
-    raise
-print(f"Wrote {len(df_out)} rows -> {out_path}")
+
+    print(f"Success: Wrote {len(df_out)} rows to {out_path}")
+    print(f"Market_Regime={market_regime}")
+
+
+if __name__ == "__main__":
+    main()

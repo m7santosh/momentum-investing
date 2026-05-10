@@ -120,10 +120,11 @@ df_summary['Rank_2W'] = df_summary['Return_2W'].rank(ascending=False)
 df_summary['Rank_1W'] = df_summary['Return_1W'].rank(ascending=False)
 
 # Final rank: 30% Rank_1W + 30% Rank_2W + 40% Rank_1M (lower = better after sort_values on this sum)
+# more importance to recent performance
 df_summary['Final_Rank'] = (
-    0.3 * df_summary['Rank_1W']
-    + 0.3 * df_summary['Rank_2W']
-    + 0.4 * df_summary['Rank_1M']
+    0.4 * df_summary['Rank_1W']
+    + 0.4 * df_summary['Rank_2W']
+    + 0.2 * df_summary['Rank_1M']
 )
 
 # Sort by final rank and get top 10
