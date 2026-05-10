@@ -62,6 +62,24 @@ def _coerce_run_as_of_config(value: object) -> date | None:
     raise TypeError(f"RUN_AS_OF must be None, date, datetime, or YYYY-MM-DD str, got {type(value).__name__}")
 
 
+def _parse_session_date_label(value: object) -> date | None:
+    """Parse ``run_as_of`` from saved JSON (YYYY-MM-DD or ISO datetime prefix)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if "T" in s:
+        try:
+            return datetime.fromisoformat(s.replace("Z", "")).date()
+        except ValueError:
+            return None
+    try:
+        return datetime.strptime(s[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 # Lookback periods (Sessions)
 LB_1M = 21
 LB_3M = 63
@@ -216,6 +234,11 @@ def _adj_close_series(df: pd.DataFrame) -> pd.Series:
     s = df["Adj Close"]
     return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
 
+
+def _raw_close_series(df: pd.DataFrame) -> pd.Series:
+    s = df["Close"]
+    return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
+
 def get_data(ticker: str, start_date, end_date):
     return yf.download(ticker, start=start_date, end=end_date, multi_level_index=False, auto_adjust=False, progress=False)
 
@@ -283,6 +306,10 @@ def _compute_ranked_universe_for_session(session_as_of: date, *, quiet: bool = F
 
             vol_score = adj.pct_change().tail(21).std() * 100
 
+            raw_close = _raw_close_series(df)
+            last_adj_close = float(adj.iloc[-1])
+            last_close = float(raw_close.iloc[-1])
+
             nx = nifty_adj.reindex(adj.index).ffill()
             rs_3m = ret_3m - ((nx.iloc[-1] / nx.iloc[-LB_3M] - 1) * 100)
             rs_6m = ret_6m - ((nx.iloc[-1] / nx.iloc[-LB_6M] - 1) * 100)
@@ -293,6 +320,8 @@ def _compute_ranked_universe_for_session(session_as_of: date, *, quiet: bool = F
                     "Symbol": _symbol_for_excel(sym),
                     "Industry": industry_by_symbol.get(sym, ""),
                     "Marketcap": marketcap_by_symbol.get(sym, ""),
+                    "Adj_Close": last_adj_close,
+                    "Close": last_close,
                     "ADTV_Cr": adtv_crores,
                     "Return_1M": ret_1m,
                     "Return_3M": ret_3m,
@@ -380,8 +409,16 @@ def _parse_state_archive_timestamp(path: Path) -> datetime | None:
         return None
 
 
-def resolve_rebalance_baseline(as_of: date, compare_period: str) -> tuple[list[str], str, str, str]:
-    """IN/OUT baseline: (top_symbols, description, prev_saved_at, prev_run_as_of display).
+def resolve_rebalance_baseline(
+    as_of: date, compare_period: str
+) -> tuple[list[str], str, str, str, date | None, pd.DataFrame | None]:
+    """IN/OUT baseline: (symbols, description, prev_saved_at, prev_run_as_of, baseline_price_session, df_baseline_cached).
+
+    ``baseline_price_session`` is the calendar date for baseline **closes** (from JSON ``run_as_of`` or
+    computed ``as_of − N``), vs current session ``as_of``.
+
+    ``df_baseline_cached`` is set only when this function already computed the ranked universe for the
+    baseline session (archive miss path); otherwise ``None`` and callers may fetch once.
 
     ``each_run`` → latest ``quality_momentum_portfolio_state.json`` only.
 
@@ -403,26 +440,32 @@ def resolve_rebalance_baseline(as_of: date, compare_period: str) -> tuple[list[s
     if period in ("each_run", "last_run", ""):
         s = load_portfolio_state()
         if s is None:
-            return [], "each_run: no latest state file", "", ""
+            return [], "each_run: no latest state file", "", "", None, None
         syms = list(s.get("top_portfolio_symbols") or [])
+        ra = str(s.get("run_as_of") or "")
         return (
             syms,
             "each_run: latest quality_momentum_portfolio_state.json",
             str(s.get("saved_at") or ""),
-            str(s.get("run_as_of") or ""),
+            ra,
+            _parse_session_date_label(s.get("run_as_of")),
+            None,
         )
 
     days = {"weekly": 7, "biweekly": 14, "monthly": 30}.get(period)
     if days is None:
         s = load_portfolio_state()
         if s is None:
-            return [], f"unknown rebalance period={compare_period!r}; no state file", "", ""
+            return [], f"unknown rebalance period={compare_period!r}; no state file", "", "", None, None
         syms = list(s.get("top_portfolio_symbols") or [])
+        ra = str(s.get("run_as_of") or "")
         return (
             syms,
             f"unknown rebalance period={compare_period!r}; using latest state file",
             str(s.get("saved_at") or ""),
-            str(s.get("run_as_of") or ""),
+            ra,
+            _parse_session_date_label(s.get("run_as_of")),
+            None,
         )
 
     anchor = datetime.combine(as_of, datetime.min.time())
@@ -453,11 +496,14 @@ def resolve_rebalance_baseline(as_of: date, compare_period: str) -> tuple[list[s
     if archive_state is not None:
         syms = list(archive_state.get("top_portfolio_symbols") or [])
         if syms:
+            ra = str(archive_state.get("run_as_of") or "")
             return (
                 syms,
                 archive_desc,
                 str(archive_state.get("saved_at") or ""),
-                str(archive_state.get("run_as_of") or ""),
+                ra,
+                _parse_session_date_label(archive_state.get("run_as_of")),
+                None,
             )
 
     baseline_as_of = as_of - timedelta(days=days)
@@ -472,6 +518,8 @@ def resolve_rebalance_baseline(as_of: date, compare_period: str) -> tuple[list[s
             f"{period}: no archive and empty ranking for baseline session {baseline_as_of}",
             "(computed)",
             str(baseline_as_of),
+            baseline_as_of,
+            None,
         )
     syms = df_b.head(PORTFOLIO_SIZE)["Symbol"].tolist()
     return (
@@ -479,6 +527,8 @@ def resolve_rebalance_baseline(as_of: date, compare_period: str) -> tuple[list[s
         f"{period}: computed baseline as-of {baseline_as_of} (n_ranked={len(df_b)}; archive cutoff {cutoff:%Y-%m-%d %H:%M:%S})",
         datetime.now().isoformat(timespec="seconds"),
         str(baseline_as_of),
+        baseline_as_of,
+        df_b,
     )
 
 
@@ -518,23 +568,111 @@ def save_portfolio_state(
     return latest, archive_path
 
 
+def rebalance_symbol_prices(df_ranked: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
+    """Ordered rows Symbol, Adj_Close, Close for symbols (session last bar prices from df_ranked)."""
+    if not symbols:
+        return pd.DataFrame(columns=["Symbol", "Adj_Close", "Close"])
+    by_sym = df_ranked.set_index("Symbol")
+    rows: list[dict] = []
+    for sym in symbols:
+        if sym not in by_sym.index:
+            rows.append({"Symbol": sym, "Adj_Close": None, "Close": None})
+            continue
+        r = by_sym.loc[sym]
+        rows.append(
+            {
+                "Symbol": sym,
+                "Adj_Close": round(float(r["Adj_Close"]), 2) if pd.notna(r.get("Adj_Close")) else None,
+                "Close": round(float(r["Close"]), 2) if pd.notna(r.get("Close")) else None,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def baseline_vs_current_price_table(
+    symbols: list[str],
+    df_baseline: pd.DataFrame | None,
+    df_current: pd.DataFrame,
+) -> pd.DataFrame:
+    """Per symbol: Adj/Close at baseline session vs current session (from ranked universe frames)."""
+    cols = [
+        "Symbol",
+        "Baseline_Adj_Close",
+        "Baseline_Close",
+        "Current_Adj_Close",
+        "Current_Close",
+    ]
+    if not symbols:
+        return pd.DataFrame(columns=cols)
+    by_cur = df_current.set_index("Symbol")
+    by_base = df_baseline.set_index("Symbol") if df_baseline is not None and len(df_baseline) else None
+    rows: list[dict] = []
+    for sym in symbols:
+        row: dict = {
+            "Symbol": sym,
+            "Baseline_Adj_Close": None,
+            "Baseline_Close": None,
+            "Current_Adj_Close": None,
+            "Current_Close": None,
+        }
+        if by_base is not None and sym in by_base.index:
+            br = by_base.loc[sym]
+            row["Baseline_Adj_Close"] = (
+                round(float(br["Adj_Close"]), 2) if pd.notna(br.get("Adj_Close")) else None
+            )
+            row["Baseline_Close"] = round(float(br["Close"]), 2) if pd.notna(br.get("Close")) else None
+        if sym in by_cur.index:
+            cr = by_cur.loc[sym]
+            row["Current_Adj_Close"] = (
+                round(float(cr["Adj_Close"]), 2) if pd.notna(cr.get("Adj_Close")) else None
+            )
+            row["Current_Close"] = round(float(cr["Close"]), 2) if pd.notna(cr.get("Close")) else None
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def prev_holdings_rebalance_table(
     df_ranked: pd.DataFrame,
     prev_symbols: list[str],
     current_top_portfolio: set[str],
+    df_baseline_ranked: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Each prior holding: rank in full filtered universe, still in top book?, rank within exit monitor."""
+    """Each prior holding: baseline vs current closes, rank this session, exit monitor flags."""
     if not prev_symbols:
         return pd.DataFrame(
-            columns=["Symbol", "Current_Rank", "In_top_portfolio", "Within_exit_rank_band", "Note"]
+            columns=[
+                "Symbol",
+                "Baseline_Adj_Close",
+                "Baseline_Close",
+                "Current_Adj_Close",
+                "Current_Close",
+                "Current_Rank",
+                "In_top_portfolio",
+                "Within_exit_rank_band",
+                "Note",
+            ]
         )
     by_sym = df_ranked.set_index("Symbol")
+    by_base = (
+        df_baseline_ranked.set_index("Symbol")
+        if df_baseline_ranked is not None and len(df_baseline_ranked)
+        else None
+    )
     rows = []
     for sym in prev_symbols:
+        base_adj = base_cls = None
+        if by_base is not None and sym in by_base.index:
+            br = by_base.loc[sym]
+            base_adj = round(float(br["Adj_Close"]), 2) if pd.notna(br.get("Adj_Close")) else None
+            base_cls = round(float(br["Close"]), 2) if pd.notna(br.get("Close")) else None
         if sym not in by_sym.index:
             rows.append(
                 {
                     "Symbol": sym,
+                    "Baseline_Adj_Close": base_adj,
+                    "Baseline_Close": base_cls,
+                    "Current_Adj_Close": None,
+                    "Current_Close": None,
                     "Current_Rank": None,
                     "In_top_portfolio": "N",
                     "Within_exit_rank_band": "N",
@@ -542,12 +680,17 @@ def prev_holdings_rebalance_table(
                 }
             )
             continue
-        rp = int(by_sym.loc[sym, "Rank_Position"])
+        r = by_sym.loc[sym]
+        rp = int(r["Rank_Position"])
         in_top = "Y" if sym in current_top_portfolio else "N"
         within = "Y" if rp <= EXIT_RANK_THRESHOLD else "N"
         rows.append(
             {
                 "Symbol": sym,
+                "Baseline_Adj_Close": base_adj,
+                "Baseline_Close": base_cls,
+                "Current_Adj_Close": round(float(r["Adj_Close"]), 2) if pd.notna(r.get("Adj_Close")) else None,
+                "Current_Close": round(float(r["Close"]), 2) if pd.notna(r.get("Close")) else None,
                 "Current_Rank": rp,
                 "In_top_portfolio": in_top,
                 "Within_exit_rank_band": within,
@@ -562,9 +705,23 @@ def _excel_rows_used(n_data_rows: int) -> int:
     return 1 + n_data_rows
 
 
+def _rebalance_section_title(
+    writer: pd.ExcelWriter, sheet_name: str, title: str, startrow: int
+) -> int:
+    """One full-width title row + one blank row before the next table."""
+    pd.DataFrame([[title]]).to_excel(
+        writer, sheet_name=sheet_name, index=False, header=False, startrow=startrow
+    )
+    return startrow + 2
+
+
 def write_weekly_rebalance_sheet(
     writer: pd.ExcelWriter,
     *,
+    df_ranked: pd.DataFrame,
+    df_baseline_ranked: pd.DataFrame | None,
+    baseline_price_session: date | None,
+    current_top_syms: list[str],
     prev_saved_at: str,
     prev_run_as_of: str,
     current_run_as_of: str,
@@ -581,6 +738,7 @@ def write_weekly_rebalance_sheet(
         {
             "Field": [
                 "Session_date (effective)",
+                "Baseline_price_session",
                 "Rebalance_period (effective)",
                 "RUN_AS_OF (file default)",
                 "REBALANCE_COMPARE_PERIOD (file default)",
@@ -594,6 +752,7 @@ def write_weekly_rebalance_sheet(
             ],
             "Value": [
                 current_run_as_of,
+                str(baseline_price_session) if baseline_price_session else "(none)",
                 rebalance_compare_period,
                 str(RUN_AS_OF) if RUN_AS_OF else "(None)",
                 REBALANCE_COMPARE_PERIOD,
@@ -610,30 +769,81 @@ def write_weekly_rebalance_sheet(
     meta.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
     row += _excel_rows_used(len(meta)) + 1
 
-    df_prev = pd.DataFrame(
-        {
-            "Previous_top_holdings": prev_symbols
-            if prev_symbols
-            else ["(none — first run; no IN/OUT yet)"]
-        }
+    row = _rebalance_section_title(
+        writer,
+        sheet_name,
+        f"1) Current session — top {PORTFOLIO_SIZE} portfolio (this run, session {current_run_as_of})",
+        row,
     )
+    if current_top_syms:
+        df_cur = rebalance_symbol_prices(df_ranked, current_top_syms)
+    else:
+        df_cur = pd.DataFrame(
+            {"Symbol": ["(empty)"], "Adj_Close": [None], "Close": [None]}
+        )
+    df_cur.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
+    row += _excel_rows_used(len(df_cur)) + 1
+
+    ba = str(baseline_price_session) if baseline_price_session else "n/a"
+    row = _rebalance_section_title(
+        writer,
+        sheet_name,
+        f"2) Previous baseline — IN/OUT symbols: Adj/Close at baseline session {ba} vs current session {current_run_as_of}",
+        row,
+    )
+    if prev_symbols:
+        df_prev = baseline_vs_current_price_table(prev_symbols, df_baseline_ranked, df_ranked)
+    else:
+        df_prev = pd.DataFrame(
+            {
+                "Symbol": ["(none — first run or no baseline list)"],
+                "Baseline_Adj_Close": [None],
+                "Baseline_Close": [None],
+                "Current_Adj_Close": [None],
+                "Current_Close": [None],
+            }
+        )
     df_prev.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
     row += _excel_rows_used(len(df_prev)) + 1
 
-    df_in = pd.DataFrame(
-        {"Coming_into_portfolio": coming_in if coming_in else ["(none)"]}
+    row = _rebalance_section_title(
+        writer,
+        sheet_name,
+        "3) Entering top portfolio — new names vs previous baseline",
+        row,
     )
+    if coming_in:
+        df_in = rebalance_symbol_prices(df_ranked, coming_in)
+    else:
+        df_in = pd.DataFrame({"Symbol": ["(none)"], "Adj_Close": [None], "Close": [None]})
     df_in.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
     row += _excel_rows_used(len(df_in)) + 1
 
-    df_outm = pd.DataFrame(
-        {"Leaving_portfolio": going_out if going_out else ["(none)"]}
+    row = _rebalance_section_title(
+        writer,
+        sheet_name,
+        "4) Leaving top portfolio — names that dropped out of top vs previous baseline",
+        row,
     )
+    if going_out:
+        df_outm = rebalance_symbol_prices(df_ranked, going_out)
+    else:
+        df_outm = pd.DataFrame({"Symbol": ["(none)"], "Adj_Close": [None], "Close": [None]})
     df_outm.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
     row += _excel_rows_used(len(df_outm)) + 1
 
+    row = _rebalance_section_title(
+        writer,
+        sheet_name,
+        f"5) Each previous baseline name — baseline vs current closes, rank at {current_run_as_of} (exit monitor)",
+        row,
+    )
     if not df_prev_status.empty:
         df_prev_status.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
+    else:
+        pd.DataFrame([["(No prior baseline list — nothing to track here)"]]).to_excel(
+            writer, sheet_name=sheet_name, index=False, header=False, startrow=row
+        )
 
 
 def main(
@@ -666,9 +876,23 @@ def main(
     current_top_syms = df_ranked.head(PORTFOLIO_SIZE)["Symbol"].tolist()
     current_top_set = set(current_top_syms)
 
-    prev_syms, rebalance_baseline_desc, prev_saved_at, prev_run_as_of = resolve_rebalance_baseline(
-        as_of_day, rebalance_effective
-    )
+    (
+        prev_syms,
+        rebalance_baseline_desc,
+        prev_saved_at,
+        prev_run_as_of,
+        baseline_price_session,
+        df_baseline_cached,
+    ) = resolve_rebalance_baseline(as_of_day, rebalance_effective)
+
+    df_baseline_ranked: pd.DataFrame | None = None
+    if prev_syms and baseline_price_session is not None:
+        if df_baseline_cached is not None:
+            df_baseline_ranked = df_baseline_cached
+        elif baseline_price_session == as_of_day:
+            df_baseline_ranked = df_ranked
+        else:
+            df_baseline_ranked = _compute_ranked_universe_for_session(baseline_price_session, quiet=True)
 
     if prev_syms:
         coming_in = sorted(set(current_top_syms) - set(prev_syms))
@@ -677,7 +901,9 @@ def main(
         coming_in = []
         going_out = []
 
-    df_prev_status = prev_holdings_rebalance_table(df_ranked, prev_syms, current_top_set)
+    df_prev_status = prev_holdings_rebalance_table(
+        df_ranked, prev_syms, current_top_set, df_baseline_ranked=df_baseline_ranked
+    )
 
     # Portfolio mix: only the top PORTFOLIO_SIZE names (actual book), not the extended ranked list
     df_portfolio_slice = df_ranked.head(PORTFOLIO_SIZE)
@@ -697,7 +923,17 @@ def main(
     df_out.drop(columns=["Rank_Position"], inplace=True, errors="ignore")
 
     # Round columns for clean Excel output
-    round_cols = ["ADTV_Cr", "Blended_Rank", "Volatility_Score", "Return_1M", "Return_3M", "Return_6M", "Return_9M"]
+    round_cols = [
+        "ADTV_Cr",
+        "Blended_Rank",
+        "Volatility_Score",
+        "Adj_Close",
+        "Close",
+        "Return_1M",
+        "Return_3M",
+        "Return_6M",
+        "Return_9M",
+    ]
     for c in round_cols:
         if c in df_out.columns:
             df_out[c] = df_out[c].round(2)
@@ -708,11 +944,13 @@ def main(
         "Symbol",
         "Industry",
         "Marketcap",
+        "Adj_Close",
+        "Close",
         # "Blended_Rank",
-        "ADTV_Cr", 
-        "Volatility_Score", 
-        "Return_1M", 
-        "Return_3M", 
+        "ADTV_Cr",
+        "Volatility_Score",
+        "Return_1M",
+        "Return_3M",
         "Return_6M",
         "Return_9M",
         # "RS_3M_vs_Bench",
@@ -742,7 +980,10 @@ def main(
     print("\n--- Rebalance vs baseline ---")
     print(f"Compare mode: {rebalance_effective} — {rebalance_baseline_desc}")
     if prev_syms:
-        print(f"Baseline run as_of: {prev_run_as_of} (state saved: {prev_saved_at})")
+        print(
+            f"Baseline run as_of: {prev_run_as_of} (state saved: {prev_saved_at}); "
+            f"closes vs current: baseline session {baseline_price_session or 'n/a'} vs {run_as_of}"
+        )
         print(f"Baseline top {PORTFOLIO_SIZE} holdings: {', '.join(prev_syms)}")
         print(f"Coming into portfolio ({len(coming_in)}): {', '.join(coming_in) if coming_in else '(none)'}")
         print(f"Leaving portfolio ({len(going_out)}): {', '.join(going_out) if going_out else '(none)'}")
@@ -758,6 +999,10 @@ def main(
         write_combined_portfolio_summary_sheet(writer, df_portfolio_mcap, df_portfolio_industry)
         write_weekly_rebalance_sheet(
             writer,
+            df_ranked=df_ranked,
+            df_baseline_ranked=df_baseline_ranked,
+            baseline_price_session=baseline_price_session,
+            current_top_syms=current_top_syms,
             prev_saved_at=prev_saved_at,
             prev_run_as_of=prev_run_as_of,
             current_run_as_of=run_as_of,
