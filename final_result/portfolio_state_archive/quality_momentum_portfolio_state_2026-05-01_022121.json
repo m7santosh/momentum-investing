@@ -1,0 +1,31 @@
+{
+  "saved_at": "2026-05-11T02:21:21",
+  "run_as_of": "2026-05-01",
+  "run_as_of_is_historical": true,
+  "portfolio_size": 20,
+  "output_ranked_size": 30,
+  "exit_rank_threshold": 30,
+  "rebalance_compare_period": "monthly",
+  "top_portfolio_symbols": [
+    "APARINDS",
+    "ABB",
+    "ENGINERSIN",
+    "CUMMINSIND",
+    "FINCABLES",
+    "MAHABANK",
+    "SONACOMS",
+    "ABSLAMC",
+    "KEI",
+    "NMDC",
+    "PRAJIND",
+    "ANGELONE",
+    "NAM-INDIA",
+    "OFSS",
+    "COALINDIA",
+    "GPIL",
+    "NESTLEIND",
+    "ELGIEQUIP",
+    "JBCHEPHARM",
+    "POLYCAB"
+  ]
+}
