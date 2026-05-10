@@ -318,6 +318,7 @@ tickers = [
     {"symbol": "ZYDUSLIFE.NS", "industry": "Healthcare"},
 ]
 
+# --- Helper Functions ---
 
 def _symbol_for_excel(yahoo_ticker: str) -> str:
     return yahoo_ticker.replace(".NS", "").replace(".BO", "")
