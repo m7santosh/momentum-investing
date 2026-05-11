@@ -5,6 +5,9 @@ Filters:
 1. Trend: Price must be above 200-day EMA.
 2. Proximity: Price must be within 30% of its 52-week high.
 3. Liquidity: Average Daily Turnover (ADTV) must be > 5 Crores INR.
+4. Low volatility: Among names passing 1–3, keep those with Volatility_Score at or below the
+   LOW_VOLATILITY_MAX_QUANTILE cross-sectional cutoff (21d adj-close daily return stdev %).
+   Override: env QUALITY_RS_LV_MAX_QUANTILE in (0, 1] (e.g. 0.5 = bottom half only).
 
 Blended Ranking Logic:
 - Abs_Momentum_Rank: Weighted rank on raw returns (0.50·3M + 0.30·6M + 0.20·9M).
@@ -33,6 +36,9 @@ from utils.output_paths import FINAL_RESULT_DIR
 # --- Configuration ---
 BENCHMARK_TICKER = "^CRSLDX"
 MIN_ADTV_CRORES = 5.0  # Minimum 5 Crores daily trading volume
+# After trend/liquidity: keep symbols with Volatility_Score <= universe quantile (lower vol = calmer tape).
+LOW_VOLATILITY_MAX_QUANTILE = 0.67
+LOW_VOLATILITY_MIN_UNIVERSE = 8  # skip vol filter if fewer names (stable quantile needs breadth)
 PORTFOLIO_SIZE = 20  # Holdings size: mix summaries (Marketcap / Industry) use top N by Blended_Rank only
 OUTPUT_RANKED_SIZE = 30  # Rows in Excel Sheet1: extend past portfolio to spot weaker names before rebalance
 EXIT_RANK_THRESHOLD = 30  # Exit monitor: previous holding with universe rank above this → review / exit line
@@ -306,6 +312,45 @@ def _pct_change_vs_baseline(
     return round((c / b - 1.0) * 100.0, 2)
 
 
+def _effective_low_vol_max_quantile() -> float:
+    raw = (os.environ.get("QUALITY_RS_LV_MAX_QUANTILE") or "").strip()
+    if not raw:
+        return float(LOW_VOLATILITY_MAX_QUANTILE)
+    v = float(raw)
+    if not (0 < v <= 1):
+        raise ValueError(
+            "QUALITY_RS_LV_MAX_QUANTILE must be a float in (0, 1], got " + repr(raw)
+        )
+    return v
+
+
+def _apply_low_volatility_filter(
+    df_summary: pd.DataFrame, *, quiet: bool
+) -> pd.DataFrame:
+    """Drop high-volatility names using cross-sectional quantile of Volatility_Score."""
+    if df_summary.empty:
+        return df_summary
+    vs = df_summary["Volatility_Score"]
+    valid = vs.dropna()
+    n0 = len(df_summary)
+    if len(valid) < LOW_VOLATILITY_MIN_UNIVERSE:
+        if not quiet:
+            print(
+                f"Low-vol filter skipped: only {len(valid)} valid Volatility_Score rows "
+                f"(need >= {LOW_VOLATILITY_MIN_UNIVERSE})."
+            )
+        return df_summary
+    q = _effective_low_vol_max_quantile()
+    cap = float(valid.quantile(q))
+    out = df_summary.loc[vs.notna() & (vs <= cap)].copy()
+    if not quiet:
+        print(
+            f"Low-vol filter: quantile={q:.3f}, cutoff Volatility_Score<={cap:.4f} "
+            f"→ {len(out)}/{n0} names."
+        )
+    return out
+
+
 def _apply_ranking_engine(df_summary: pd.DataFrame) -> pd.DataFrame:
     df = df_summary.copy()
     for c in ["3M", "6M", "9M"]:
@@ -401,6 +446,9 @@ def _compute_ranked_universe_for_session(session_as_of: date, *, quiet: bool = F
                 print(f"Error analyzing {sym}: {e}")
 
     df_summary = pd.DataFrame(summary)
+    if df_summary.empty:
+        return None
+    df_summary = _apply_low_volatility_filter(df_summary, quiet=quiet)
     if df_summary.empty:
         return None
     return _apply_ranking_engine(df_summary)
@@ -612,6 +660,7 @@ def save_portfolio_state(
         "portfolio_size": PORTFOLIO_SIZE,
         "output_ranked_size": OUTPUT_RANKED_SIZE,
         "exit_rank_threshold": EXIT_RANK_THRESHOLD,
+        "low_volatility_max_quantile": _effective_low_vol_max_quantile(),
         "rebalance_compare_period": rebalance_compare_period,
         "top_portfolio_symbols": top_portfolio_symbols,
     }
@@ -844,6 +893,7 @@ def write_weekly_rebalance_sheet(
                 "PORTFOLIO_SIZE",
                 "OUTPUT_RANKED_SIZE",
                 "EXIT_RANK_THRESHOLD",
+                "LOW_VOLATILITY_MAX_QUANTILE (effective)",
             ],
             "Value": [
                 current_run_as_of,
@@ -858,6 +908,7 @@ def write_weekly_rebalance_sheet(
                 PORTFOLIO_SIZE,
                 OUTPUT_RANKED_SIZE,
                 EXIT_RANK_THRESHOLD,
+                _effective_low_vol_max_quantile(),
             ],
         }
     )
@@ -1006,7 +1057,7 @@ def main(
 
     df_ranked = _compute_ranked_universe_for_session(as_of_day, quiet=False)
     if df_ranked is None or len(df_ranked) == 0:
-        print("No stocks passed the trend and liquidity filters.")
+        print("No stocks passed the trend, liquidity, and low-volatility filters.")
         return
 
     current_top_syms = df_ranked.head(PORTFOLIO_SIZE)["Symbol"].tolist()
@@ -1111,7 +1162,7 @@ def main(
     # 3. ADTV_Cr: Ensures you can sell your position. Never buy more than 1% of this value.
 
     FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = FINAL_RESULT_DIR / "quality_momentum_rs_dynamic.xlsx"
+    out_path = FINAL_RESULT_DIR / "quality_momentum_rs_lv.xlsx"
 
     print(f"\nPortfolio summary (holdings = top {PORTFOLIO_SIZE} by Blended_Rank, by Marketcap):")
     for _, r in df_portfolio_mcap.iterrows():
