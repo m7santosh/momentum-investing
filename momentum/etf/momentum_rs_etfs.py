@@ -39,11 +39,11 @@ import sys
 from pathlib import Path
 
 # Setup project root for utility imports
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from utils.output_paths import FINAL_RESULT_DIR
+from utils.output_paths import FINAL_RESULT_ETF_DIR
 
 # --- Configuration ---
 BENCHMARK_TICKER = "^CRSLDX"
@@ -296,8 +296,8 @@ def main() -> None:
 
     # df_out["Blended_Rank"] = df_out["Blended_Rank"].round(2)
 
-    FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = FINAL_RESULT_DIR / OUT_FILENAME
+    FINAL_RESULT_ETF_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = FINAL_RESULT_ETF_DIR / OUT_FILENAME
     # openpyxl required for .xlsx write on most pandas installs
     df_out.to_excel(out_path, index=False, engine="openpyxl")
 

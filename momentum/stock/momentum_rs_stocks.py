@@ -1,26 +1,46 @@
+"""
+Stock relative strength vs Nifty LargeMidcap 250 (NIFTY_LARGEMID250.NS).
+
+Filters:
+1. Trend: Price must be above 200-day EMA.
+2. Proximity: Price must be within 30% of its 52-week high.
+3. Liquidity: Average Daily Turnover (ADTV) must be > 5 Crores INR.
+
+Blended Ranking Logic:
+- Abs_Momentum_Rank: Weighted rank on raw returns (0.50·3M + 0.30·6M + 0.20·9M).
+- Relative_Strength_Rank: Weighted rank on RS vs Benchmark (0.50·3M + 0.30·6M + 0.20·9M).
+- Blended_Rank: Average of the above two. Lower is better.
+- Volatility_Score: Standard deviation of last 21 days (lower = smoother trend).
+"""
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-
 import sys
 from pathlib import Path
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Setup project root for utility imports
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from utils.output_paths import FINAL_RESULT_DIR
+from utils.output_paths import FINAL_RESULT_DIR, FINAL_RESULT_STOCK_DIR
 
+# --- Configuration ---
+BENCHMARK_TICKER = "^CRSLDX"
+MIN_ADTV_CRORES = 5.0  # Minimum 5 Crores daily trading volume
 
-def _symbol_for_excel(yahoo_ticker: str) -> str:
-    """Strip Yahoo India suffix for display (NSE .NS / BSE .BO)."""
-    if yahoo_ticker.endswith(".NS"):
-        return yahoo_ticker[: -len(".NS")]
-    if yahoo_ticker.endswith(".BO"):
-        return yahoo_ticker[: -len(".BO")]
-    return yahoo_ticker
+# Lookback periods (Sessions)
+LB_1M = 21
+LB_3M = 63
+LB_6M = 126
+LB_9M = 189
 
-# BSE LargeMidcap 250 EQ constituents
+# Weights for Ranking (Focusing on the 3M trend for stocks)
+W_3M, W_6M, W_9M = 0.50, 0.30, 0.20
+
+# --- Ticker Universe (Nifty LargeMidcap 250) ---
 tickers = [
     {"symbol": "360ONE.NS", "industry": "Financial Services"},
     {"symbol": "3MINDIA.NS", "industry": "Diversified"},
@@ -298,131 +318,151 @@ tickers = [
     {"symbol": "ZYDUSLIFE.NS", "industry": "Healthcare"},
 ]
 
+# --- Helper Functions ---
 
-# Function to fetch historical data
-def get_data(ticker, start_date, end_date):
-    return yf.download(
-        ticker,
-        start=start_date,
-        end=end_date,
-        multi_level_index=False,
-        auto_adjust=False,
-        progress=False,
-    )
+def _symbol_for_excel(yahoo_ticker: str) -> str:
+    return yahoo_ticker.replace(".NS", "").replace(".BO", "")
 
-# Set dates
-end_date = datetime.today()
-start_date = end_date - timedelta(days=365 * 2)  # 2 year of data for moving averages
+def _adj_close_series(df: pd.DataFrame) -> pd.Series:
+    s = df["Adj Close"]
+    return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
 
-# Data dictionary to hold stock data
-data = {}
+def get_data(ticker: str, start_date, end_date):
+    return yf.download(ticker, start=start_date, end=end_date, multi_level_index=False, auto_adjust=False, progress=False)
 
-# Fetch data for all tickers
-for t in tickers:
-    sym = t["symbol"]
+def main() -> None:
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=365 * 2)
+
+    # 1. Fetch Benchmark Data
     try:
-        stock_data = get_data(sym, start_date, end_date)
-        if len(stock_data) > 0:
-            data[sym] = stock_data
+        nifty_df = get_data(BENCHMARK_TICKER, start_date, end_date)
+        nifty_adj = _adj_close_series(nifty_df)
     except Exception as e:
-        print(f"Error fetching data for {sym}: {e}")
+        print(f"Error: Benchmark {BENCHMARK_TICKER} ({e})")
+        return
 
-industry_by_symbol = {t["symbol"]: t["industry"] for t in tickers}
+    # 2. Fetch Stock Data and Analyze
+    summary = []
+    industry_by_symbol = {t["symbol"]: t["industry"] for t in tickers}
 
-# Create a DataFrame for summary
-summary = []
+    for t in tickers:
+        sym = t["symbol"]
+        try:
+            df = get_data(sym, start_date, end_date)
+            if len(df) < LB_9M: continue
+            
+            adj = _adj_close_series(df)
+            vol = df["Volume"]
 
-# Analyze each stock
-for ticker, df in data.items():
-    try:
-        adj = df["Adj Close"]
-        if isinstance(adj, pd.DataFrame):
-            adj = adj.iloc[:, 0]
-        adj = adj.squeeze()
-        n = len(adj)
-        if n < 21:
-            continue
+            # --- LIQUIDITY FILTER ---
+            # Calculates the average daily value of shares traded in Crores.
+            daily_turnover = adj * vol
+            adtv_crores = (daily_turnover.tail(20).mean()) / 10000000
+            if adtv_crores < MIN_ADTV_CRORES: continue
 
-        df = df.copy()
-        df["EMA200"] = adj.ewm(span=200).mean()
+            # --- TREND FILTERS ---
+            ema200 = adj.ewm(span=200).mean().iloc[-1]
+            high_52w = adj.iloc[-min(252, len(adj)):].max()
+            
+            # Must be above 200 EMA and within 30% of 52w High
+            if adj.iloc[-1] < ema200 or adj.iloc[-1] < (high_52w * 0.7):
+                continue
 
-        # Last 1-year return (needs 252 sessions; newer listings may have less Yahoo history)
-        if n >= 252:
-            one_year_return = (adj.iloc[-1] / adj.iloc[-252] - 1) * 100
-        else:
-            one_year_return = float("nan")
+            # --- PERFORMANCE CALCULATIONS ---
+            ret_1m = (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100
+            ret_3m = (adj.iloc[-1] / adj.iloc[-LB_3M] - 1) * 100
+            ret_6m = (adj.iloc[-1] / adj.iloc[-LB_6M] - 1) * 100
+            ret_9m = (adj.iloc[-1] / adj.iloc[-LB_9M] - 1) * 100
 
-        # 52-week high (up to 252 sessions, or all available bars)
-        high_52_week = adj.iloc[-min(252, n) :].max()
-        within_25_pct_high = adj.iloc[-1] >= high_52_week * 0.75  # within 25% of the 52-week high
+            # --- VOLATILITY SCORE ---
+            # Measures the standard deviation of daily returns over the last month.
+            vol_score = adj.pct_change().tail(21).std() * 100
 
-        # More than 45% up days in the last 6 months (126 trading days)
-        six_month_data = adj.iloc[-126:]
-        up_days = (six_month_data.pct_change() > 0).sum()
-        up_days_pct = up_days / len(six_month_data) * 100  # percentage of up days
-
-        # Filtering criteria
-        if (
-            adj.iloc[-1] >= df["EMA200"].iloc[-1]
-            and one_year_return >= 6.5
-            and within_25_pct_high
-            and up_days_pct > 45
-        ):
-
-            # Calculate returns (guard lookbacks if history is ever borderline)
-            return_9m = (
-                (adj.iloc[-1] / adj.iloc[-189] - 1) * 100 if n >= 189 else float("nan")
-            )
-            return_6m = (
-                (adj.iloc[-1] / adj.iloc[-126] - 1) * 100 if n >= 126 else float("nan")
-            )
-            return_3m = (adj.iloc[-1] / adj.iloc[-63] - 1) * 100 if n >= 63 else float("nan")
-            return_1m = (adj.iloc[-1] / adj.iloc[-21] - 1) * 100 if n >= 21 else float("nan")
+            # --- RELATIVE STRENGTH ---
+            nx = nifty_adj.reindex(adj.index).ffill()
+            rs_3m = ret_3m - ((nx.iloc[-1] / nx.iloc[-LB_3M] - 1) * 100)
+            rs_6m = ret_6m - ((nx.iloc[-1] / nx.iloc[-LB_6M] - 1) * 100)
+            rs_9m = ret_9m - ((nx.iloc[-1] / nx.iloc[-LB_9M] - 1) * 100)
 
             summary.append({
-                "Symbol": _symbol_for_excel(ticker),
-                'Industry': industry_by_symbol.get(ticker, ''),
-                'Return_9M': return_9m,
-                'Return_6M': return_6m,
-                'Return_3M': return_3m,
-                'Return_1M': return_1m,
+                "Symbol": _symbol_for_excel(sym),
+                "Industry": industry_by_symbol.get(sym, ""),
+                "ADTV_Cr": adtv_crores,
+                "Return_1M": ret_1m, 
+                "Return_3M": ret_3m, 
+                "Return_6M": ret_6m, 
+                "Return_9M": ret_9m,
+                "RS_3M_vs_Bench": rs_3m, 
+                "RS_6M_vs_Bench": rs_6m, 
+                "RS_9M_vs_Bench": rs_9m,
+                "Volatility_Score": vol_score
             })
-    except Exception as e:
-        print(f"Error analyzing {ticker}: {e}")
+        except Exception as e:
+            print(f"Error analyzing {sym}: {e}")
 
-# Convert summary to DataFrame
-df_summary = pd.DataFrame(summary)
-if df_summary.empty:
-    print("No tickers passed filters; no Excel file written.")
-    raise SystemExit(0)
+    df_summary = pd.DataFrame(summary)
+    if df_summary.empty:
+        print("No stocks passed the trend and liquidity filters.")
+        return
 
-# Round off returns to 1 decimal place
-df_summary['Return_9M'] = df_summary['Return_9M'].round(1)
-df_summary['Return_6M'] = df_summary['Return_6M'].round(1)
-df_summary['Return_3M'] = df_summary['Return_3M'].round(1)
-df_summary['Return_1M'] = df_summary['Return_1M'].round(1)
+    # --- RANKING ENGINE ---
+    
+    # 1. Absolute Return Ranks
+    for c in ["3M", "6M", "9M"]:
+        df_summary[f"Rank_{c}"] = df_summary[f"Return_{c}"].rank(ascending=False)
+    
+    # 2. Relative Strength Ranks (na_option=bottom: missing RS → worst rank, avoids NaN in composites)
+    for c in ["3M", "6M", "9M"]:
+        df_summary[f"Rank_RS_{c}"] = df_summary[f"RS_{c}_vs_Bench"].rank(
+            ascending=False, na_option="bottom"
+        )
 
-# Ranking based on returns
-df_summary['Rank_9M'] = df_summary['Return_9M'].rank(ascending=False)
-df_summary['Rank_6M'] = df_summary['Return_6M'].rank(ascending=False)
-df_summary['Rank_3M'] = df_summary['Return_3M'].rank(ascending=False)
-#df_summary['Rank_1M'] = df_summary['Return_1M'].rank(ascending=False)
+    # 3. Composite Scoring
+    df_summary["Abs_Momentum_Rank"] = (W_3M*df_summary["Rank_3M"] + W_6M*df_summary["Rank_6M"] + W_9M*df_summary["Rank_9M"]).rank()
+    df_summary["Relative_Strength_Rank"] = (W_3M*df_summary["Rank_RS_3M"] + W_6M*df_summary["Rank_RS_6M"] + W_9M*df_summary["Rank_RS_9M"]).rank()
 
-# Calculate final rank
-df_summary['Final_Rank'] = 0.50*df_summary['Rank_3M'] + 0.30*df_summary['Rank_6M'] + 0.20*df_summary['Rank_9M'] # calculate the final rank based on the return in the last 3 months, 6 months and 9 months
+    # 4. BLENDED RANK (Average of Absolute and Relative Strength)
+    df_summary["Blended_Rank"] = (df_summary["Abs_Momentum_Rank"] + df_summary["Relative_Strength_Rank"]) / 2
 
-# Sort by final rank and get top 30
-df_summary_sorted = df_summary.sort_values('Final_Rank').head(30)
+    # --- FINAL OUTPUT ---
+    
+    # Sort by Blended Rank
+    df_out = df_summary.sort_values("Blended_Rank").head(30).reset_index(drop=True)
+    df_out.insert(0, "Position", np.arange(1, len(df_out) + 1))
 
-# Assign position based on final rank
-df_summary_sorted['Position'] = np.arange(1, len(df_summary_sorted) + 1)
+    # Round columns for clean Excel output
+    round_cols = ["ADTV_Cr", "Blended_Rank", "Volatility_Score", "Return_1M", "Return_3M", "Return_6M", "Return_9M"]
+    for c in round_cols: df_out[c] = df_out[c].round(2)
 
-FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
-out_path = FINAL_RESULT_DIR / "momentum_stocks_ranked.xlsx"
-try:
-    df_summary_sorted.to_excel(out_path, index=False, engine="openpyxl")
-except ImportError:
-    print("Missing dependency: pip install openpyxl")
-    raise
-print(f"Wrote {len(df_summary_sorted)} rows -> {out_path}")
+    # Final Column Selection
+    final_cols = [
+        "Position", 
+        "Symbol", 
+        "Industry", 
+        # "Blended_Rank", 
+        "ADTV_Cr", 
+        "Volatility_Score", 
+        "Return_1M", 
+        "Return_3M", 
+        "Return_6M",
+        "Return_9M",
+        # "RS_3M_vs_Bench",
+        # "RS_6M_vs_Bench",
+        # "RS_9M_vs_Bench",
+    ]
+    
+    # DECISION RULES COMMENTED FOR EXCEL OUTPUT:
+    # 1. BLENDED_RANK: Primary factor. Shows stocks leading the market and rising.
+    # 2. VOLATILITY_SCORE: 
+    #    - < 1.8: Very steady trend (institutional quality).
+    #    - > 3.0: Very jumpy (high risk of a "pump and dump" or news spike pullback).
+    # 3. ADTV_Cr: Ensures you can sell your position. Never buy more than 1% of this value.
 
+    FINAL_RESULT_STOCK_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = FINAL_RESULT_STOCK_DIR / "stocks_momentum_final.xlsx"
+    df_out[final_cols].to_excel(out_path, index=False)
+    print(f"Success: Wrote top {len(df_out)} stocks to {out_path}")
+
+if __name__ == "__main__":
+    main()

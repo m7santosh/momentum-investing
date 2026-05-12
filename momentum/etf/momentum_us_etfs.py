@@ -9,11 +9,11 @@ from datetime import datetime, timedelta
 
 import sys
 from pathlib import Path
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from utils.output_paths import FINAL_RESULT_DIR
+from utils.output_paths import FINAL_RESULT_ETF_DIR
 
 
 # Universe: US ETFs/indices on Yahoo
@@ -112,8 +112,8 @@ df_summary_sorted = df_summary.sort_values('Final_Rank').head(10) # get the top 
 # Assign position based on final rank
 df_summary_sorted['Position'] = np.arange(1, len(df_summary_sorted) + 1) # assign the position based on the final rank
 
-FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
-out_path = FINAL_RESULT_DIR / "momentum_us_etfs_ranked.xlsx"
+FINAL_RESULT_ETF_DIR.mkdir(parents=True, exist_ok=True)
+out_path = FINAL_RESULT_ETF_DIR / "momentum_us_etfs_ranked.xlsx"
 try:
     df_summary_sorted.to_excel(out_path, index=False, engine="openpyxl")
 except ImportError:

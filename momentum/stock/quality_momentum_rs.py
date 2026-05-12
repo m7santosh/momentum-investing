@@ -21,11 +21,11 @@ import sys
 from pathlib import Path
 
 # Setup project root for utility imports
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from utils.output_paths import FINAL_RESULT_DIR
+from utils.output_paths import FINAL_RESULT_DIR, FINAL_RESULT_STOCK_DIR
 
 # --- Configuration ---
 BENCHMARK_TICKER = "^CRSLDX"
@@ -378,8 +378,8 @@ def main() -> None:
     #    - > 3.0: Very jumpy (high risk of a "pump and dump" or news spike pullback).
     # 3. ADTV_Cr: Ensures you can sell your position. Never buy more than 1% of this value.
 
-    FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = FINAL_RESULT_DIR / "quality_momentum_rs.xlsx"
+    FINAL_RESULT_STOCK_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = FINAL_RESULT_STOCK_DIR / "quality_momentum_rs.xlsx"
 
     print(f"\nPortfolio summary (holdings = top {PORTFOLIO_SIZE} by Blended_Rank, by Marketcap):")
     for _, r in df_portfolio_mcap.iterrows():
