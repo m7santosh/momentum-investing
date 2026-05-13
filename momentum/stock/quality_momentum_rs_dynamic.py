@@ -29,6 +29,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.output_paths import FINAL_RESULT_DIR, FINAL_RESULT_STOCK_DIR
+from utils.nse_bhavcopy import fetch_bhavcopy, fetch_nse_live_quotes, nse_symbol_from_yahoo, today_ist
 
 # --- Configuration ---
 BENCHMARK_TICKER = "^CRSLDX"
@@ -246,8 +247,38 @@ def _raw_close_series(df: pd.DataFrame) -> pd.Series:
     s = df["Close"]
     return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
 
+def _fill_ohlcv_from_nse(df: pd.DataFrame, nse_row: dict) -> pd.DataFrame:
+    """Patch the last row of *df* with OHLCV from an NSE source dict."""
+    idx = df.index[-1]
+    last_vol = df.iloc[-1].get("Volume")
+    df.at[idx, "Close"] = nse_row["close"]
+    df.at[idx, "Adj Close"] = nse_row["close"]
+    df.at[idx, "Open"] = nse_row["open"]
+    df.at[idx, "High"] = nse_row["high"]
+    df.at[idx, "Low"] = nse_row["low"]
+    if pd.isna(last_vol) or last_vol == 0:
+        df.at[idx, "Volume"] = nse_row["volume"]
+    return df
+
+
 def get_data(ticker: str, start_date, end_date):
-    return yf.download(ticker, start=start_date, end=end_date, multi_level_index=False, auto_adjust=False, progress=False)
+    df = yf.download(ticker, start=start_date, end=end_date, multi_level_index=False, auto_adjust=False, progress=False)
+    if df is None or len(df) == 0:
+        return df
+    if pd.notna(df.iloc[-1].get("Close")):
+        return df
+    trade_dt = df.index[-1].date() if hasattr(df.index[-1], "date") else df.index[-1]
+    if ticker.endswith(".NS"):
+        nse_sym = nse_symbol_from_yahoo(ticker)
+        bhav = fetch_bhavcopy(trade_dt)
+        if nse_sym in bhav:
+            return _fill_ohlcv_from_nse(df, bhav[nse_sym])
+        if trade_dt == today_ist():
+            live = fetch_nse_live_quotes()
+            if nse_sym in live:
+                return _fill_ohlcv_from_nse(df, live[nse_sym])
+    df = df.dropna(subset=["Close"])
+    return df
 
 
 def _last_bar_adj_close_for_session(

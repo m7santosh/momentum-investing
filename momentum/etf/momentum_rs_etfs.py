@@ -12,7 +12,7 @@ Ranking (swing / all-weather blend):
 
 Market_Regime: ^CRSLDX vs 50 / 200 EMA (Trend_Up / Trend_Down / Mixed_Above50 / Mixed_Below50 / Unknown).
 
-Close_Below_9EMA: per ETF, Yes if last adj close is below the 9 EMA (short swing soft warning), else No.
+Close_Below_9EMA: per ETF, Yes if last **regular Close** is below the 9 EMA of **Close** (matches typical broker / TradingView “Close” charts). Trend gate and Return_* still use **Adj Close** (total return).
 
 How to read Volatility_Score (informational):
 - It is stdev of daily % returns over the last LB_1M sessions, ×100; higher = choppier last month.
@@ -28,7 +28,10 @@ How to read Rank_vs_Peak (informational):
 - “ATH” here is max over downloaded history, not necessarily since listing; 52w uses LB_52W sessions.
 - Not a buy rule on its own; use with Blended_Rank, RS, and trend filters.
 
-Excel: Return_1W / Return_2W / Return_1M / Return_3M and matching RS_* columns (1W/2W use LB_1W/LB_2W session offsets, not calendar weeks).
+Excel: Return_1W / Return_2W / Return_1M / Return_3M are **total return %** from **Adj Close** over a fixed number of **trading sessions** (see LB_1W … LB_3M): anchor is ``adj.iloc[-LB_*]``, end is last bar. They are not calendar “this week”, and they will **differ** from a broker chart that uses **unadjusted Close** or a different bar count — gaps of a few percent are normal after distributions or vs calendar windows.
+RS_* columns are ETF minus benchmark over the **same** horizons, both from **Adj Close** on date-aligned rows.
+
+Yahoo often leaves the latest calendar row as NaN for .NS symbols until the session prints (or timezone mismatch). Returns use the last **non-NaN** Adj Close bars so horizons are not applied to a phantom "today" row. A Return of 0.00 means the price was flat over that window (after rounding).
 """
 
 import yfinance as yf
@@ -44,11 +47,13 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.output_paths import FINAL_RESULT_ETF_DIR
+from utils.nse_bhavcopy import fetch_bhavcopy, fetch_nse_live_quotes, nse_symbol_from_yahoo, today_ist
 
 # --- Configuration ---
 BENCHMARK_TICKER = "^CRSLDX"
 
-# Lookback offsets (sessions from last bar)
+# Lookback offsets: iloc[-LB_*] is the **start** bar; horizon spans (LB_* - 1) sessions to last bar
+# (e.g. LB_1W=6 → 5 sessions from anchor to last, ~one trading week).
 LB_1W = 6
 LB_2W = 11
 LB_1M = 21
@@ -65,7 +70,7 @@ PROXIMITY_OF_52W_HIGH = 0.7
 BENCH_EMA_FAST = 50
 BENCH_EMA_SLOW = 200
 
-# Short EMA for per-ETF “close below 9?” flag (adj close)
+# Short EMA for per-ETF “close below 9?” flag (regular Close, not Adj Close)
 ETF_EMA_9 = 9
 
 TOP_N = 10
@@ -94,8 +99,27 @@ def _adj_close_series(df: pd.DataFrame) -> pd.Series:
     return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
 
 
+def _close_series(df: pd.DataFrame) -> pd.Series:
+    s = df["Close"]
+    return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
+
+
+def _fill_ohlcv_from_nse(df: pd.DataFrame, nse_row: dict) -> pd.DataFrame:
+    """Patch the last row of *df* with OHLCV from an NSE source dict."""
+    idx = df.index[-1]
+    last_vol = df.iloc[-1].get("Volume")
+    df.at[idx, "Close"] = nse_row["close"]
+    df.at[idx, "Adj Close"] = nse_row["close"]
+    df.at[idx, "Open"] = nse_row["open"]
+    df.at[idx, "High"] = nse_row["high"]
+    df.at[idx, "Low"] = nse_row["low"]
+    if pd.isna(last_vol) or last_vol == 0:
+        df.at[idx, "Volume"] = nse_row["volume"]
+    return df
+
+
 def get_data(ticker: str, start_date, end_date):
-    return yf.download(
+    df = yf.download(
         ticker,
         start=start_date,
         end=end_date,
@@ -103,6 +127,22 @@ def get_data(ticker: str, start_date, end_date):
         auto_adjust=False,
         progress=False,
     )
+    if df is None or len(df) == 0:
+        return df
+    if pd.notna(df.iloc[-1].get("Close")):
+        return df
+    trade_dt = df.index[-1].date() if hasattr(df.index[-1], "date") else df.index[-1]
+    if ticker.endswith(".NS"):
+        nse_sym = nse_symbol_from_yahoo(ticker)
+        bhav = fetch_bhavcopy(trade_dt)
+        if nse_sym in bhav:
+            return _fill_ohlcv_from_nse(df, bhav[nse_sym])
+        if trade_dt == today_ist():
+            live = fetch_nse_live_quotes()
+            if nse_sym in live:
+                return _fill_ohlcv_from_nse(df, live[nse_sym])
+    df = df.dropna(subset=["Close"])
+    return df
 
 
 def classify_ema_regime(close: pd.Series, fast_span: int, slow_span: int) -> str:
@@ -136,7 +176,7 @@ def main() -> None:
         if len(nifty_df) == 0:
             print(f"Error: No rows for benchmark {BENCHMARK_TICKER}")
             return
-        nifty_adj = _adj_close_series(nifty_df)
+        nifty_adj = _adj_close_series(nifty_df).dropna()
     except Exception as e:
         print(f"Error: Benchmark {BENCHMARK_TICKER} ({e})")
         return
@@ -148,10 +188,12 @@ def main() -> None:
     for sym in tickers:
         try:
             df = get_data(sym, start_date, end_date)
-            if len(df) < LB_52W:
+            if len(df) == 0:
                 continue
 
-            adj = _adj_close_series(df)
+            adj = _adj_close_series(df).dropna()
+            if len(adj) < LB_52W:
+                continue
 
             # Trend gate: 200 EMA + within PROXIMITY_OF_52W_HIGH of trailing 52w high
             ema200 = adj.ewm(span=EMA_SPAN).mean().iloc[-1]
@@ -160,9 +202,11 @@ def main() -> None:
             if last < ema200 or last < (high_52w * PROXIMITY_OF_52W_HIGH):
                 continue
 
-            # Short swing flag vs 9 EMA (does not replace the 200 EMA gate)
-            ema9 = float(adj.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
-            close_below_9ema = "Yes" if float(last) < ema9 else "No"
+            # Short swing flag: 9 EMA of **Close** vs last **Close** (chart/broker parity; not Adj Close).
+            close_on_adj_index = _close_series(df).reindex(adj.index).ffill().bfill()
+            ema9_close = float(close_on_adj_index.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
+            last_close = float(close_on_adj_index.iloc[-1])
+            close_below_9ema = "Yes" if last_close < ema9_close else "No"
 
             # Peak proximity: avg(last/52w_high, last/max_in_window) → Rank_vs_Peak later
             high_ath = float(adj.max())
@@ -198,6 +242,8 @@ def main() -> None:
             summary.append(
                 {
                     "Symbol": _symbol_for_excel(sym),
+                    "Close": round(last_close, 2),
+                    "9EMA": round(ema9_close, 2),
                     "Close_Below_9EMA": close_below_9ema,
                     "Peak_Proximity_Score": peak_proximity_score,
                     "Return_1W": return_1w,
@@ -237,7 +283,7 @@ def main() -> None:
 
     # Rank_vs_Peak — see module docstring "How to read Rank_vs_Peak".
     df_summary["Rank_vs_Peak"] = df_summary["Peak_Proximity_Score"].rank(
-        ascending=False, method="min"
+        ascending=False, method="min", na_option="bottom"
     ).astype(int)
 
     # --- Ranking: per-horizon ranks → weighted Abs_Score / RS_Score → rerank → Blended_Rank ---
@@ -278,6 +324,8 @@ def main() -> None:
     final_cols = [
         "Position",
         "Symbol",
+        "Close",
+        "9EMA",
         # "Market_Regime",
         "Close_Below_9EMA",
         # "Blended_Rank",
