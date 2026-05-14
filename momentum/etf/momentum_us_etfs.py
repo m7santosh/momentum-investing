@@ -110,10 +110,12 @@ df_summary["Final_Rank"] = (
 df_summary_sorted = df_summary.sort_values('Final_Rank').head(10) # get the top 10 stocks based on the final rank
 
 # Assign position based on final rank
-df_summary_sorted['Position'] = np.arange(1, len(df_summary_sorted) + 1) # assign the position based on the final rank
+df_summary_sorted['Position'] = np.arange(1, len(df_summary_sorted) + 1)
+cols = ['Position'] + [c for c in df_summary_sorted.columns if c != 'Position']
+df_summary_sorted = df_summary_sorted[cols]
 
 FINAL_RESULT_ETF_DIR.mkdir(parents=True, exist_ok=True)
-out_path = FINAL_RESULT_ETF_DIR / "momentum_us_etfs_ranked.xlsx"
+out_path = FINAL_RESULT_ETF_DIR / "momentum_us_etfs.xlsx"
 try:
     df_summary_sorted.to_excel(out_path, index=False, engine="openpyxl")
 except ImportError:

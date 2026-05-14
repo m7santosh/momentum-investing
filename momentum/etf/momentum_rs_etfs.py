@@ -73,7 +73,7 @@ BENCH_EMA_SLOW = 200
 # Short EMA for per-ETF “close below 9?” flag (regular Close, not Adj Close)
 ETF_EMA_9 = 9
 
-TOP_N = 10
+TOP_N = 20
 OUT_FILENAME = "momentum_rs_etfs.xlsx"
 
 RETURN_SUFFIXES = ("1W", "2W", "1M", "3M")
