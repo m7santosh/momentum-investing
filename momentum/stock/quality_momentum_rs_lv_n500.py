@@ -1,5 +1,5 @@
 """
-Stock relative strength vs Nifty 500 TR (^CRSLDX). CLI/env/file: session date + rebalance period. Calendar rebalance prefers archive JSON; if missing, reranks universe for baseline session (as_of−N days), not latest state.json. Weekly_Rebalance + Within_exit_rank_band vs EXIT_RANK_THRESHOLD.
+Stock relative strength vs Nifty 500 TR (^CRSLDX). CLI/env/file: session date + rebalance period. Calendar rebalance uses deterministic context JSON under portfolio_state_archive when session date + period + sizing params match; otherwise reranks baseline (as_of−N). each_run uses latest state.json only. Weekly_Rebalance + Within_exit_rank_band vs EXIT_RANK_THRESHOLD.
 
 Filters:
 1. Trend: Price must be above 200-day EMA.
@@ -43,15 +43,15 @@ LOW_VOLATILITY_MIN_UNIVERSE = 8  # skip vol filter if fewer names (stable quanti
 PORTFOLIO_SIZE = 20  # Holdings size: mix summaries (Marketcap / Industry) use top N by Blended_Rank only
 OUTPUT_RANKED_SIZE = 30  # Rows in Excel Sheet1: extend past portfolio to spot weaker names before rebalance
 EXIT_RANK_THRESHOLD = 30  # Exit monitor: previous holding with universe rank above this → review / exit line
-PORTFOLIO_STATE_FILENAME = "quality_momentum_portfolio_state.json"  # Last run top PORTFOLIO_SIZE for weekly IN/OUT
-# Dated JSON snapshots (each run). Set to None to disable. Override with any absolute Path.
+PORTFOLIO_STATE_FILENAME = "quality_momentum_portfolio_state.json"  # Last run top PORTFOLIO_SIZE for each_run IN/OUT
+# Optional: deterministic rebalance context JSON (weekly|biweekly|monthly); overwrites same context.
 PORTFOLIO_STATE_ARCHIVE_DIR: Path | None = FINAL_RESULT_DIR / "portfolio_state_archive"
 # Rebalance IN/OUT baseline (file defaults). Override: `python ... --rebalance monthly` or env QUALITY_RS_REBALANCE.
-#   each_run → last run JSON only. weekly|biweekly|monthly → archive if present; else full rerank as-of session−7/14/30d.
+#   each_run → last run JSON only. weekly|biweekly|monthly → context cache or rerank as-of session−7/14/30d.
 REBALANCE_COMPARE_PERIOD = "biweekly"
 # Session date (last bar you want): None | date | "YYYY-MM-DD". yfinance `end` is exclusive, so code passes end = day+1 00:00.
-# RUN_AS_OF: date | str | None = '2026-05-01'
-RUN_AS_OF: date | str | None = None
+RUN_AS_OF: date | str | None = '2026-05-15'
+# RUN_AS_OF: date | str | None = None
 
 
 def _coerce_run_as_of_config(value: object) -> date | None:
@@ -918,15 +918,110 @@ def load_portfolio_state() -> dict | None:
         return None
 
 
-def _parse_state_archive_timestamp(path: Path) -> datetime | None:
-    prefix = "quality_momentum_portfolio_state_"
-    if not path.name.startswith(prefix) or not path.suffix == ".json":
+_REBALANCE_CONTEXT_SCHEMA_VERSION = 1
+
+
+def _rebalance_context_lv_tag() -> str:
+    lv = _effective_low_vol_max_quantile()
+    return f"{float(lv):.6f}".replace(".", "p").replace("-", "m")
+
+
+def _rebalance_context_basename(rebalance_as_of: date, period: str) -> str:
+    return (
+        f"quality_momentum_rebalance_context_{rebalance_as_of:%Y-%m-%d}_{period}_"
+        f"p{PORTFOLIO_SIZE}_or{OUTPUT_RANKED_SIZE}_ex{EXIT_RANK_THRESHOLD}_"
+        f"lv{_rebalance_context_lv_tag()}"
+    )
+
+
+def _rebalance_context_archive_path(rebalance_as_of: date, period: str) -> Path | None:
+    if PORTFOLIO_STATE_ARCHIVE_DIR is None:
         return None
-    rest = path.stem[len(prefix) :]
+    return Path(PORTFOLIO_STATE_ARCHIVE_DIR) / f"{_rebalance_context_basename(rebalance_as_of, period)}.json"
+
+
+def _baseline_rebalance_context_matches(
+    payload: dict, *, rebalance_as_of: date, period: str, baseline_as_of: date
+) -> bool:
+    if int(payload.get("schema_version", 0)) != _REBALANCE_CONTEXT_SCHEMA_VERSION:
+        return False
+    if _parse_session_date_label(payload.get("rebalance_session_date")) != rebalance_as_of:
+        return False
+    if _parse_session_date_label(payload.get("baseline_session_date")) != baseline_as_of:
+        return False
+    if (payload.get("rebalance_compare_period") or "").strip().lower() != period:
+        return False
     try:
-        return datetime.strptime(rest, "%Y-%m-%d_%H%M%S")
-    except ValueError:
-        return None
+        if int(payload.get("portfolio_size", -1)) != PORTFOLIO_SIZE:
+            return False
+        if int(payload.get("output_ranked_size", -1)) != OUTPUT_RANKED_SIZE:
+            return False
+        if int(payload.get("exit_rank_threshold", -1)) != EXIT_RANK_THRESHOLD:
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        file_lv = float(payload["low_volatility_max_quantile"])
+        cur_lv = float(_effective_low_vol_max_quantile())
+    except (KeyError, TypeError, ValueError):
+        return False
+    if abs(file_lv - cur_lv) > 1e-9:
+        return False
+    rec = payload.get("baseline_ranked_records")
+    if not rec or not isinstance(rec, list):
+        return False
+    return True
+
+
+def _try_load_rebalance_baseline_context(
+    path: Path, *, rebalance_as_of: date, period: str, baseline_as_of: date
+) -> tuple[pd.DataFrame | None, dict | None]:
+    if not path.is_file():
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None, None
+    if not d or not _baseline_rebalance_context_matches(
+        d, rebalance_as_of=rebalance_as_of, period=period, baseline_as_of=baseline_as_of
+    ):
+        return None, None
+    try:
+        df_b = pd.DataFrame(d["baseline_ranked_records"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    if df_b is None or len(df_b) == 0:
+        return None, None
+    return df_b, d
+
+
+def _write_rebalance_baseline_context(
+    path: Path,
+    *,
+    rebalance_as_of: date,
+    baseline_as_of: date,
+    period: str,
+    df_b: pd.DataFrame,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    syms = df_b.head(PORTFOLIO_SIZE)["Symbol"].tolist()
+    records = json.loads(df_b.to_json(orient="records", date_format="iso"))
+    payload = {
+        "schema_version": _REBALANCE_CONTEXT_SCHEMA_VERSION,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "rebalance_session_date": f"{rebalance_as_of:%Y-%m-%d}",
+        "baseline_session_date": f"{baseline_as_of:%Y-%m-%d}",
+        "rebalance_compare_period": period,
+        "portfolio_size": PORTFOLIO_SIZE,
+        "output_ranked_size": OUTPUT_RANKED_SIZE,
+        "exit_rank_threshold": EXIT_RANK_THRESHOLD,
+        "low_volatility_max_quantile": float(_effective_low_vol_max_quantile()),
+        "top_portfolio_symbols": syms,
+        "baseline_ranked_records": records,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
 
 
 def resolve_rebalance_baseline(
@@ -934,16 +1029,15 @@ def resolve_rebalance_baseline(
 ) -> tuple[list[str], str, str, str, date | None, pd.DataFrame | None]:
     """IN/OUT baseline: (symbols, description, prev_saved_at, prev_run_as_of, baseline_price_session, df_baseline_cached).
 
-    ``baseline_price_session`` is the calendar date for baseline **closes** (from JSON ``run_as_of`` or
-    computed ``as_of − N``), vs current session ``as_of``.
+    ``baseline_price_session`` is the calendar date for baseline **closes** (``as_of − N`` in calendar
+    modes, or from JSON ``run_as_of`` in ``each_run``), vs current session ``as_of``.
 
-    ``df_baseline_cached`` is set only when this function already computed the ranked universe for the
-    baseline session (archive miss path); otherwise ``None`` and callers may fetch once.
+    For ``weekly`` / ``biweekly`` / ``monthly``, load a **deterministic context** JSON under
+    ``PORTFOLIO_STATE_ARCHIVE_DIR`` when rebalance session date, baseline calendar date, period, and
+    sizing/quantile params match; otherwise re-rank the baseline session and **write** that file.
+    ``df_baseline_cached`` is the ranked baseline dataframe (from cache or fresh).
 
-    ``each_run`` → latest ``quality_momentum_portfolio_state.json`` only.
-
-    ``weekly`` / ``biweekly`` / ``monthly`` → prefer archive JSON with file_ts ≤ session_anchor−N;
-    if none, **re-rank** the universe as-of calendar ``as_of − N days`` (no silent reuse of latest state).
+    ``each_run`` → latest ``quality_momentum_portfolio_state.json`` only (no calendar context file).
     """
     raw = (compare_period or "each_run").strip().lower()
     period_aliases = {
@@ -988,63 +1082,62 @@ def resolve_rebalance_baseline(
             None,
         )
 
-    anchor = datetime.combine(as_of, datetime.min.time())
-    cutoff = anchor - timedelta(days=days)
-
-    archive_state: dict | None = None
-    archive_desc = ""
-    if PORTFOLIO_STATE_ARCHIVE_DIR is not None:
-        archive_dir = Path(PORTFOLIO_STATE_ARCHIVE_DIR)
-        if archive_dir.is_dir():
-            candidates: list[tuple[datetime, Path]] = []
-            for path in archive_dir.glob("quality_momentum_portfolio_state_*.json"):
-                ts = _parse_state_archive_timestamp(path)
-                if ts is not None and ts <= cutoff:
-                    candidates.append((ts, path))
-            if candidates:
-                best_ts, best_path = max(candidates, key=lambda x: x[0])
-                try:
-                    with open(best_path, encoding="utf-8") as f:
-                        archive_state = json.load(f)
-                    archive_desc = (
-                        f"{period}: archive {best_path.name} (file_ts {best_ts:%Y-%m-%d %H:%M:%S}; "
-                        f"cutoff {cutoff:%Y-%m-%d %H:%M:%S})"
-                    )
-                except (json.JSONDecodeError, OSError):
-                    archive_state = None
-
-    if archive_state is not None:
-        syms = list(archive_state.get("top_portfolio_symbols") or [])
-        if syms:
-            ra = str(archive_state.get("run_as_of") or "")
+    baseline_as_of = as_of - timedelta(days=days)
+    ctx_path = _rebalance_context_archive_path(as_of, period)
+    if ctx_path is not None:
+        df_cached, meta = _try_load_rebalance_baseline_context(
+            ctx_path, rebalance_as_of=as_of, period=period, baseline_as_of=baseline_as_of
+        )
+        if df_cached is not None and meta is not None:
+            print(
+                f"Rebalance baseline ({period}): using context cache {ctx_path.name} "
+                f"(baseline {baseline_as_of}; rebalance session {as_of})"
+            )
+            syms = list(
+                meta.get("top_portfolio_symbols")
+                or df_cached.head(PORTFOLIO_SIZE)["Symbol"].tolist()
+            )
             return (
                 syms,
-                archive_desc,
-                str(archive_state.get("saved_at") or ""),
-                ra,
-                _parse_session_date_label(archive_state.get("run_as_of")),
-                None,
+                f"{period}: baseline from context file {ctx_path.name} "
+                f"(n_ranked={len(df_cached)}; baseline {baseline_as_of}; session {as_of})",
+                str(meta.get("saved_at") or ""),
+                str(meta.get("baseline_session_date") or f"{baseline_as_of:%Y-%m-%d}"),
+                baseline_as_of,
+                df_cached,
             )
 
-    baseline_as_of = as_of - timedelta(days=days)
     print(
-        f"Rebalance baseline: no matching archive (≤ {cutoff:%Y-%m-%d %H:%M:%S}); "
-        f"computing ranked top {PORTFOLIO_SIZE} as-of {baseline_as_of}…"
+        f"Rebalance baseline ({period}): ranked universe top {PORTFOLIO_SIZE} as-of {baseline_as_of} "
+        f"(rebalance session {as_of} − {days}d)…"
     )
     df_b = _compute_ranked_universe_for_session(baseline_as_of, quiet=True)
     if df_b is None or len(df_b) == 0:
         return (
             [],
-            f"{period}: no archive and empty ranking for baseline session {baseline_as_of}",
+            f"{period}: empty ranking for baseline session {baseline_as_of} (rebalance session {as_of})",
             "(computed)",
             str(baseline_as_of),
             baseline_as_of,
             None,
         )
     syms = df_b.head(PORTFOLIO_SIZE)["Symbol"].tolist()
+    if ctx_path is not None:
+        try:
+            _write_rebalance_baseline_context(
+                ctx_path,
+                rebalance_as_of=as_of,
+                baseline_as_of=baseline_as_of,
+                period=period,
+                df_b=df_b,
+            )
+            print(f"Rebalance baseline ({period}): wrote context cache → {ctx_path.name}")
+        except OSError as exc:
+            print(f"Rebalance baseline ({period}): could not write context cache ({exc})")
     return (
         syms,
-        f"{period}: computed baseline as-of {baseline_as_of} (n_ranked={len(df_b)}; archive cutoff {cutoff:%Y-%m-%d %H:%M:%S})",
+        f"{period}: baseline top {PORTFOLIO_SIZE} from ranked universe as-of {baseline_as_of} "
+        f"(n_ranked={len(df_b)}); rebalance session {as_of}",
         datetime.now().isoformat(timespec="seconds"),
         str(baseline_as_of),
         baseline_as_of,
@@ -1060,7 +1153,7 @@ def save_portfolio_state(
     rebalance_compare_period: str,
     explicit_session_date: bool,
 ) -> tuple[Path, Path | None]:
-    """Writes latest state JSON and an optional dated copy under PORTFOLIO_STATE_ARCHIVE_DIR."""
+    """Writes ``quality_momentum_portfolio_state.json`` (latest run). Calendar baseline cache uses separate context files in ``PORTFOLIO_STATE_ARCHIVE_DIR`` from ``resolve_rebalance_baseline``."""
     FINAL_RESULT_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "saved_at": datetime.now().isoformat(timespec="seconds"),
@@ -1077,16 +1170,7 @@ def save_portfolio_state(
     with open(latest, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
-    archive_path: Path | None = None
-    if PORTFOLIO_STATE_ARCHIVE_DIR is not None:
-        archive_dir = Path(PORTFOLIO_STATE_ARCHIVE_DIR)
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        stamp = f"{as_of_day:%Y-%m-%d}_{datetime.now():%H%M%S}"
-        archive_path = archive_dir / f"quality_momentum_portfolio_state_{stamp}.json"
-        with open(archive_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-
-    return latest, archive_path
+    return latest, None
 
 
 _REBALANCE_PRICE_COLS = (
@@ -1102,8 +1186,14 @@ def rebalance_symbol_prices(
     *,
     current_price_fallback: dict[str, tuple[float | None, float | None]] | None = None,
     df_baseline: pd.DataFrame | None = None,
+    pct_vs_baseline_only_if_symbols: frozenset[str] | None = None,
 ) -> pd.DataFrame:
-    """Symbol, session Adj_Close, and % vs baseline Adj_Close (adjusted prices only)."""
+    """Symbol, session Adj_Close, and % vs baseline Adj_Close (adjusted prices only).
+
+    When ``pct_vs_baseline_only_if_symbols`` is set, baseline closes are used for the
+    percent change only if the symbol is in that set (prior baseline top-N book). Other
+    symbols still get current ``Adj_Close`` but ``Pct_vs_baseline`` is None.
+    """
     if not symbols:
         return pd.DataFrame(columns=list(_REBALANCE_PRICE_COLS))
     by_sym = df_ranked.set_index("Symbol")
@@ -1123,8 +1213,11 @@ def rebalance_symbol_prices(
 
         base_adj = None
         if by_base is not None and sym in by_base.index:
-            br = by_base.loc[sym]
-            base_adj = round(float(br["Adj_Close"]), 2) if pd.notna(br.get("Adj_Close")) else None
+            if pct_vs_baseline_only_if_symbols is None or sym in pct_vs_baseline_only_if_symbols:
+                br = by_base.loc[sym]
+                base_adj = (
+                    round(float(br["Adj_Close"]), 2) if pd.notna(br.get("Adj_Close")) else None
+                )
 
         rows.append(
             {
@@ -1133,47 +1226,6 @@ def rebalance_symbol_prices(
                 "Pct_vs_baseline": _pct_change_vs_baseline(base_adj, adj),
             }
         )
-    return pd.DataFrame(rows)
-
-
-def baseline_vs_current_price_table(
-    symbols: list[str],
-    df_baseline: pd.DataFrame | None,
-    df_current: pd.DataFrame,
-    *,
-    current_price_fallback: dict[str, tuple[float | None, float | None]] | None = None,
-) -> pd.DataFrame:
-    """Per symbol: baseline vs current session Adj_Close and % change (adjusted only)."""
-    cols = ["Symbol", "Baseline_Adj_Close", "Current_Adj_Close", "Pct_vs_baseline"]
-    if not symbols:
-        return pd.DataFrame(columns=cols)
-    by_cur = df_current.set_index("Symbol")
-    by_base = df_baseline.set_index("Symbol") if df_baseline is not None and len(df_baseline) else None
-    rows: list[dict] = []
-    for sym in symbols:
-        row: dict = {
-            "Symbol": sym,
-            "Baseline_Adj_Close": None,
-            "Current_Adj_Close": None,
-            "Pct_vs_baseline": None,
-        }
-        if by_base is not None and sym in by_base.index:
-            br = by_base.loc[sym]
-            row["Baseline_Adj_Close"] = (
-                round(float(br["Adj_Close"]), 2) if pd.notna(br.get("Adj_Close")) else None
-            )
-        if sym in by_cur.index:
-            cr = by_cur.loc[sym]
-            row["Current_Adj_Close"] = (
-                round(float(cr["Adj_Close"]), 2) if pd.notna(cr.get("Adj_Close")) else None
-            )
-        elif current_price_fallback and sym in current_price_fallback:
-            fa, _raw_c = current_price_fallback[sym]
-            row["Current_Adj_Close"] = fa
-        row["Pct_vs_baseline"] = _pct_change_vs_baseline(
-            row["Baseline_Adj_Close"], row["Current_Adj_Close"]
-        )
-        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -1324,6 +1376,9 @@ def write_weekly_rebalance_sheet(
     meta.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
     row += _excel_rows_used(len(meta)) + 1
 
+    pct_vs_baseline_book = frozenset(prev_symbols) if prev_symbols else None
+    ba = str(baseline_price_session) if baseline_price_session else "n/a"
+
     row = _rebalance_section_title(
         writer,
         sheet_name,
@@ -1336,6 +1391,7 @@ def write_weekly_rebalance_sheet(
             current_top_syms,
             current_price_fallback=current_price_fallback,
             df_baseline=df_baseline_ranked,
+            pct_vs_baseline_only_if_symbols=pct_vs_baseline_book,
         )
     else:
         df_cur = pd.DataFrame(
@@ -1350,36 +1406,10 @@ def write_weekly_rebalance_sheet(
     df_cur.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
     row += _excel_rows_used(len(df_cur)) + 1
 
-    ba = str(baseline_price_session) if baseline_price_session else "n/a"
     row = _rebalance_section_title(
         writer,
         sheet_name,
-        f"2) Previous baseline — IN/OUT symbols: Adj close at baseline session {ba} vs current session {current_run_as_of}",
-        row,
-    )
-    if prev_symbols:
-        df_prev = baseline_vs_current_price_table(
-            prev_symbols,
-            df_baseline_ranked,
-            df_ranked,
-            current_price_fallback=current_price_fallback,
-        )
-    else:
-        df_prev = pd.DataFrame(
-            {
-                "Symbol": ["(none — first run or no baseline list)"],
-                "Baseline_Adj_Close": [None],
-                "Current_Adj_Close": [None],
-                "Pct_vs_baseline": [None],
-            }
-        )
-    df_prev.to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
-    row += _excel_rows_used(len(df_prev)) + 1
-
-    row = _rebalance_section_title(
-        writer,
-        sheet_name,
-        "3) Entering top portfolio — new names vs previous baseline",
+        "2) Entering top portfolio — new names vs previous baseline",
         row,
     )
     if coming_in:
@@ -1388,6 +1418,7 @@ def write_weekly_rebalance_sheet(
             coming_in,
             current_price_fallback=current_price_fallback,
             df_baseline=df_baseline_ranked,
+            pct_vs_baseline_only_if_symbols=pct_vs_baseline_book,
         )
     else:
         df_in = pd.DataFrame(
@@ -1405,7 +1436,7 @@ def write_weekly_rebalance_sheet(
     row = _rebalance_section_title(
         writer,
         sheet_name,
-        "4) Leaving top portfolio — names that dropped out of top vs previous baseline",
+        "3) Leaving top portfolio — names that dropped out of top vs previous baseline",
         row,
     )
     if going_out:
@@ -1414,6 +1445,7 @@ def write_weekly_rebalance_sheet(
             going_out,
             current_price_fallback=current_price_fallback,
             df_baseline=df_baseline_ranked,
+            pct_vs_baseline_only_if_symbols=pct_vs_baseline_book,
         )
     else:
         df_outm = pd.DataFrame(
@@ -1431,7 +1463,8 @@ def write_weekly_rebalance_sheet(
     row = _rebalance_section_title(
         writer,
         sheet_name,
-        f"5) Each previous baseline name — baseline vs current adj. close, rank at {current_run_as_of} (exit monitor)",
+        f"4) Prior baseline top {PORTFOLIO_SIZE} — baseline session {ba} vs {current_run_as_of}: "
+        f"adj. close, % change, rank, exit monitor",
         row,
     )
     if not df_prev_status.empty:
@@ -1620,7 +1653,7 @@ def main(
             current_price_fallback=current_price_fallback,
         )
 
-    latest_state_path, archive_state_path = save_portfolio_state(
+    latest_state_path, _archive_state_path = save_portfolio_state(
         top_portfolio_symbols=current_top_syms,
         run_as_of=run_as_of,
         as_of_day=as_of_day,
@@ -1628,8 +1661,6 @@ def main(
         explicit_session_date=explicit_session_date,
     )
     print(f"\nSaved portfolio state for next week → {latest_state_path}")
-    if archive_state_path is not None:
-        print(f"Dated archive copy → {archive_state_path}")
 
     print(
         f"\nSuccess: Wrote top {len(df_out)} ranked rows (OUTPUT_RANKED_SIZE={OUTPUT_RANKED_SIZE}); "
