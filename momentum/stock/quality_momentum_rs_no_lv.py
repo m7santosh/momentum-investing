@@ -5,7 +5,7 @@ Stock relative strength vs Nifty 500 TR (^CRSLDX). CLI/env/file: session date + 
 
 Filters:
 1. Trend: Price must be above 200-day EMA.
-2. Proximity: Price must be within 30% of its 52-week high.
+2. Proximity: Price must be >= PROXIMITY_OF_52W_HIGH × 52-week high (default 0.70). Override: env or --52w-proximity.
 3. Liquidity: Average Daily Turnover (ADTV) must be > 5 Crores INR.
 
 Blended Ranking Logic:
@@ -36,6 +36,8 @@ from utils.nse_bhavcopy import fetch_bhavcopy, fetch_nse_live_quotes, nse_symbol
 # --- Configuration ---
 BENCHMARK_TICKER = "^CRSLDX"
 MIN_ADTV_CRORES = 5.0  # Minimum 5 Crores daily trading volume
+PROXIMITY_OF_52W_HIGH = 0.70
+_RUNTIME_52W_PROXIMITY: float | None = None
 PORTFOLIO_SIZE = 20  # Holdings size: mix summaries (Marketcap / Industry) use top N by Blended_Rank only
 OUTPUT_RANKED_SIZE = 30  # Rows in Excel Sheet1: extend past portfolio to spot weaker names before rebalance
 EXIT_RANK_THRESHOLD = 30  # Exit monitor: previous holding with universe rank above this → review / exit line
@@ -345,6 +347,31 @@ def _effective_low_vol_max_quantile() -> float:
     return -1.0
 
 
+def _param_tag(value: float) -> str:
+    return f"{float(value):.6f}".replace(".", "p").replace("-", "m")
+
+
+def _effective_proximity_of_52w_high() -> float:
+    if _RUNTIME_52W_PROXIMITY is not None:
+        return _RUNTIME_52W_PROXIMITY
+    raw = (os.environ.get("QUALITY_RS_52W_PROXIMITY") or "").strip()
+    if not raw:
+        return float(PROXIMITY_OF_52W_HIGH)
+    v = float(raw)
+    if not (0 < v <= 1):
+        raise ValueError(
+            "QUALITY_RS_52W_PROXIMITY must be a float in (0, 1], got " + repr(raw)
+        )
+    return v
+
+
+def _set_runtime_52w_proximity(value: float | None) -> None:
+    global _RUNTIME_52W_PROXIMITY
+    if value is not None and not (0 < value <= 1):
+        raise ValueError(f"52w proximity must be in (0, 1], got {value}")
+    _RUNTIME_52W_PROXIMITY = value
+
+
 def _apply_ranking_engine(df_summary: pd.DataFrame) -> pd.DataFrame:
     df = df_summary.copy()
     for c in ["3M", "6M", "9M"]:
@@ -398,7 +425,8 @@ def _compute_ranked_universe_for_session(session_as_of: date, *, quiet: bool = F
             ema200 = adj.ewm(span=200).mean().iloc[-1]
             high_52w = adj.iloc[-min(252, len(adj)) :].max()
 
-            if adj.iloc[-1] < ema200 or adj.iloc[-1] < (high_52w * 0.7):
+            prox = _effective_proximity_of_52w_high()
+            if adj.iloc[-1] < ema200 or adj.iloc[-1] < (high_52w * prox):
                 continue
 
             ret_1m = (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100
@@ -504,15 +532,14 @@ _REBALANCE_CONTEXT_SCHEMA_VERSION = 1
 
 
 def _rebalance_context_lv_tag() -> str:
-    lv = _effective_low_vol_max_quantile()
-    return f"{float(lv):.6f}".replace(".", "p").replace("-", "m")
+    return _param_tag(_effective_low_vol_max_quantile())
 
 
 def _rebalance_context_basename(rebalance_as_of: date, period: str) -> str:
     return (
         f"quality_momentum_rebalance_context_{rebalance_as_of:%Y-%m-%d}_{period}_"
         f"p{PORTFOLIO_SIZE}_or{OUTPUT_RANKED_SIZE}_ex{EXIT_RANK_THRESHOLD}_"
-        f"lv{_rebalance_context_lv_tag()}"
+        f"lv{_rebalance_context_lv_tag()}_px{_param_tag(_effective_proximity_of_52w_high())}"
     )
 
 
@@ -548,6 +575,13 @@ def _baseline_rebalance_context_matches(
     except (KeyError, TypeError, ValueError):
         return False
     if abs(file_lv - cur_lv) > 1e-9:
+        return False
+    try:
+        file_px = float(payload.get("proximity_of_52w_high", PROXIMITY_OF_52W_HIGH))
+        cur_px = float(_effective_proximity_of_52w_high())
+    except (TypeError, ValueError):
+        return False
+    if abs(file_px - cur_px) > 1e-9:
         return False
     rec = payload.get("baseline_ranked_records")
     if not rec or not isinstance(rec, list):
@@ -599,6 +633,7 @@ def _write_rebalance_baseline_context(
         "output_ranked_size": OUTPUT_RANKED_SIZE,
         "exit_rank_threshold": EXIT_RANK_THRESHOLD,
         "low_volatility_max_quantile": float(_effective_low_vol_max_quantile()),
+        "proximity_of_52w_high": float(_effective_proximity_of_52w_high()),
         "top_portfolio_symbols": syms,
         "baseline_ranked_records": records,
     }
@@ -1059,7 +1094,9 @@ def main(
     *,
     as_of: date | None = None,
     rebalance_compare_period: str | None = None,
+    proximity_52w: float | None = None,
 ) -> None:
+    _set_runtime_52w_proximity(proximity_52w)
     run_as_of_file = _coerce_run_as_of_config(RUN_AS_OF)
     as_of_day: date = (
         as_of
@@ -1071,7 +1108,10 @@ def main(
 
     # yfinance `end` is exclusive (no bar at end): use midnight *after* session so last included bar is as_of_day.
     end_date = datetime.combine(as_of_day, datetime.min.time()) + timedelta(days=1)
-    print(f"Session as_of: {as_of_day}  |  Rebalance compare: {rebalance_effective}")
+    print(
+        f"Session as_of: {as_of_day}  |  Rebalance compare: {rebalance_effective}  |  "
+        f"52w proximity: {_effective_proximity_of_52w_high():.2f}"
+    )
     if as_of_day != datetime.now().date():
         print(
             f"  Data through {as_of_day}; yfinance end is exclusive → passed end={end_date:%Y-%m-%d %H:%M:%S}"
@@ -1277,6 +1317,17 @@ if __name__ == "__main__":
         metavar="PERIOD",
         help="each_run | weekly | biweekly | bi-weekly | monthly. Beats env QUALITY_RS_REBALANCE and file default.",
     )
+    parser.add_argument(
+        "--52w-proximity",
+        type=float,
+        default=None,
+        dest="proximity_52w",
+        metavar="RATIO",
+        help=(
+            f"Min price / 52w high (file PROXIMITY_OF_52W_HIGH={PROXIMITY_OF_52W_HIGH}). "
+            "Env: QUALITY_RS_52W_PROXIMITY."
+        ),
+    )
     args = parser.parse_args()
 
     resolved_as_of: date | None = None
@@ -1289,4 +1340,8 @@ if __name__ == "__main__":
     if not resolved_rebalance:
         resolved_rebalance = _env_rebalance_period()
 
-    main(as_of=resolved_as_of, rebalance_compare_period=resolved_rebalance)
+    main(
+        as_of=resolved_as_of,
+        rebalance_compare_period=resolved_rebalance,
+        proximity_52w=args.proximity_52w,
+    )
