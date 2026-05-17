@@ -9,6 +9,8 @@ Filters:
    LOW_VOLATILITY_MAX_QUANTILE cross-sectional cutoff (21d adj-close daily return stdev %).
    Override: env QUALITY_RS_LV_MAX_QUANTILE in (0, 1] (e.g. 0.5 = bottom half only).
 
+#### SAME AS quality_momentum_rs_lv.py, BUT WITH NIFTY 500 UNIVERSE. ####
+
 Blended Ranking Logic:
 - Abs_Momentum_Rank: Weighted rank on raw returns (0.50·3M + 0.30·6M + 0.20·9M).
 - Relative_Strength_Rank: Weighted rank on RS vs Benchmark (0.50·3M + 0.30·6M + 0.20·9M).

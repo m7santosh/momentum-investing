@@ -1,6 +1,8 @@
 """
 Stock relative strength vs Nifty 500 TR (^CRSLDX). Universe: Nifty 100 Quality 30, Midcap 150 Quality 50, Smallcap 250 Quality 50 (each ticker `marketcap`: Largecap / Midcap / Smallcap). Configure PORTFOLIO_SIZE (mix %) vs OUTPUT_RANKED_SIZE (Excel depth).
 
+#### NO REBALANCE PARAMETER PASSED, SO IT WILL RUN DAILY. ####
+
 Filters:
 1. Trend: Price must be above 200-day EMA.
 2. Proximity: Price must be within 30% of its 52-week high.

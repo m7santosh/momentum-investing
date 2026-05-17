@@ -9,6 +9,8 @@ Filters:
    LOW_VOLATILITY_MAX_QUANTILE cross-sectional cutoff (21d adj-close daily return stdev %).
    Override: env QUALITY_RS_LV_MAX_QUANTILE in (0, 1] (e.g. 0.5 = bottom half only).
 
+#### SAME AS quality_momentum_rs_lv_n500.py, BUT WITH ONLY QUALITY 30, 50, 50 AS UNIVERSE. ####
+
 Blended Ranking Logic:
 - Abs_Momentum_Rank: Weighted rank on raw returns (0.50·3M + 0.30·6M + 0.20·9M).
 - Relative_Strength_Rank: Weighted rank on RS vs Benchmark (0.50·3M + 0.30·6M + 0.20·9M).
@@ -50,7 +52,8 @@ PORTFOLIO_STATE_ARCHIVE_DIR: Path | None = FINAL_RESULT_DIR / "portfolio_state_a
 #   each_run → last run JSON only. weekly|biweekly|monthly → context cache or rerank as-of session−7/14/30d.
 REBALANCE_COMPARE_PERIOD = "biweekly"
 # Session date (last bar you want): None | date | "YYYY-MM-DD". yfinance `end` is exclusive, so code passes end = day+1 00:00.
-RUN_AS_OF: date | str | None = '2026-05-15'
+# RUN_AS_OF: date | str | None = '2026-05-15'
+RUN_AS_OF: date | str | None = None
 
 
 def _coerce_run_as_of_config(value: object) -> date | None:

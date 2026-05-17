@@ -1,6 +1,8 @@
 """
 Stock relative strength vs Nifty 500 TR (^CRSLDX). CLI/env/file: session date + rebalance period. Calendar rebalance uses deterministic context JSON when session date + period + sizing params match; otherwise reranks baseline (as_of−N). each_run uses latest state.json only. Weekly_Rebalance + Within_exit_rank_band vs EXIT_RANK_THRESHOLD.
 
+#### REBALANCE PARAMETER OPTION WITH NO LOW VOLATILITY FILTER. ####
+
 Filters:
 1. Trend: Price must be above 200-day EMA.
 2. Proximity: Price must be within 30% of its 52-week high.

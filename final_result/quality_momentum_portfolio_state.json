@@ -1,7 +1,7 @@
 {
-  "saved_at": "2026-05-16T01:25:59",
-  "run_as_of": "2026-05-15",
-  "run_as_of_is_historical": true,
+  "saved_at": "2026-05-17T23:48:21",
+  "run_as_of": "2026-05-17",
+  "run_as_of_is_historical": false,
   "portfolio_size": 20,
   "output_ranked_size": 30,
   "exit_rank_threshold": 30,
