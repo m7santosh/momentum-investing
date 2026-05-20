@@ -1,6 +1,8 @@
 """
 ETF momentum for a weekly rebalance: rank the universe on recent total returns (1W / 2W / 1M / 3M),
 combine ranks, and keep names trading above a long trend (200 EMA) and not far below recent highs.
+
+Close_Below_9EMA: Exit if last Close is below 9 EMA of Close, else Hold (chart parity; returns use Adj Close).
 """
 import yfinance as yf
 import pandas as pd
@@ -15,6 +17,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from utils.output_paths import FINAL_RESULT_ETF_DIR
 
+ETF_EMA_9 = 9
 
 # Universe: US ETFs/indices on Yahoo
 tickers = [
@@ -66,6 +69,14 @@ for ticker, df in data.items():
 
         if adj.iloc[-1] >= df["EMA200"].iloc[-1] and within_30_pct_high:
 
+            close = df["Close"]
+            if isinstance(close, pd.DataFrame):
+                close = close.iloc[:, 0]
+            close = close.squeeze().reindex(adj.index).ffill().bfill()
+            ema9_close = float(close.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
+            last_close = float(close.iloc[-1])
+            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+
             # Calculate returns (short / medium horizons)
             return_1w = (adj.iloc[-1] / adj.iloc[-6] - 1) * 100  # 5 trading sessions (~1 calendar week)
             return_2w = (adj.iloc[-1] / adj.iloc[-11] - 1) * 100  # 10 trading sessions (~2 calendar weeks)
@@ -74,6 +85,9 @@ for ticker, df in data.items():
 
             summary.append({
                 "Symbol": ticker,
+                "Close": round(last_close, 2),
+                "9EMA": round(ema9_close, 2),
+                "Close_Below_9EMA": close_below_9ema,
                 "Return_1W": return_1w,
                 "Return_2W": return_2w,
                 "Return_1M": return_1m,
@@ -111,7 +125,18 @@ df_summary_sorted = df_summary.sort_values('Final_Rank').head(10) # get the top 
 
 # Assign position based on final rank
 df_summary_sorted['Position'] = np.arange(1, len(df_summary_sorted) + 1)
-cols = ['Position'] + [c for c in df_summary_sorted.columns if c != 'Position']
+cols = [
+    "Position",
+    "Symbol",
+    "Close",
+    "9EMA",
+    "Close_Below_9EMA",
+    "Return_1W",
+    "Return_2W",
+    "Return_1M",
+    "Return_3M",
+]
+df_summary_sorted = df_summary_sorted[cols]
 df_summary_sorted = df_summary_sorted[cols]
 
 FINAL_RESULT_ETF_DIR.mkdir(parents=True, exist_ok=True)

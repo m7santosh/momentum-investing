@@ -15,7 +15,7 @@ Ranking (swing / all-weather blend):
 
 Market_Regime: ^CRSLDX vs 50 / 200 EMA (Trend_Up / Trend_Down / Mixed_Above50 / Mixed_Below50 / Unknown).
 
-Close_Below_9EMA: per ETF, Yes if last **regular Close** is below the 9 EMA of **Close** (matches typical broker / TradingView “Close” charts). Trend gate and Return_* still use **Adj Close** (total return).
+Close_Below_9EMA: per ETF, Exit if last **regular Close** is below the 9 EMA of **Close**, else Hold (matches typical broker / TradingView “Close” charts). Trend gate and Return_* still use **Adj Close** (total return).
 
 How to read Volatility_Score (informational):
 - It is stdev of daily % returns over the last LB_1M sessions, ×100; higher = choppier last month.
@@ -242,7 +242,7 @@ def main() -> None:
             close_on_adj_index = _close_series(df).reindex(adj.index).ffill().bfill()
             ema9_close = float(close_on_adj_index.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
             last_close = float(close_on_adj_index.iloc[-1])
-            close_below_9ema = "Yes" if last_close < ema9_close else "No"
+            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
 
             # Peak proximity: avg(last/52w_high, last/max_in_window) → Rank_vs_Peak later
             high_ath = float(adj.max())

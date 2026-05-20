@@ -1,15 +1,12 @@
 """
-ETF relative strength with **automatic ranking-mode switch** (companion to momentum_rs_etfs.py).
+ETF relative strength vs ^CRSLDX (companion to momentum_rs_etfs.py).
 
-Uses the same universe, filters, and horizons as momentum_rs_etfs.py. Does not modify that file.
+Same universe and entry filters as momentum_rs_etfs.py (history, trend gate, new-listing liquidity).
+No extra RS cutoffs — each ETF is compared to N500 on 1W / 2W / 1M / 3M; ranking uses **1W / 2W / 1M
+RS only** (3M omitted for tactical rotation). Weighted_RS_pct = W_RANK on those horizons (highest first).
+Return_3M and RS_3M_vs_N500 are still shown in Excel for context.
 
-Ranking mode (chosen each run from ^CRSLDX 1M return and EMA regime):
-- **Trend** — benchmark |Return_1M| > FLAT_BENCHMARK_1M_ABS_PCT and regime not Mixed_*:
-  weights 10% / 10% / 25% / 55% (1W / 2W / 1M / 3M); sort by blended absolute + RS ranks (same idea as base script).
-- **Rotation** — flat/choppy tape (|benchmark 1M| <= threshold) OR Mixed_Above50 / Mixed_Below50:
-  weights 15% / 15% / 40% / 30%; sort by **RS composite only** (sector rotation vs flat N500).
-
-Output: final_result/etf/momentum_rs_etfs_adaptive.xlsx (Leaders sheet + Run_Info metadata).
+Output: final_result/etf/momentum_rs_etfs_adaptive.xlsx (Leaders + Run_Info).
 """
 
 from __future__ import annotations
@@ -36,14 +33,15 @@ _spec.loader.exec_module(base)
 
 OUT_FILENAME = "momentum_rs_etfs_adaptive.xlsx"
 TOP_N = base.TOP_N
-RETURN_SUFFIXES = base.RETURN_SUFFIXES
 
-# Switch to rotation when |N500 1M return| <= this (%)
-FLAT_BENCHMARK_1M_ABS_PCT = 2.0
+# Ranking weights on RS vs N500: 1W / 2W / 1M only (sum = 1; 3M excluded)
+W_RANK = (0.20, 0.40, 0.40)
 
-# Horizon weights (1W, 2W, 1M, 3M) — must sum to 1
-W_TREND = (0.10, 0.10, 0.25, 0.55)
-W_ROTATION = (0.15, 0.15, 0.40, 0.30)
+RS_RANK_COLS = (
+    "RS_1W_vs_N500",
+    "RS_2W_vs_N500",
+    "RS_1M_vs_N500",
+)
 
 ROUND_COLS = [
     "Peak_Proximity_Score",
@@ -61,12 +59,12 @@ ROUND_COLS = [
 FINAL_COLS = [
     "Position",
     "Symbol",
-    "Ranking_Mode",
     "Close",
     "9EMA",
     "Close_Below_9EMA",
-    "Rank_vs_Peak",
-    "Volatility_Score",
+    # "Rank_vs_Peak",
+    # "Volatility_Score",
+    "Weighted_RS_pct",
     "Return_1W",
     "Return_2W",
     "Return_1M",
@@ -74,7 +72,7 @@ FINAL_COLS = [
     "RS_1W_vs_N500",
     "RS_2W_vs_N500",
     "RS_1M_vs_N500",
-    "RS_3M_vs_N500",
+    # "RS_3M_vs_N500",
 ]
 
 
@@ -84,20 +82,20 @@ def _benchmark_return_1m(nifty_adj: pd.Series) -> float:
     return float((nifty_adj.iloc[-1] / nifty_adj.iloc[-base.LB_1M] - 1) * 100)
 
 
-def _select_ranking_mode(benchmark_1m_pct: float, market_regime: str) -> tuple[str, tuple[float, float, float, float]]:
-    rotation = False
-    if not pd.isna(benchmark_1m_pct) and abs(benchmark_1m_pct) <= FLAT_BENCHMARK_1M_ABS_PCT:
-        rotation = True
-    if market_regime in ("Mixed_Above50", "Mixed_Below50"):
-        rotation = True
-    if rotation:
-        return "Rotation", W_ROTATION
-    return "Trend", W_TREND
+def _weighted_excess_return(row: pd.Series) -> float:
+    if any(pd.isna(row[c]) for c in RS_RANK_COLS):
+        return float("nan")
+    w1w, w2w, w1m = W_RANK
+    return (
+        w1w * row["RS_1W_vs_N500"]
+        + w2w * row["RS_2W_vs_N500"]
+        + w1m * row["RS_1M_vs_N500"]
+    )
 
 
-def _weight_label(weights: tuple[float, float, float, float]) -> str:
-    w1, w2, w1m, w3m = weights
-    return f"1W={w1:.0%} 2W={w2:.0%} 1M={w1m:.0%} 3M={w3m:.0%}"
+def _weight_label() -> str:
+    w1, w2, w1m = W_RANK
+    return f"1W={w1:.0%} 2W={w2:.0%} 1M={w1m:.0%} (3M excluded)"
 
 
 def _collect_etf_rows(
@@ -130,7 +128,7 @@ def _collect_etf_rows(
                 close_on_adj_index.ewm(span=base.ETF_EMA_9, adjust=False).mean().iloc[-1]
             )
             last_close = float(close_on_adj_index.iloc[-1])
-            close_below_9ema = "Yes" if last_close < ema9_close else "No"
+            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
 
             high_ath = float(adj.max())
             ratio_52w = last / high_52w
@@ -182,47 +180,6 @@ def _collect_etf_rows(
     return summary
 
 
-def _apply_ranking(
-    df_summary: pd.DataFrame,
-    weights: tuple[float, float, float, float],
-    ranking_mode: str,
-) -> pd.DataFrame:
-    w1w, w2w, w1m, w3m = weights
-
-    for suf in RETURN_SUFFIXES:
-        df_summary[f"Rank_{suf}"] = df_summary[f"Return_{suf}"].rank(ascending=False)
-    for suf in RETURN_SUFFIXES:
-        df_summary[f"Rank_RS_{suf}"] = df_summary[f"RS_{suf}_vs_N500"].rank(
-            ascending=False, na_option="bottom"
-        )
-
-    df_summary["Abs_Score"] = (
-        w1w * df_summary["Rank_1W"]
-        + w2w * df_summary["Rank_2W"]
-        + w1m * df_summary["Rank_1M"]
-        + w3m * df_summary["Rank_3M"]
-    )
-    df_summary["RS_Score"] = (
-        w1w * df_summary["Rank_RS_1W"]
-        + w2w * df_summary["Rank_RS_2W"]
-        + w1m * df_summary["Rank_RS_1M"]
-        + w3m * df_summary["Rank_RS_3M"]
-    )
-
-    df_summary["Abs_Momentum_Rank"] = df_summary["Abs_Score"].rank(ascending=True)
-    df_summary["Relative_Strength_Rank"] = df_summary["RS_Score"].rank(ascending=True)
-
-    if ranking_mode == "Rotation":
-        df_summary["Sort_Key"] = df_summary["RS_Score"]
-    else:
-        df_summary["Sort_Key"] = (
-            df_summary["Abs_Momentum_Rank"] + df_summary["Relative_Strength_Rank"]
-        ) / 2
-
-    df_summary["Ranking_Mode"] = ranking_mode
-    return df_summary
-
-
 def main() -> None:
     end_date = datetime.today()
     start_date = end_date - timedelta(days=365 * 2)
@@ -241,7 +198,6 @@ def main() -> None:
         nifty_adj, base.BENCH_EMA_FAST, base.BENCH_EMA_SLOW
     )
     benchmark_1m = _benchmark_return_1m(nifty_adj)
-    ranking_mode, weights = _select_ranking_mode(benchmark_1m, market_regime)
 
     summary = _collect_etf_rows(nifty_adj, start_date, end_date)
     df_summary = pd.DataFrame(summary)
@@ -252,35 +208,40 @@ def main() -> None:
     for c in ROUND_COLS:
         df_summary[c] = df_summary[c].round(2)
 
-    df_summary["Rank_vs_Peak"] = (
-        df_summary["Peak_Proximity_Score"]
+    df_summary["Weighted_RS_pct"] = df_summary.apply(_weighted_excess_return, axis=1)
+    df_ranked = df_summary.dropna(subset=["Weighted_RS_pct"]).copy()
+    if df_ranked.empty:
+        print("No ETFs with valid RS vs N500 after trend filters.")
+        return
+
+    df_ranked["Rank_vs_Peak"] = (
+        df_ranked["Peak_Proximity_Score"]
         .rank(ascending=False, method="min", na_option="bottom")
         .astype(int)
     )
 
-    df_summary = _apply_ranking(df_summary, weights, ranking_mode)
-    df_summary["Market_Regime"] = market_regime
-
     df_out = (
-        df_summary.sort_values("Sort_Key")
+        df_ranked.sort_values("Weighted_RS_pct", ascending=False)
         .head(TOP_N)
         .reset_index(drop=True)
     )
     df_out.insert(0, "Position", np.arange(1, len(df_out) + 1))
+    df_out["Weighted_RS_pct"] = df_out["Weighted_RS_pct"].round(2)
     df_out = df_out[FINAL_COLS]
 
     run_info = pd.DataFrame(
         [
             {
                 "Run_Date": end_date.strftime("%Y-%m-%d"),
-                "Ranking_Mode": ranking_mode,
-                "Weight_Profile": _weight_label(weights),
+                "Weight_Profile": _weight_label(),
+                "Rank_By": "Weighted_RS_pct vs N500 (highest first)",
+                "Entry_Filters": "Same as momentum_rs_etfs.py (trend/liquidity/history)",
+                "RS_Extra_Cutoffs": "None",
                 "Benchmark_Return_1M_pct": round(benchmark_1m, 2)
                 if not pd.isna(benchmark_1m)
                 else None,
-                "Flat_Threshold_abs_1M_pct": FLAT_BENCHMARK_1M_ABS_PCT,
                 "Market_Regime": market_regime,
-                "ETFs_In_Universe": len(df_summary),
+                "ETFs_Ranked": len(df_ranked),
                 "Rows_Written": len(df_out),
             }
         ]
@@ -294,8 +255,9 @@ def main() -> None:
 
     print(f"Success: Wrote {len(df_out)} rows to {out_path}")
     print(
-        f"Ranking_Mode={ranking_mode}  Weights={_weight_label(weights)}  "
-        f"Benchmark_1M={benchmark_1m:.2f}%  Market_Regime={market_regime}"
+        f"Rank=Weighted_RS_pct  Weights={_weight_label()}  "
+        f"Ranked={len(df_ranked)}  Top={df_out.iloc[0]['Symbol']} "
+        f"({df_out.iloc[0]['Weighted_RS_pct']:.2f}%)"
     )
 
 
