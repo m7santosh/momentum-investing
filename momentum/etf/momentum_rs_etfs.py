@@ -1,9 +1,12 @@
 """
 ETF relative strength vs Nifty 500 (^CRSLDX): excess returns vs index over multiple horizons.
 
-Trend filters:
+Trend filters (established listings only, >= ~252 sessions):
 1. Price must be above the 200-day EMA.
 2. Price must be within 30% of its 52-week high (last close >= 70% of trailing ~252-session high).
+
+New listings (>= LB_3M sessions, < 52w history): skip 200 EMA / 52w gate; require
+MIN_ADTV_NEW_ETF_CRORES average daily turnover (INR Cr) over ADTV_LOOKBACK sessions.
 
 Ranking (swing / all-weather blend):
 - Horizons: 1W, 2W, 1M, 3M (trading sessions). Weights favor 3M; 6M omitted for ETFs (less idiosyncratic drift vs single stocks; 200 EMA / 52w already anchor slower trend).
@@ -73,8 +76,13 @@ BENCH_EMA_SLOW = 200
 # Short EMA for per-ETF “close below 9?” flag (regular Close, not Adj Close)
 ETF_EMA_9 = 9
 
-TOP_N = 20
+TOP_N = 30
 OUT_FILENAME = "momentum_rs_etfs.xlsx"
+
+# Minimum sessions for 3M return / RS; established path needs LB_52W for full trend gate
+MIN_HISTORY_SESSIONS = LB_3M
+MIN_ADTV_NEW_ETF_CRORES = 2.5  # recent listings: sector/thematic sleeves often < 5 Cr early on
+ADTV_LOOKBACK = 20
 
 RETURN_SUFFIXES = ("1W", "2W", "1M", "3M")
 
@@ -86,7 +94,7 @@ tickers = [
     "LIQUIDCASE.NS", "MAHKTECH.NS", "METALIETF.NS", "MIDCAPETF.NS", "MOCAPITAL.NS",
     "MODEFENCE.NS", "MON100.NS", "MOREALTY.NS", "MOTOUR.NS", "MOVALUE.NS",
     "NEXT50IETF.NS", "NIFTYBEES.NS", "OILIETF.NS", "PHARMABEES.NS", "PSUBNKBEES.NS",
-    "PVTBANIETF.NS", "MOMIDMTM.NS", "SILVERBEES.NS", "SMALLCAP.NS",
+    "PVTBANIETF.NS", "MOMIDMTM.NS", "SILVERBEES.NS", "SMALLCAP.NS", "CHEMICAL.NS"
 ]
 
 
@@ -102,6 +110,29 @@ def _adj_close_series(df: pd.DataFrame) -> pd.Series:
 def _close_series(df: pd.DataFrame) -> pd.Series:
     s = df["Close"]
     return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
+
+
+def _volume_series(df: pd.DataFrame) -> pd.Series:
+    s = df["Volume"]
+    return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
+
+
+def _avg_adtv_crores(adj: pd.Series, vol: pd.Series) -> float:
+    """Average daily traded value (INR crores) over last ADTV_LOOKBACK sessions."""
+    vol_aligned = vol.reindex(adj.index).fillna(0)
+    daily_turnover = adj * vol_aligned
+    n = min(ADTV_LOOKBACK, len(daily_turnover))
+    if n == 0:
+        return 0.0
+    return float(daily_turnover.tail(n).mean()) / 1e7
+
+
+def _passes_established_trend_gate(adj: pd.Series) -> bool:
+    """200 EMA + within PROXIMITY_OF_52W_HIGH of trailing 52w high; requires LB_52W bars."""
+    ema200 = adj.ewm(span=EMA_SPAN).mean().iloc[-1]
+    high_52w = adj.iloc[-LB_52W:].max()
+    last = adj.iloc[-1]
+    return last >= ema200 and last >= (high_52w * PROXIMITY_OF_52W_HIGH)
 
 
 def _fill_ohlcv_from_nse(df: pd.DataFrame, nse_row: dict) -> pd.DataFrame:
@@ -192,15 +223,20 @@ def main() -> None:
                 continue
 
             adj = _adj_close_series(df).dropna()
-            if len(adj) < LB_52W:
+            if len(adj) < MIN_HISTORY_SESSIONS:
                 continue
 
-            # Trend gate: 200 EMA + within PROXIMITY_OF_52W_HIGH of trailing 52w high
-            ema200 = adj.ewm(span=EMA_SPAN).mean().iloc[-1]
+            if len(adj) >= LB_52W:
+                if not _passes_established_trend_gate(adj):
+                    continue
+            else:
+                vol = _volume_series(df)
+                if _avg_adtv_crores(adj, vol) < MIN_ADTV_NEW_ETF_CRORES:
+                    continue
+                # new listing — momentum horizons only (no 200 EMA / 52w gate)
+
             high_52w = adj.iloc[-min(LB_52W, len(adj)):].max()
             last = adj.iloc[-1]
-            if last < ema200 or last < (high_52w * PROXIMITY_OF_52W_HIGH):
-                continue
 
             # Short swing flag: 9 EMA of **Close** vs last **Close** (chart/broker parity; not Adj Close).
             close_on_adj_index = _close_series(df).reindex(adj.index).ffill().bfill()
@@ -262,7 +298,7 @@ def main() -> None:
 
     df_summary = pd.DataFrame(summary)
     if df_summary.empty:
-        print("No ETFs passed the trend filters.")
+        print("No ETFs passed filters (history, liquidity, or trend gate).")
         return
 
     # Round numeric columns before ranks (stable ordering / Excel display)
