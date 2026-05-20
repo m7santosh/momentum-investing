@@ -365,15 +365,15 @@ def main() -> None:
         # "Market_Regime",
         "Close_Below_9EMA",
         # "Blended_Rank",
-        "Rank_vs_Peak",
+        # "Rank_vs_Peak",
         "Volatility_Score",
         "Return_1W",
         "Return_2W",
         "Return_1M",
         "Return_3M",
-        # "RS_1W_vs_N500",
-        # "RS_2W_vs_N500",
-        # "RS_1M_vs_N500",
+        "RS_1W_vs_N500",
+        "RS_2W_vs_N500",
+        "RS_1M_vs_N500",
         # "RS_3M_vs_N500"
     ]
     df_out = df_out[final_cols]
