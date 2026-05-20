@@ -24,9 +24,10 @@ tickers = [
     "XLC", "QQQ", "XLK", "SPY", "IWM", "VEA", "EEM", "MCHI", "CQQQ", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLRE", "XLY", "XLB", "SOXX", "SKYY", "ARKK", "ICLN", "TAN", "GLD", "GDX", "USO", "VNQ", "EWJ", "EWZ", "EWT", "EWY", "EWA", "EWG", "EWC", "EIDO", "FM", "KSA", "ARGT", "TUR", "THD", "GREK", "UUP", "MTUM", "QUAL", "USMV", "DXYZ", "DBC", "CPER", "FXI", "EFA", "PICK", "XME", "URA", "DBA", "UNG", "WEAT", "CORN", "FXE", "FXY", "FXB", "BITO"
 ]
 
-# Function to fetch historical data
+
 def get_data(ticker, start_date, end_date):
     return yf.download(ticker, start=start_date, end=end_date, multi_level_index=False, auto_adjust=False)
+
 
 # Set dates
 end_date = datetime.today()
@@ -121,10 +122,10 @@ df_summary["Final_Rank"] = (
 )
 
 # Sort by final rank and get top 10
-df_summary_sorted = df_summary.sort_values('Final_Rank').head(10) # get the top 10 stocks based on the final rank
+df_summary_sorted = df_summary.sort_values("Final_Rank").head(10)
 
 # Assign position based on final rank
-df_summary_sorted['Position'] = np.arange(1, len(df_summary_sorted) + 1)
+df_summary_sorted["Position"] = np.arange(1, len(df_summary_sorted) + 1)
 cols = [
     "Position",
     "Symbol",
@@ -136,7 +137,6 @@ cols = [
     "Return_1M",
     "Return_3M",
 ]
-df_summary_sorted = df_summary_sorted[cols]
 df_summary_sorted = df_summary_sorted[cols]
 
 FINAL_RESULT_ETF_DIR.mkdir(parents=True, exist_ok=True)
