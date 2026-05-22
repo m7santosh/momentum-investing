@@ -48,7 +48,8 @@ PORTFOLIO_STATE_ARCHIVE_DIR: Path | None = FINAL_RESULT_DIR / "portfolio_state_a
 #   each_run → last run JSON only. weekly|biweekly|monthly → context cache or rerank as-of session−7/14/30d.
 REBALANCE_COMPARE_PERIOD = "biweekly"
 # Session date (last bar you want): None | date | "YYYY-MM-DD". yfinance `end` is exclusive, so code passes end = day+1 00:00.
-RUN_AS_OF: date | str | None = '2026-05-01'
+# RUN_AS_OF: date | str | None = '2026-05-01'
+RUN_AS_OF: date | str | None = None
 
 
 def _coerce_run_as_of_config(value: object) -> date | None:
@@ -1224,7 +1225,7 @@ def main(
     # 3. ADTV_Cr: Ensures you can sell your position. Never buy more than 1% of this value.
 
     FINAL_RESULT_STOCK_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = FINAL_RESULT_STOCK_DIR / "quality_momentum_rs_dynamic.xlsx"
+    out_path = FINAL_RESULT_STOCK_DIR / "quality_momentum_rs_no_lv.xlsx"
 
     print(f"\nPortfolio summary (holdings = top {PORTFOLIO_SIZE} by Blended_Rank, by Marketcap):")
     for _, r in df_portfolio_mcap.iterrows():

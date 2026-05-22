@@ -54,8 +54,8 @@ PORTFOLIO_STATE_ARCHIVE_DIR: Path | None = FINAL_RESULT_DIR / "portfolio_state_a
 #   each_run → last run JSON only. weekly|biweekly|monthly → context cache or rerank as-of session−7/14/30d.
 REBALANCE_COMPARE_PERIOD = "biweekly"
 # Session date (last bar you want): None | date | "YYYY-MM-DD". yfinance `end` is exclusive, so code passes end = day+1 00:00.
-RUN_AS_OF: date | str | None = '2026-05-15'
-# RUN_AS_OF: date | str | None = None
+# RUN_AS_OF: date | str | None = '2026-05-15'
+RUN_AS_OF: date | str | None = None
 
 
 def _coerce_run_as_of_config(value: object) -> date | None:
