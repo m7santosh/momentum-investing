@@ -46,6 +46,9 @@ marker_size = []
 tail = 5
 end_date_idx = tail
 start_date, end_date = None, None
+HOVER_PIXEL_RADIUS = 14
+hover_points = []
+_last_hover_idx = None
 
 for i in range(tail):
     if i == tail-1:
@@ -204,6 +207,111 @@ canvas = FigureCanvasTkAgg(fig, master=chart_frame)
 canvas_widget = canvas.get_tk_widget()
 canvas_widget.grid(row=0, column=0, sticky='nsew')
 
+_hover_annot = ax_rrg.annotate(
+    '',
+    xy=(0, 0),
+    xytext=(12, 12),
+    textcoords='offset points',
+    bbox=dict(boxstyle='round,pad=0.45', fc='white', ec='gray', alpha=0.95),
+    arrowprops=dict(arrowstyle='->', color='gray'),
+    fontsize=9,
+    visible=False,
+    zorder=100,
+)
+
+
+def _hide_hover_tooltip():
+    global _last_hover_idx
+    if _hover_annot.get_visible():
+        _hover_annot.set_visible(False)
+        _last_hover_idx = None
+
+
+def _format_hover_text(point):
+    lines = [
+        f"{point['ticker']} ({point['name']})",
+        f"Date: {point['date']}",
+        f"RS Ratio: {point['rsr']:.2f}  |  RS Momentum: {point['rsm']:.2f}",
+        f"Quadrant: {point['status']}",
+        f"Price: {point['price']:.2f}",
+    ]
+    if point['wow_chg'] is not None:
+        lines.append(f"WoW: {point['wow_chg']:+.1f}%")
+    if point['is_current']:
+        lines.append('(current week)')
+    return '\n'.join(lines)
+
+
+def _append_hover_points(j, filtered_rsr, filtered_rsm):
+    ticker = tickers[j]
+    name = tickers_metadata_dict['name'][j]
+    prices = tickers_data[ticker]
+    n = len(filtered_rsr)
+    for k in range(n):
+        date = filtered_rsr.index[k]
+        rsr_val = float(filtered_rsr.iloc[k])
+        rsm_val = float(filtered_rsm.iloc[k])
+        price = float(prices.loc[date])
+        wow_chg = None
+        if k > 0:
+            prev_date = filtered_rsr.index[k - 1]
+            prev_price = float(prices.loc[prev_date])
+            wow_chg = (price - prev_price) / prev_price * 100
+        status = get_status(rsr_val, rsm_val)
+        hover_points.append(
+            {
+                'x': rsr_val,
+                'y': rsm_val,
+                'ticker': ticker,
+                'name': name,
+                'date': str(date).split(' ')[0],
+                'rsr': rsr_val,
+                'rsm': rsm_val,
+                'status': status.capitalize() if status else '',
+                'price': price,
+                'wow_chg': wow_chg,
+                'is_current': k == n - 1,
+            }
+        )
+
+
+def on_mouse_move(event):
+    global _last_hover_idx
+
+    if event.inaxes != ax_rrg or not hover_points:
+        if _hover_annot.get_visible():
+            _hide_hover_tooltip()
+            canvas.draw_idle()
+        return
+
+    best_i = None
+    best_dist = HOVER_PIXEL_RADIUS ** 2
+    for i, pt in enumerate(hover_points):
+        px, py = ax_rrg.transData.transform((pt['x'], pt['y']))
+        dist = (px - event.x) ** 2 + (py - event.y) ** 2
+        if dist < best_dist:
+            best_dist = dist
+            best_i = i
+
+    if best_i is None:
+        if _hover_annot.get_visible():
+            _hide_hover_tooltip()
+            canvas.draw_idle()
+        return
+
+    if best_i == _last_hover_idx and _hover_annot.get_visible():
+        return
+
+    pt = hover_points[best_i]
+    _hover_annot.xy = (pt['x'], pt['y'])
+    _hover_annot.set_text(_format_hover_text(pt))
+    _hover_annot.set_visible(True)
+    _last_hover_idx = best_i
+    canvas.draw_idle()
+
+
+canvas.mpl_connect('motion_notify_event', on_mouse_move)
+
 controls_frame = tk.Frame(root, height=88, padx=8, pady=6)
 controls_frame.grid(row=1, column=0, sticky='ew')
 controls_frame.grid_propagate(False)
@@ -248,11 +356,29 @@ def on_date_change(val):
         redraw_chart()
 
 
+def stop_playback():
+    global is_playing, _after_id, end_date_idx
+    is_playing = False
+    play_button.config(text='Play')
+    if _after_id is not None:
+        try:
+            root.after_cancel(_after_id)
+        except tk.TclError:
+            pass
+        _after_id = None
+    end_date_idx = date_max_idx
+    date_scale.set(end_date_idx)
+    date_value_label.config(text=format_date_label(end_date_idx))
+
+
 def toggle_play():
     global is_playing, _after_id
     is_playing = not is_playing
     play_button.config(text='Pause' if is_playing else 'Play')
     if is_playing:
+        if int(date_scale.get()) >= date_max_idx:
+            stop_playback()
+            return
         schedule_update()
     elif _after_id is not None:
         try:
@@ -427,22 +553,31 @@ def redraw_chart():
             pass
 
 def update_frame():
-    global start_date, end_date, end_date_idx
+    global start_date, end_date, end_date_idx, hover_points, _last_hover_idx
 
     if not root.winfo_exists():
         return
 
+    hover_points = []
+    _last_hover_idx = None
+    _hide_hover_tooltip()
+
+    reached_end = False
     if not is_playing:
         end_date_idx = int(date_scale.get())
         end_date = rsr_tickers[0].index[end_date_idx]
         start_date = rsr_tickers[0].index[end_date_idx - tail]
     else:
-        start_date += pd.to_timedelta(1, unit='W')
-        end_date += pd.to_timedelta(1, unit='W')
-
-    if end_date == rsr_tickers[0].index[-1]:
-        start_date = rsr_tickers[0].index[0]
-        end_date = start_date + pd.to_timedelta(tail, unit='W')
+        current_idx = int(date_scale.get())
+        if current_idx >= date_max_idx:
+            reached_end = True
+        else:
+            end_date_idx = current_idx + 1
+            end_date = rsr_tickers[0].index[end_date_idx]
+            start_date = rsr_tickers[0].index[end_date_idx - tail]
+            date_scale.set(end_date_idx)
+            date_value_label.config(text=format_date_label(end_date_idx))
+            reached_end = end_date_idx >= date_max_idx
 
     for j in range(len(tickers)):
         remove_ticker_artists(j)
@@ -457,6 +592,7 @@ def update_frame():
         ]
         if filtered_rsr_tickers.empty:
             continue
+        _append_hover_points(j, filtered_rsr_tickers, filtered_rsm_tickers)
         color = get_color(filtered_rsr_tickers.values[-1], filtered_rsm_tickers.values[-1])
         scatter_plots[j] = ax_rrg.scatter(
             filtered_rsr_tickers.values, filtered_rsm_tickers.values, color=color, s=marker_size
@@ -482,6 +618,9 @@ def update_frame():
         except (tk.TclError, IndexError):
             pass
 
+    if reached_end:
+        stop_playback()
+
 _after_id = None
 
 
@@ -494,7 +633,8 @@ def schedule_update():
         canvas.draw_idle()
     except tk.TclError:
         return
-    _after_id = root.after(50, schedule_update)
+    if is_playing:
+        _after_id = root.after(50, schedule_update)
 
 
 def on_close():
