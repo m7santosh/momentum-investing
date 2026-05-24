@@ -1,11 +1,31 @@
+import sys
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
+from matplotlib.patches import FancyArrowPatch
 from scipy import interpolate
 import tkinter as tk
 from tkinter import ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from utils.nse_bhavcopy import (
+    fetch_weekly_close_series,
+    load_nse_index_weekly_histories,
+)
+sys.path.insert(0, str(Path(__file__).resolve().parent / "etf"))
+from etf_universe import (
+    ETF_TO_NSE_INDEX,
+    RRG_BENCHMARK_NSE,
+    RRG_DEFAULT_VISIBLE,
+    RRG_ETF_TICKERS,
+)
 
 
 def get_close_prices(downloaded):
@@ -41,20 +61,14 @@ def compute_rrg_indicators(ticker_series, benchmark_series, window=14):
     return rsr, rsr_roc, rsm
 
 
-is_playing = False
-marker_size = []
+_TAIL_MARKER_SIZE = 22
+_HEAD_ARROW_SCALE = 14
 tail = 5
-end_date_idx = tail
+end_date_idx = None  # set after data load to latest week
 start_date, end_date = None, None
 HOVER_PIXEL_RADIUS = 14
 hover_points = []
 _last_hover_idx = None
-
-for i in range(tail):
-    if i == tail-1:
-        marker_size.append(50)
-    else:
-        marker_size.append(10)
 
 def get_line_points(x, y):
     # Interpolate a smooth curve through the scatter points
@@ -83,31 +97,56 @@ def get_color(x, y):
     elif get_status(x, y) == 'weakening':
         return 'yellow'
     
-# Retrieve historical prices 
 period = '1y'
-requested_tickers = ['^NSEBANK', '^CNXENERGY', '^CNXMETAL', '^CNXAUTO', 'NIFTY_CAPITAL_MKT.NS', '^CNXPHARMA', 'NIFTY_RAILWAYSPSU.NS', 'NIFTY_OIL_AND_GAS.NS', 'NIFTY_CHEMICALS.NS']
+requested_tickers = RRG_ETF_TICKERS.copy()
 tickers = requested_tickers.copy()
-tickers_metadata_dict = {
-    'symbol': [],
-    'name': []
-}
+tickers_metadata_dict = {'symbol': [], 'name': []}
 
-for i in range(len(tickers)):
-    try:
-        info = yf.Ticker(tickers[i]).info
-        tickers_metadata_dict['symbol'].append(info.get('symbol', tickers[i]))
-        tickers_metadata_dict['name'].append(info.get('longName', tickers[i]))
-    except Exception:
-        tickers_metadata_dict['symbol'].append(tickers[i])
-        tickers_metadata_dict['name'].append(tickers[i])
+for etf in tickers:
+    nse_index = ETF_TO_NSE_INDEX[etf]
+    tickers_metadata_dict['symbol'].append(etf.replace('.NS', ''))
+    tickers_metadata_dict['name'].append(f"{etf.replace('.NS', '')} → {nse_index}")
 
-tickers_to_show = tickers.copy()
+_use_default_indices_on_load = False
+tickers_to_show = (
+    [t for t in tickers if t in RRG_DEFAULT_VISIBLE]
+    if _use_default_indices_on_load
+    else tickers.copy()
+)
 
-benchmark = '^CRSLDX'
-
-tickers_data = get_close_prices(yf.download(tickers, period=period, interval="1wk"))
-benchmark_data = get_close_prices(yf.download(benchmark, period=period, interval="1wk")).squeeze()
 window = 14
+min_weekly_points = window + 2
+
+unmapped = sorted(t for t in ETF_TO_NSE_INDEX if not ETF_TO_NSE_INDEX.get(t))
+if unmapped:
+    print(f"RRG: skipping ETFs without NSE index map: {unmapped}")
+
+
+def load_price_history(etf_symbol: str) -> pd.Series:
+    """Reload one series: mapped NSE index weekly, else Yahoo/bhavcopy fallback."""
+    index_name = ETF_TO_NSE_INDEX.get(etf_symbol)
+    if index_name:
+        weekly = load_nse_index_weekly_histories(
+            [index_name], period=period, min_points=min_weekly_points
+        ).get(index_name, pd.Series(dtype=float))
+        if len(weekly) >= min_weekly_points:
+            return weekly
+    return fetch_weekly_close_series(etf_symbol, period=period, min_points=min_weekly_points)
+
+
+print("Loading NSE index EOD (mapped ETFs) for RRG...")
+unique_indices = list(dict.fromkeys(ETF_TO_NSE_INDEX[t] for t in tickers))
+weekly_by_index = load_nse_index_weekly_histories(
+    list(dict.fromkeys(unique_indices + [RRG_BENCHMARK_NSE])),
+    period=period,
+    min_points=min_weekly_points,
+)
+ticker_frames = {
+    etf: weekly_by_index.get(ETF_TO_NSE_INDEX[etf], pd.Series(dtype=float))
+    for etf in tickers
+}
+tickers_data = pd.DataFrame(ticker_frames)
+benchmark_data = weekly_by_index.get(RRG_BENCHMARK_NSE, pd.Series(dtype=float))
 
 available_tickers = [
     t for t in tickers
@@ -173,12 +212,12 @@ def update_rrg():
 
 root = tk.Tk()
 root.title('RRG Indicator')
-root.geometry('1000x650')
-root.minsize(800, 500)
+root.geometry('1100x900')
+root.minsize(900, 650)
 root.resizable(True, True)
 root.columnconfigure(0, weight=1)
-root.rowconfigure(0, weight=1)
-root.rowconfigure(2, weight=0)
+root.rowconfigure(0, weight=2)
+root.rowconfigure(2, weight=1)
 
 chart_frame = tk.Frame(root)
 chart_frame.grid(row=0, column=0, sticky='nsew')
@@ -316,19 +355,44 @@ controls_frame = tk.Frame(root, height=88, padx=8, pady=6)
 controls_frame.grid(row=1, column=0, sticky='ew')
 controls_frame.grid_propagate(False)
 
-date_max_idx = len(rsr_tickers[0]) - 2
-end_date_idx = tail
-start_date = rsr_tickers[0].index[0]
-end_date = rsr_tickers[0].index[end_date_idx]
+default_indices_var = tk.BooleanVar(value=_use_default_indices_on_load)
+select_all_var = tk.BooleanVar(
+    value=not _use_default_indices_on_load or len(tickers_to_show) == len(tickers)
+)
+_select_all_updating = False
+
+_rrg_index = rsr_tickers[0].index
+date_max_idx = len(_rrg_index) - 1
+end_date_idx = date_max_idx
+start_date = _rrg_index[end_date_idx - tail]
+end_date = _rrg_index[end_date_idx]
 
 
 def format_date_label(idx):
     return str(rsr_tickers[0].index[int(idx)]).split(' ')[0]
 
 
-def update_marker_sizes():
-    global marker_size
-    marker_size = [50 if i == tail - 1 else 10 for i in range(tail)]
+def _tail_marker_sizes(n_points: int) -> list[int]:
+    return [_TAIL_MARKER_SIZE] * n_points
+
+
+def _add_head_arrow(x_vals, y_vals, color: str):
+    """Arrow on the last tail segment (direction of movement)."""
+    if len(x_vals) < 2:
+        return None
+    arrow = FancyArrowPatch(
+        (float(x_vals[-2]), float(y_vals[-2])),
+        (float(x_vals[-1]), float(y_vals[-1])),
+        arrowstyle='-|>',
+        mutation_scale=_HEAD_ARROW_SCALE,
+        linewidth=1.8,
+        color=color,
+        zorder=5,
+        shrinkA=0,
+        shrinkB=0,
+    )
+    ax_rrg.add_patch(arrow)
+    return arrow
 
 
 def on_tail_change(val):
@@ -342,55 +406,86 @@ def on_tail_change(val):
     if end_date_idx < tail:
         end_date_idx = tail
         date_scale.set(end_date_idx)
-    update_marker_sizes()
     date_value_label.config(text=format_date_label(end_date_idx))
-    if not is_playing:
-        redraw_chart()
+    redraw_chart()
 
 
 def on_date_change(val):
     global end_date_idx
     end_date_idx = int(float(val))
     date_value_label.config(text=format_date_label(end_date_idx))
-    if not is_playing:
-        redraw_chart()
+    redraw_chart()
 
 
-def stop_playback():
-    global is_playing, _after_id, end_date_idx
-    is_playing = False
-    play_button.config(text='Play')
-    if _after_id is not None:
-        try:
-            root.after_cancel(_after_id)
-        except tk.TclError:
-            pass
-        _after_id = None
-    end_date_idx = date_max_idx
+def update_next_week_button():
+    if int(date_scale.get()) >= date_max_idx:
+        next_week_button.state(['disabled'])
+    else:
+        next_week_button.state(['!disabled'])
+
+
+def step_next_week():
+    global end_date_idx
+    current_idx = int(date_scale.get())
+    if current_idx >= date_max_idx:
+        return
+    end_date_idx = current_idx + 1
     date_scale.set(end_date_idx)
     date_value_label.config(text=format_date_label(end_date_idx))
+    redraw_chart()
 
 
-def toggle_play():
-    global is_playing, _after_id
-    is_playing = not is_playing
-    play_button.config(text='Pause' if is_playing else 'Play')
-    if is_playing:
-        if int(date_scale.get()) >= date_max_idx:
-            stop_playback()
-            return
-        schedule_update()
-    elif _after_id is not None:
-        try:
-            root.after_cancel(_after_id)
-        except tk.TclError:
-            pass
-        _after_id = None
-        redraw_chart()
+next_week_button = ttk.Button(controls_frame, text='Next Week', width=10, command=step_next_week)
+next_week_button.pack(side=tk.LEFT, padx=(0, 12))
 
 
-play_button = ttk.Button(controls_frame, text='Play', width=10, command=toggle_play)
-play_button.pack(side=tk.LEFT, padx=(0, 12))
+def _sync_select_all_checkbox():
+    if not checkbox_vars:
+        return
+    select_all_var.set(all(checkbox_vars[i].get() for i in range(len(tickers))))
+
+
+def apply_select_all(select_all: bool):
+    global tickers_to_show, _select_all_updating
+    _select_all_updating = True
+    default_indices_var.set(False)
+    tickers_to_show = tickers.copy() if select_all else []
+    for i in range(len(tickers)):
+        checkbox_vars[i].set(select_all)
+    select_all_var.set(select_all)
+    _select_all_updating = False
+    redraw_chart()
+
+
+def on_select_all_toggle():
+    if _select_all_updating:
+        return
+    apply_select_all(select_all_var.get())
+
+
+def apply_default_indices_visibility(use_defaults: bool):
+    global tickers_to_show
+    if use_defaults:
+        tickers_to_show = [t for t in tickers if t in RRG_DEFAULT_VISIBLE]
+    else:
+        tickers_to_show = tickers.copy()
+    for i, etf in enumerate(tickers):
+        checkbox_vars[i].set(etf in tickers_to_show)
+    _sync_select_all_checkbox()
+    redraw_chart()
+
+
+def on_default_indices_toggle():
+    apply_default_indices_visibility(default_indices_var.get())
+
+
+default_indices_cb = ttk.Checkbutton(
+    controls_frame,
+    text='Default indices',
+    variable=default_indices_var,
+    command=on_default_indices_toggle,
+)
+default_indices_cb.pack(side=tk.LEFT, padx=(0, 12))
 
 tail_row = tk.Frame(controls_frame)
 tail_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
@@ -424,64 +519,196 @@ date_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
 date_value_label = tk.Label(date_row, text=format_date_label(end_date_idx), width=12, anchor='w')
 date_value_label.pack(side=tk.LEFT, padx=(8, 0))
 
-table = tk.Frame(master=root)
-table.grid(row=2, column=0, sticky='ew')
+table_section = tk.Frame(root)
+table_section.grid(row=2, column=0, sticky='nsew', padx=4, pady=(0, 4))
+table_section.columnconfigure(0, weight=1)
+table_section.rowconfigure(0, weight=1)
+
+scroll_wrap = tk.Frame(table_section)
+scroll_wrap.grid(row=0, column=0, sticky='nsew')
+scroll_wrap.columnconfigure(0, weight=1)
+scroll_wrap.rowconfigure(1, weight=1)
+
+table_header = tk.Frame(scroll_wrap)
+table_header.grid(row=0, column=0, sticky='ew')
+
+header_scroll_gutter = tk.Frame(scroll_wrap, width=18)
+header_scroll_gutter.grid(row=0, column=1, sticky='ns')
+
+body_wrap = tk.Frame(scroll_wrap)
+body_wrap.grid(row=1, column=0, sticky='nsew')
+body_wrap.columnconfigure(0, weight=1)
+body_wrap.rowconfigure(0, weight=1)
+
+table_scroll_y = tk.Scrollbar(scroll_wrap, orient=tk.VERTICAL)
+table_scroll_y.grid(row=1, column=1, sticky='ns')
+
+table_scroll_x = tk.Scrollbar(scroll_wrap, orient=tk.HORIZONTAL)
+table_scroll_x.grid(row=2, column=0, sticky='ew')
+
+table_canvas = tk.Canvas(
+    body_wrap,
+    highlightthickness=0,
+    yscrollcommand=table_scroll_y.set,
+    xscrollcommand=table_scroll_x.set,
+)
+table_canvas.grid(row=0, column=0, sticky='nsew')
+table_scroll_y.config(command=table_canvas.yview)
+table_scroll_x.config(command=table_canvas.xview)
+
+
+def _sync_header_scroll_gutter(_event=None):
+    table_scroll_y.update_idletasks()
+    gutter_w = table_scroll_y.winfo_width()
+    if gutter_w > 1:
+        header_scroll_gutter.configure(width=gutter_w)
+
+table_body = tk.Frame(table_canvas)
+_table_canvas_win = table_canvas.create_window((0, 0), window=table_body, anchor='nw')
+
+# Character widths — header and body use the same values for alignment.
+_TABLE_COL_CHARS = [9, 34, 9, 6, 9]
+_TABLE_CELL_PADX = (2, 1)
+_TABLE_ROW_PADY = 1
+_TABLE_FONT = ('Arial', 10)
+_TABLE_FONT_BOLD = ('Arial', 10, 'bold')
+_TABLE_NEUTRAL_BG = root.cget('bg')
+_VISIBLE_COL = 4
+
+
+def _sync_table_layout(_event=None):
+    table_scroll_y.update_idletasks()
+    gutter_w = table_scroll_y.winfo_width()
+    if gutter_w > 1:
+        header_scroll_gutter.configure(width=gutter_w)
+    table_header.update_idletasks()
+    table_body.update_idletasks()
+    total_w = max(table_header.winfo_reqwidth(), table_body.winfo_reqwidth(), 1)
+    table_canvas.itemconfigure(_table_canvas_win, width=total_w)
+    table_canvas.configure(scrollregion=table_canvas.bbox('all'))
+
+
+def _sync_table_scroll_region(_event=None):
+    _sync_table_layout()
+
+
+def _on_table_mousewheel(event):
+    if event.delta:
+        table_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+    elif event.num == 4:
+        table_canvas.yview_scroll(-1, 'units')
+    elif event.num == 5:
+        table_canvas.yview_scroll(1, 'units')
+
+
+table_canvas.bind('<Configure>', _sync_table_layout)
+table_body.bind('<Configure>', _sync_table_scroll_region)
+table_header.bind('<Configure>', _sync_table_layout)
+table_scroll_y.bind('<Configure>', _sync_header_scroll_gutter)
+for widget in (table_canvas, table_body, table_header, body_wrap, scroll_wrap, table_section):
+    widget.bind('<MouseWheel>', _on_table_mousewheel)
+    widget.bind('<Button-4>', _on_table_mousewheel)
+    widget.bind('<Button-5>', _on_table_mousewheel)
 
 headers = ['Symbol', 'Name', 'Price', 'Change', 'Visible']
-widths = [20, 40, 20, 20, 10]
 for j in range(len(headers)):
-    table.grid_columnconfigure(j, weight=widths[j])
-    tk.Label(table, text=headers[j], relief=tk.RIDGE, width=widths[j], font=('Arial', 12, 'bold')).grid(
-        row=0, column=j, sticky='ew'
-    )
+    if j == _VISIBLE_COL:
+        visible_header = tk.Frame(
+            table_header, relief=tk.RIDGE, bg=_TABLE_NEUTRAL_BG, highlightthickness=0
+        )
+        visible_header.grid(
+            row=0,
+            column=j,
+            sticky='ew',
+            padx=_TABLE_CELL_PADX,
+            pady=_TABLE_ROW_PADY,
+        )
+        tk.Label(
+            visible_header,
+            text=headers[j],
+            width=5,
+            anchor='w',
+            font=_TABLE_FONT_BOLD,
+            bg=_TABLE_NEUTRAL_BG,
+        ).pack(side=tk.LEFT)
+        select_all_cb = ttk.Checkbutton(visible_header, variable=select_all_var)
+        select_all_cb.pack(side=tk.LEFT)
+    else:
+        anchor = 'e' if j in (2, 3) else 'w'
+        tk.Label(
+            table_header,
+            text=headers[j],
+            width=_TABLE_COL_CHARS[j],
+            relief=tk.RIDGE,
+            anchor=anchor,
+            font=_TABLE_FONT_BOLD,
+            bg=_TABLE_NEUTRAL_BG,
+        ).grid(
+            row=0,
+            column=j,
+            sticky='ew',
+            padx=_TABLE_CELL_PADX,
+            pady=_TABLE_ROW_PADY,
+        )
 
 def update_entry(event):
     global tickers_data
-    symbol = event.widget.get()
-    # Check if the symbol exists with yahoo finance 
+    symbol = event.widget.get().strip()
+    if not symbol.endswith('.NS'):
+        symbol = f'{symbol}.NS'
+    row = int(event.widget.grid_info()['row'])
     try:
-        ticker = yf.Ticker(symbol).info
-        # Replace in tickers 
-        row = event.widget.grid_info()['row']
-        # replace dataframe column 
-        tickers_data[symbol] = get_close_prices(yf.download(symbol, period=period, interval='1wk')).squeeze()
+        series = load_price_history(symbol)
+        if len(series) < min_weekly_points:
+            raise ValueError('insufficient weekly history')
+        tickers_data[symbol] = series
+        try:
+            ticker = yf.Ticker(symbol).info
+            long_name = ticker.get('longName', symbol)
+        except Exception:
+            long_name = symbol
+        index_name = ETF_TO_NSE_INDEX.get(symbol)
+        display_name = (
+            f"{symbol.replace('.NS', '')} → {index_name}"
+            if index_name
+            else long_name
+        )
         # If previous symbol is in the ticker to show list, replace it with the new symbol 
-        previous_symbol = tickers[row - 1]
+        previous_symbol = tickers[row]
 
         if previous_symbol in tickers_to_show:
             tickers_to_show.remove(previous_symbol)
 
-        tickers[row - 1] = symbol
+        tickers[row] = symbol
 
-        if checkbox_vars[row - 1].get() and symbol not in tickers_to_show:
+        if checkbox_vars[row].get() and symbol not in tickers_to_show:
             tickers_to_show.append(symbol)
 
         # Check if symbol is in the metadata dictionary 
-        if symbol not in tickers_metadata_dict['symbol']:
-            # Add the symbol to the metadata dictionary
-            tickers_metadata_dict['symbol'][row-1] = symbol
-            tickers_metadata_dict['name'][row-1] = ticker['longName']
-
-        # Update the name label 
-        table.grid_slaves(row=row, column=1)[0].config(text=ticker['longName'])
+        tickers_metadata_dict['symbol'][row] = symbol.replace('.NS', '')
+        tickers_metadata_dict['name'][row] = display_name
+        table_body.grid_slaves(row=row, column=1)[0].config(text=display_name)
         update_rrg()
         redraw_chart()
     except Exception as e:
         print(e)
         # Reset the entry to the previous symbol
         entry = event.widget
-        row = entry.grid_info()['row']
+        row = int(entry.grid_info()['row'])
         entry.delete(0, tk.END)
-        entry.insert(0, tickers_metadata_dict['symbol'][row-1])
+        entry.insert(0, tickers_metadata_dict['symbol'][row])
 
 def on_visibility_toggle(row_idx):
     global tickers_to_show
+    if default_indices_var.get():
+        default_indices_var.set(False)
     symbol = tickers[row_idx]
     if checkbox_vars[row_idx].get():
         if symbol not in tickers_to_show:
             tickers_to_show.append(symbol)
     else:
         tickers_to_show = [t for t in tickers_to_show if t != symbol]
+    _sync_select_all_checkbox()
     redraw_chart()
 
 def on_enter(event):
@@ -493,48 +720,85 @@ def on_leave(event):
 
 checkbox_vars = []
 
-for i in range(len(tickers_to_show)):
-    # Ticker symbol 
+for i in range(len(tickers)):
+    etf = tickers[i]
     symbol = tickers_metadata_dict['symbol'][i]
-    # Ticker name
     name = tickers_metadata_dict['name'][i]
-    # Ticker price at end date
-    price = round(tickers_data[symbol][end_date], 2)
-    # Ticker change from start date to end date in percentage
-    chg = round((price - tickers_data[symbol][start_date]) / tickers_data[symbol][start_date] * 100, 1)
+    price = round(tickers_data[etf][end_date], 2)
+    chg = round((price - tickers_data[etf][start_date]) / tickers_data[etf][start_date] * 100, 1)
     bg_color = get_color(rsr_tickers[i].iloc[-1], rsm_tickers[i].iloc[-1])
     fg_color = 'white' if bg_color in ['red', 'green'] else 'black'
     symbol_var = tk.StringVar()
     symbol_var.set(symbol)
-    entry = tk.Entry(table, textvariable=symbol_var, relief=tk.RIDGE, width=20, bg=bg_color, fg=fg_color, font=('Arial', 12))
-    entry.grid(row=i+1, column=0, sticky='ew')
+    entry = tk.Entry(
+        table_body,
+        textvariable=symbol_var,
+        width=_TABLE_COL_CHARS[0],
+        relief=tk.RIDGE,
+        bg=bg_color,
+        fg=fg_color,
+        font=_TABLE_FONT,
+    )
+    entry.grid(row=i, column=0, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
     entry.bind('<Return>', update_entry)
-    tk.Label(table, text=name, relief=tk.RIDGE, width=40, bg=bg_color, fg=fg_color, font=('Arial', 12)).grid(
-        row=i+1, column=1, sticky='ew'
+    tk.Label(
+        table_body,
+        text=name,
+        width=_TABLE_COL_CHARS[1],
+        relief=tk.RIDGE,
+        anchor='w',
+        bg=bg_color,
+        fg=fg_color,
+        font=_TABLE_FONT,
+    ).grid(row=i, column=1, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
+    tk.Label(
+        table_body,
+        text=price,
+        width=_TABLE_COL_CHARS[2],
+        relief=tk.RIDGE,
+        anchor='e',
+        bg=bg_color,
+        fg=fg_color,
+        font=_TABLE_FONT,
+    ).grid(row=i, column=2, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
+    tk.Label(
+        table_body,
+        text=chg,
+        width=_TABLE_COL_CHARS[3],
+        relief=tk.RIDGE,
+        anchor='e',
+        bg=bg_color,
+        fg=fg_color,
+        font=_TABLE_FONT,
+    ).grid(row=i, column=3, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
+    visible_cell = tk.Frame(
+        table_body, relief=tk.RIDGE, bg=_TABLE_NEUTRAL_BG, highlightthickness=0
     )
-    tk.Label(table, text=price, relief=tk.RIDGE, width=20, bg=bg_color, fg=fg_color, font=('Arial', 12)).grid(
-        row=i+1, column=2, sticky='ew'
-    )
-    tk.Label(table, text=chg, relief=tk.RIDGE, width=20, bg=bg_color, fg=fg_color, font=('Arial', 12)).grid(
-        row=i+1, column=3, sticky='ew'
-    )
-    checkbox_var = tk.BooleanVar(value=True)
+    visible_cell.grid(row=i, column=4, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
+    checkbox_var = tk.BooleanVar(value=tickers[i] in tickers_to_show)
     checkbox_vars.append(checkbox_var)
     checkbox = ttk.Checkbutton(
-        table,
+        visible_cell,
         variable=checkbox_var,
         command=lambda idx=i: on_visibility_toggle(idx),
     )
-    checkbox.grid(row=i+1, column=4, sticky='ew')
+    checkbox.pack(side=tk.LEFT)
+
+select_all_cb.config(command=on_select_all_toggle)
+_sync_select_all_checkbox()
+root.update_idletasks()
+_sync_header_scroll_gutter()
+_sync_table_layout()
 
 
 scatter_plots = [None] * len(tickers)
 line_plots = [None] * len(tickers)
+head_arrows = [None] * len(tickers)
 annotations = [None] * len(tickers)
 
 
 def remove_ticker_artists(j):
-    for artists in (scatter_plots, line_plots, annotations):
+    for artists in (scatter_plots, line_plots, head_arrows, annotations):
         artist = artists[j]
         if artist is not None:
             try:
@@ -546,6 +810,7 @@ def remove_ticker_artists(j):
 
 def redraw_chart():
     update_frame()
+    update_next_week_button()
     if root.winfo_exists():
         try:
             canvas.draw_idle()
@@ -562,25 +827,30 @@ def update_frame():
     _last_hover_idx = None
     _hide_hover_tooltip()
 
-    reached_end = False
-    if not is_playing:
-        end_date_idx = int(date_scale.get())
-        end_date = rsr_tickers[0].index[end_date_idx]
-        start_date = rsr_tickers[0].index[end_date_idx - tail]
-    else:
-        current_idx = int(date_scale.get())
-        if current_idx >= date_max_idx:
-            reached_end = True
-        else:
-            end_date_idx = current_idx + 1
-            end_date = rsr_tickers[0].index[end_date_idx]
-            start_date = rsr_tickers[0].index[end_date_idx - tail]
-            date_scale.set(end_date_idx)
-            date_value_label.config(text=format_date_label(end_date_idx))
-            reached_end = end_date_idx >= date_max_idx
+    end_date_idx = int(date_scale.get())
+    end_date = rsr_tickers[0].index[end_date_idx]
+    start_date = rsr_tickers[0].index[end_date_idx - tail]
 
     for j in range(len(tickers)):
         remove_ticker_artists(j)
+        try:
+            price = round(tickers_data[tickers[j]][end_date], 2)
+            chg = round(
+                (price - tickers_data[tickers[j]][start_date])
+                / tickers_data[tickers[j]][start_date]
+                * 100,
+                1,
+            )
+            table_body.grid_slaves(row=j, column=2)[0].config(text=price)
+            table_body.grid_slaves(row=j, column=3)[0].config(text=chg)
+            bg_color = get_color(rsr_tickers[j][end_date], rsm_tickers[j][end_date])
+            fg_color = 'white' if bg_color in ['red', 'green', 'blue'] else 'black'
+            for k in range(4):
+                cell = table_body.grid_slaves(row=j, column=k)[0]
+                cell.config(bg=bg_color, fg=fg_color)
+        except (tk.TclError, IndexError, KeyError):
+            pass
+
         if tickers[j] not in tickers_to_show:
             continue
 
@@ -594,56 +864,31 @@ def update_frame():
             continue
         _append_hover_points(j, filtered_rsr_tickers, filtered_rsm_tickers)
         color = get_color(filtered_rsr_tickers.values[-1], filtered_rsm_tickers.values[-1])
-        scatter_plots[j] = ax_rrg.scatter(
-            filtered_rsr_tickers.values, filtered_rsm_tickers.values, color=color, s=marker_size
-        )
-        line_plots[j] = ax_rrg.plot(
-            filtered_rsr_tickers.values, filtered_rsm_tickers.values, color='black', alpha=0.2
-        )[0]
+        xs = filtered_rsr_tickers.values
+        ys = filtered_rsm_tickers.values
+        if len(xs) >= 2:
+            scatter_plots[j] = ax_rrg.scatter(
+                xs[:-1],
+                ys[:-1],
+                color=color,
+                s=_tail_marker_sizes(len(xs) - 1),
+                zorder=4,
+            )
+            head_arrows[j] = _add_head_arrow(xs, ys, color)
+        else:
+            scatter_plots[j] = ax_rrg.scatter(
+                xs, ys, color=color, s=_tail_marker_sizes(len(xs)), zorder=4
+            )
+            head_arrows[j] = None
+        line_plots[j] = ax_rrg.plot(xs, ys, color='black', alpha=0.2, zorder=2)[0]
         annotations[j] = ax_rrg.annotate(
             tickers[j],
             (filtered_rsr_tickers.values[-1], filtered_rsm_tickers.values[-1]),
             fontsize=8,
         )
 
-        try:
-            price = round(tickers_data[tickers[j]][end_date], 2)
-            chg = round((price - tickers_data[tickers[j]][start_date]) / tickers_data[tickers[j]][start_date] * 100, 1)
-            table.grid_slaves(row=j+1, column=2)[0].config(text=price)
-            table.grid_slaves(row=j+1, column=3)[0].config(text=chg)
-            bg_color = get_color(rsr_tickers[j][end_date], rsm_tickers[j][end_date])
-            fg_color = 'white' if bg_color in ['red', 'green', 'blue'] else 'black'
-            for k in range(4):
-                table.grid_slaves(row=j+1, column=k)[0].config(bg=bg_color, fg=fg_color)
-        except (tk.TclError, IndexError):
-            pass
-
-    if reached_end:
-        stop_playback()
-
-_after_id = None
-
-
-def schedule_update():
-    global _after_id
-    if not root.winfo_exists() or not is_playing:
-        return
-    update_frame()
-    try:
-        canvas.draw_idle()
-    except tk.TclError:
-        return
-    if is_playing:
-        _after_id = root.after(50, schedule_update)
-
 
 def on_close():
-    global _after_id
-    if _after_id is not None:
-        try:
-            root.after_cancel(_after_id)
-        except tk.TclError:
-            pass
     plt.close(fig)
     root.quit()
     root.destroy()
