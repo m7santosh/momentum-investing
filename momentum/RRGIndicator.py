@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch
 from scipy import interpolate
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -570,8 +571,13 @@ scroll_wrap.grid(row=0, column=0, sticky='nsew')
 scroll_wrap.columnconfigure(0, weight=1)
 scroll_wrap.rowconfigure(1, weight=1)
 
-table_header = tk.Frame(scroll_wrap)
-table_header.grid(row=0, column=0, sticky='ew')
+_HEADER_ROW_PX = 40
+header_canvas = tk.Canvas(
+    scroll_wrap, height=_HEADER_ROW_PX, highlightthickness=0, borderwidth=0
+)
+header_canvas.grid(row=0, column=0, sticky='ew')
+table_header = tk.Frame(header_canvas)
+_header_canvas_win = header_canvas.create_window((0, 0), window=table_header, anchor='nw')
 
 header_scroll_gutter = tk.Frame(scroll_wrap, width=18)
 header_scroll_gutter.grid(row=0, column=1, sticky='ns')
@@ -591,11 +597,23 @@ table_canvas = tk.Canvas(
     body_wrap,
     highlightthickness=0,
     yscrollcommand=table_scroll_y.set,
-    xscrollcommand=table_scroll_x.set,
 )
 table_canvas.grid(row=0, column=0, sticky='nsew')
 table_scroll_y.config(command=table_canvas.yview)
-table_scroll_x.config(command=table_canvas.xview)
+
+
+def _table_xscroll_set(first, last):
+    table_scroll_x.set(first, last)
+
+
+def _table_xscroll(*args):
+    table_canvas.xview(*args)
+    header_canvas.xview(*args)
+
+
+table_canvas.configure(xscrollcommand=_table_xscroll_set)
+header_canvas.configure(xscrollcommand=_table_xscroll_set)
+table_scroll_x.config(command=_table_xscroll)
 
 
 def _sync_header_scroll_gutter(_event=None):
@@ -607,20 +625,112 @@ def _sync_header_scroll_gutter(_event=None):
 table_body = tk.Frame(table_canvas)
 _table_canvas_win = table_canvas.create_window((0, 0), window=table_body, anchor='nw')
 
-# Character widths — header and body use the same values for alignment.
+# Column layout — widths derived from header + cell content (font metrics).
 _COL_RANK = 0
 _COL_REF = 1
 _COL_INDEX = 2
 _COL_PRICE = 3
 _COL_CHANGE = 4
 _COL_VISIBLE = 5
-_TABLE_COL_CHARS = [4, 8, 34, 9, 6, 9]
+_TABLE_HEADERS = ['Rank', 'Ref ETF', 'Index', 'Price', 'Change', 'Visible']
 _TABLE_CELL_PADX = (2, 1)
 _TABLE_ROW_PADY = 1
 _TABLE_FONT = ('Arial', 10)
 _TABLE_FONT_BOLD = ('Arial', 10, 'bold')
 _TABLE_NEUTRAL_BG = root.cget('bg')
 _VISIBLE_COL = _COL_VISIBLE
+_TABLE_CELL_PAD_PX = 14
+_TABLE_VISIBLE_EXTRA_PX = 40
+_TABLE_ROW_MIN_PX = 24
+_table_col_widths_px: list[int] = []
+_table_font_obj = None
+_table_font_bold_obj = None
+
+
+def _get_table_fonts():
+    global _table_font_obj, _table_font_bold_obj
+    if _table_font_obj is None:
+        _table_font_obj = tkfont.Font(font=_TABLE_FONT)
+        _table_font_bold_obj = tkfont.Font(font=_TABLE_FONT_BOLD)
+    return _table_font_obj, _table_font_bold_obj
+
+
+def _text_px(text, *, bold: bool = False) -> int:
+    font, font_bold = _get_table_fonts()
+    f = font_bold if bold else font
+    return int(f.measure(str(text))) + _TABLE_CELL_PAD_PX
+
+
+def _compute_column_widths_px(end_ts, start_ts) -> list[int]:
+    """Pixel width per column from header text and current table values."""
+    rank_w = _text_px(_TABLE_HEADERS[_COL_RANK], bold=True)
+    ref_w = _text_px(_TABLE_HEADERS[_COL_REF], bold=True)
+    idx_w = _text_px(_TABLE_HEADERS[_COL_INDEX], bold=True)
+    price_w = _text_px(_TABLE_HEADERS[_COL_PRICE], bold=True)
+    chg_w = _text_px(_TABLE_HEADERS[_COL_CHANGE], bold=True)
+    vis_w = _text_px(_TABLE_HEADERS[_COL_VISIBLE], bold=True) + _TABLE_VISIBLE_EXTRA_PX
+
+    n = len(indices)
+    if n:
+        rank_w = max(rank_w, _text_px(str(n)))
+        for j in range(n):
+            ref_w = max(ref_w, _text_px(index_metadata['ref_etf'][j] or '-'))
+            idx_w = max(idx_w, _text_px(indices[j]))
+            try:
+                p = round(float(indices_data[indices[j]].loc[end_ts]), 2)
+                price_w = max(price_w, _text_px(p))
+            except (KeyError, TypeError, ValueError):
+                pass
+            chg = _tail_change_pct(j, start_ts, end_ts)
+            if chg != float('-inf'):
+                chg_w = max(chg_w, _text_px(round(chg, 1)))
+
+    return [rank_w, ref_w, idx_w, price_w, chg_w, vis_w]
+
+
+def _apply_table_column_widths(widths_px: list[int]):
+    global _table_col_widths_px
+    _table_col_widths_px = [int(w) for w in widths_px]
+    for col, w in enumerate(_table_col_widths_px):
+        table_header.columnconfigure(col, minsize=w, weight=0)
+        table_body.columnconfigure(col, minsize=w, weight=0)
+
+
+def _sync_index_entry_widths():
+    if not table_widgets or not _table_col_widths_px:
+        return
+    font, _ = _get_table_fonts()
+    chars = max(
+        len(_TABLE_HEADERS[_COL_INDEX]),
+        max((len(indices[i]) for i in range(len(indices))), default=0),
+    )
+    entry_px = int(chars * font.measure('0') + _TABLE_CELL_PAD_PX + 8)
+    if entry_px > _table_col_widths_px[_COL_INDEX]:
+        _table_col_widths_px[_COL_INDEX] = entry_px
+        table_header.columnconfigure(_COL_INDEX, minsize=entry_px)
+        table_body.columnconfigure(_COL_INDEX, minsize=entry_px)
+    for w in table_widgets:
+        w['index_entry'].config(width=chars)
+
+
+def _update_table_column_widths(end_ts, start_ts):
+    if not indices:
+        return
+    _apply_table_column_widths(_compute_column_widths_px(end_ts, start_ts))
+    _sync_index_entry_widths()
+    for row in range(len(indices)):
+        table_body.grid_rowconfigure(row, minsize=_TABLE_ROW_MIN_PX)
+    _sync_header_row_height()
+
+
+def _table_col_sticky(col: int) -> str:
+    return 'nsew'
+
+
+def _sync_header_row_height():
+    table_header.update_idletasks()
+    req_h = max(table_header.winfo_reqheight(), _HEADER_ROW_PX)
+    header_canvas.configure(height=req_h)
 
 
 def _sync_table_layout(_event=None):
@@ -630,9 +740,15 @@ def _sync_table_layout(_event=None):
         header_scroll_gutter.configure(width=gutter_w)
     table_header.update_idletasks()
     table_body.update_idletasks()
-    total_w = max(table_header.winfo_reqwidth(), table_body.winfo_reqwidth(), 1)
+    _sync_header_row_height()
+    if _table_col_widths_px:
+        total_w = sum(_table_col_widths_px)
+    else:
+        total_w = max(table_header.winfo_reqwidth(), table_body.winfo_reqwidth(), 1)
     table_canvas.itemconfigure(_table_canvas_win, width=total_w)
+    header_canvas.itemconfigure(_header_canvas_win, width=total_w)
     table_canvas.configure(scrollregion=table_canvas.bbox('all'))
+    header_canvas.configure(scrollregion=header_canvas.bbox('all'))
 
 
 def _sync_table_scroll_region(_event=None):
@@ -651,41 +767,52 @@ def _on_table_mousewheel(event):
 table_canvas.bind('<Configure>', _sync_table_layout)
 table_body.bind('<Configure>', _sync_table_scroll_region)
 table_header.bind('<Configure>', _sync_table_layout)
+header_canvas.bind('<Configure>', _sync_table_layout)
 table_scroll_y.bind('<Configure>', _sync_header_scroll_gutter)
-for widget in (table_canvas, table_body, table_header, body_wrap, scroll_wrap, table_section):
+for widget in (
+    table_canvas,
+    header_canvas,
+    table_body,
+    table_header,
+    body_wrap,
+    scroll_wrap,
+    table_section,
+):
     widget.bind('<MouseWheel>', _on_table_mousewheel)
     widget.bind('<Button-4>', _on_table_mousewheel)
     widget.bind('<Button-5>', _on_table_mousewheel)
 
-headers = ['Rank', 'Ref ETF', 'Index', 'Price', 'Change', 'Visible']
-for j in range(len(headers)):
+for j in range(len(_TABLE_HEADERS)):
     if j == _COL_VISIBLE:
         visible_header = tk.Frame(
-            table_header, relief=tk.RIDGE, bg=_TABLE_NEUTRAL_BG, highlightthickness=0
+            table_header,
+            relief=tk.RIDGE,
+            bg=_TABLE_NEUTRAL_BG,
+            highlightthickness=0,
         )
         visible_header.grid(
             row=0,
             column=j,
-            sticky='ew',
+            sticky='nsew',
             padx=_TABLE_CELL_PADX,
             pady=_TABLE_ROW_PADY,
         )
+        vis_hdr_inner = tk.Frame(visible_header, bg=_TABLE_NEUTRAL_BG)
+        vis_hdr_inner.pack(expand=True, fill=tk.BOTH, padx=2, pady=2)
         tk.Label(
-            visible_header,
-            text=headers[j],
-            width=5,
+            vis_hdr_inner,
+            text=_TABLE_HEADERS[j],
             anchor='w',
             font=_TABLE_FONT_BOLD,
             bg=_TABLE_NEUTRAL_BG,
         ).pack(side=tk.LEFT)
-        select_all_cb = ttk.Checkbutton(visible_header, variable=select_all_var)
-        select_all_cb.pack(side=tk.LEFT)
+        select_all_cb = ttk.Checkbutton(vis_hdr_inner, variable=select_all_var)
+        select_all_cb.pack(side=tk.LEFT, padx=(4, 0))
     else:
         anchor = 'e' if j in (_COL_RANK, _COL_PRICE, _COL_CHANGE) else 'w'
         tk.Label(
             table_header,
-            text=headers[j],
-            width=_TABLE_COL_CHARS[j],
+            text=_TABLE_HEADERS[j],
             relief=tk.RIDGE,
             anchor=anchor,
             font=_TABLE_FONT_BOLD,
@@ -693,10 +820,12 @@ for j in range(len(headers)):
         ).grid(
             row=0,
             column=j,
-            sticky='ew',
+            sticky=_table_col_sticky(j),
             padx=_TABLE_CELL_PADX,
             pady=_TABLE_ROW_PADY,
         )
+
+table_header.grid_rowconfigure(0, minsize=_HEADER_ROW_PX)
 
 def update_entry(event):
     global indices_data, indices, indices_to_show
@@ -791,45 +920,24 @@ def refresh_table_ranking():
         fg_color = 'white' if bg_color in ('red', 'green', 'blue') else 'black'
 
         rank_num = display_row + 1
-        w['rank_label'].grid(
-            row=display_row,
-            column=_COL_RANK,
-            sticky='ew',
-            padx=_TABLE_CELL_PADX,
-            pady=_TABLE_ROW_PADY,
-        )
-        w['ref_label'].grid(
-            row=display_row,
-            column=_COL_REF,
-            sticky='ew',
-            padx=_TABLE_CELL_PADX,
-            pady=_TABLE_ROW_PADY,
-        )
-        w['index_entry'].grid(
-            row=display_row,
-            column=_COL_INDEX,
-            sticky='ew',
-            padx=_TABLE_CELL_PADX,
-            pady=_TABLE_ROW_PADY,
-        )
-        w['price_label'].grid(
-            row=display_row,
-            column=_COL_PRICE,
-            sticky='ew',
-            padx=_TABLE_CELL_PADX,
-            pady=_TABLE_ROW_PADY,
-        )
-        w['chg_label'].grid(
-            row=display_row,
-            column=_COL_CHANGE,
-            sticky='ew',
-            padx=_TABLE_CELL_PADX,
-            pady=_TABLE_ROW_PADY,
-        )
+        for col, key in (
+            (_COL_RANK, 'rank_label'),
+            (_COL_REF, 'ref_label'),
+            (_COL_INDEX, 'index_entry'),
+            (_COL_PRICE, 'price_label'),
+            (_COL_CHANGE, 'chg_label'),
+        ):
+            w[key].grid(
+                row=display_row,
+                column=col,
+                sticky=_table_col_sticky(col),
+                padx=_TABLE_CELL_PADX,
+                pady=_TABLE_ROW_PADY,
+            )
         w['visible_cell'].grid(
             row=display_row,
             column=_COL_VISIBLE,
-            sticky='ew',
+            sticky='nsew',
             padx=_TABLE_CELL_PADX,
             pady=_TABLE_ROW_PADY,
         )
@@ -839,6 +947,7 @@ def refresh_table_ranking():
         w['chg_label'].config(text=chg_text)
         for key in ('rank_label', 'ref_label', 'index_entry', 'price_label', 'chg_label'):
             w[key].config(bg=bg_color, fg=fg_color)
+    _update_table_column_widths(end_ts, start_ts)
 
 
 checkbox_vars = []
@@ -860,7 +969,6 @@ for i in range(len(indices)):
     rank_label = tk.Label(
         table_body,
         text=i + 1,
-        width=_TABLE_COL_CHARS[_COL_RANK],
         relief=tk.RIDGE,
         anchor='e',
         bg=bg_color,
@@ -870,7 +978,6 @@ for i in range(len(indices)):
     ref_label = tk.Label(
         table_body,
         text=ref_etf,
-        width=_TABLE_COL_CHARS[_COL_REF],
         relief=tk.RIDGE,
         anchor='w',
         bg=bg_color,
@@ -880,7 +987,6 @@ for i in range(len(indices)):
     index_entry = tk.Entry(
         table_body,
         textvariable=index_var,
-        width=_TABLE_COL_CHARS[_COL_INDEX],
         relief=tk.RIDGE,
         bg=bg_color,
         fg=fg_color,
@@ -891,7 +997,6 @@ for i in range(len(indices)):
     price_label = tk.Label(
         table_body,
         text=price,
-        width=_TABLE_COL_CHARS[_COL_PRICE],
         relief=tk.RIDGE,
         anchor='e',
         bg=bg_color,
@@ -901,7 +1006,6 @@ for i in range(len(indices)):
     chg_label = tk.Label(
         table_body,
         text=chg,
-        width=_TABLE_COL_CHARS[_COL_CHANGE],
         relief=tk.RIDGE,
         anchor='e',
         bg=bg_color,
@@ -909,7 +1013,10 @@ for i in range(len(indices)):
         font=_TABLE_FONT,
     )
     visible_cell = tk.Frame(
-        table_body, relief=tk.RIDGE, bg=_TABLE_NEUTRAL_BG, highlightthickness=0
+        table_body,
+        relief=tk.RIDGE,
+        bg=_TABLE_NEUTRAL_BG,
+        highlightthickness=0,
     )
     checkbox_var = tk.BooleanVar(value=indices[i] in indices_to_show)
     checkbox_vars.append(checkbox_var)
@@ -918,7 +1025,7 @@ for i in range(len(indices)):
         variable=checkbox_var,
         command=lambda idx=i: on_visibility_toggle(idx),
     )
-    checkbox.pack(side=tk.LEFT)
+    checkbox.pack(anchor='center', expand=True)
     table_widgets.append(
         {
             'rank_label': rank_label,
