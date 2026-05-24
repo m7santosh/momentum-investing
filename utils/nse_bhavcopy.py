@@ -94,15 +94,34 @@ def _parse_bhavcopy_df(df: pd.DataFrame) -> dict[str, dict]:
     return result
 
 
-def fetch_bhavcopy(trade_date: date) -> dict[str, dict]:
+def fetch_bhavcopy(
+    trade_date: date,
+    *,
+    symbols: set[str] | None = None,
+) -> dict[str, dict]:
     """Download NSE CM equity bhavcopy for *trade_date*.
 
-    Returns ``{NSE_SYMBOL: {open, high, low, close, volume}}`` or ``{}``
-    on failure.  Result is cached; repeated calls for the same date are free.
+    NSE publishes one zip per day with **all** EQ symbols (~2000+). We cache the
+    full file once per date; pass *symbols* to return only the rows you need.
+
+    Returns ``{NSE_SYMBOL: {open, high, low, close, volume}}`` or ``{}``.
     """
     if trade_date in _CACHE:
-        return _CACHE[trade_date] or {}
+        full = _CACHE[trade_date]
+    else:
+        full = _download_bhavcopy_day(trade_date)
+        _CACHE[trade_date] = full
 
+    if not full:
+        return {}
+
+    if symbols is None:
+        return full
+    want = {s.strip().upper() for s in symbols if s}
+    return {k: v for k, v in full.items() if k in want}
+
+
+def _download_bhavcopy_day(trade_date: date) -> dict[str, dict] | None:
     sess = _session()
     for url in _bhavcopy_urls(trade_date):
         try:
@@ -116,19 +135,20 @@ def fetch_bhavcopy(trade_date: date) -> dict[str, dict]:
                 df = pd.read_csv(zf.open(csv_names[0]))
             result = _parse_bhavcopy_df(df)
             if result:
-                _CACHE[trade_date] = result
                 if trade_date not in _ANNOUNCED:
-                    print(f"  [NSE Bhavcopy] Fetched official EOD data for {trade_date} ({len(result)} symbols)")
+                    print(
+                        f"  [NSE Bhavcopy] {trade_date}: downloaded CM EOD file "
+                        f"({len(result)} EQ symbols in archive)"
+                    )
                     _ANNOUNCED.add(trade_date)
                 return result
         except Exception:
             continue
 
-    _CACHE[trade_date] = None
     if trade_date not in _ANNOUNCED:
         print(f"  [NSE Bhavcopy] Not available for {trade_date} — trying live quotes")
         _ANNOUNCED.add(trade_date)
-    return {}
+    return None
 
 
 def _safe_float(val: object) -> float:
@@ -288,7 +308,12 @@ def _parse_ind_close_all(text: str) -> dict[str, float]:
     return result
 
 
-def fetch_index_close_all(trade_date: date, *, quiet: bool = False) -> dict[str, float]:
+def fetch_index_close_all(
+    trade_date: date,
+    *,
+    quiet: bool = False,
+    rrg_index_count: int | None = None,
+) -> dict[str, float]:
     """All index closes for one session from NSE ``ind_close_all`` archive."""
     if trade_date in _INDEX_CLOSE_CACHE:
         return _INDEX_CLOSE_CACHE[trade_date] or {}
@@ -302,7 +327,13 @@ def fetch_index_close_all(trade_date: date, *, quiet: bool = False) -> dict[str,
             if result:
                 _INDEX_CLOSE_CACHE[trade_date] = result
                 if not quiet and trade_date not in _INDEX_CLOSE_ANNOUNCED:
-                    print(f"  [NSE Index EOD] {trade_date} ({len(result)} indices)")
+                    if rrg_index_count is not None:
+                        print(
+                            f"  [NSE Index EOD] {trade_date}: downloaded index archive "
+                            f"({len(result)} names in file; RRG uses {rrg_index_count})"
+                        )
+                    else:
+                        print(f"  [NSE Index EOD] {trade_date} ({len(result)} indices)")
                     _INDEX_CLOSE_ANNOUNCED.add(trade_date)
                 return result
     except Exception:
@@ -350,7 +381,9 @@ def fetch_index_close_histories(
     d = start_date
     while d <= end_date:
         if d.weekday() < 5:
-            day_map = fetch_index_close_all(d, quiet=quiet)
+            day_map = fetch_index_close_all(
+                d, quiet=quiet, rrg_index_count=len(index_names)
+            )
             if day_map:
                 sessions_loaded += 1
                 for name in index_names:
@@ -363,8 +396,8 @@ def fetch_index_close_histories(
 
     if quiet and sessions_loaded:
         print(
-            f"  [NSE Index EOD] Loaded {sessions_loaded} sessions "
-            f"for {len(index_names)} index(es)"
+            f"  [NSE Index EOD] RRG: {sessions_loaded} sessions × "
+            f"{len(index_names)} hardcoded index name(s)"
         )
 
     out: dict[str, pd.Series] = {}
@@ -374,6 +407,69 @@ def fetch_index_close_histories(
             out[name].name = name
         else:
             out[name] = pd.Series(dtype=float)
+    return out
+
+
+def period_calendar_days(period: str) -> int:
+    """Calendar lookback for weekly RRG (includes ~30w warmup before navigable window)."""
+    if period in ("6m", "6mo"):
+        return 400
+    if period == "1y":
+        return 600
+    if period == "2y":
+        return 1150
+    return 400
+
+
+def load_nse_etf_weekly_histories(
+    nse_symbols: list[str],
+    *,
+    period: str = "1y",
+    min_points: int = 15,
+    quiet: bool = False,
+) -> dict[str, "pd.Series"]:
+    """Weekly closes from NSE CM bhavcopy only (NSE-listed ETFs, EQ series).
+
+    *nse_symbols* are bare NSE tickers (e.g. ``GOLDBEES``, not ``GOLDBEES.NS``).
+    One bhavcopy download per trading day, shared across all symbols.
+    """
+    import pandas as pd
+
+    unique = list(dict.fromkeys(s.strip().upper() for s in nse_symbols if s))
+    if not unique:
+        return {}
+
+    want = set(unique)
+    end = today_ist()
+    start = end - timedelta(days=period_calendar_days(period))
+    buckets: dict[str, list[tuple[pd.Timestamp, float]]] = {s: [] for s in unique}
+    sessions_loaded = 0
+
+    d = start
+    while d <= end:
+        if d.weekday() < 5:
+            day_map = fetch_bhavcopy(d, symbols=want)
+            if day_map:
+                sessions_loaded += 1
+                for sym in unique:
+                    if sym in day_map:
+                        buckets[sym].append((pd.Timestamp(d), day_map[sym]["close"]))
+        d += timedelta(days=1)
+
+    if not quiet and sessions_loaded:
+        print(
+            f"  [NSE Bhavcopy] RRG: {sessions_loaded} sessions × {len(unique)} "
+            f"hardcoded ETF symbol(s) (from CM file, not full-universe API)"
+        )
+
+    out: dict[str, pd.Series] = {}
+    for sym, rows in buckets.items():
+        if len(rows) < min_points:
+            out[sym] = pd.Series(dtype=float)
+            continue
+        daily = pd.Series({ts: val for ts, val in rows}).sort_index()
+        weekly = daily.resample("W-FRI").last().dropna()
+        out[sym] = weekly if len(weekly) >= min_points else pd.Series(dtype=float)
     return out
 
 
@@ -391,8 +487,7 @@ def load_nse_index_weekly_histories(
         return {}
 
     end = today_ist()
-    days_back = 400 if period == "1y" else 800
-    start = end - timedelta(days=days_back)
+    start = end - timedelta(days=period_calendar_days(period))
     daily_batch = fetch_index_close_histories(unique, start, end, quiet=False)
 
     out: dict[str, pd.Series] = {}

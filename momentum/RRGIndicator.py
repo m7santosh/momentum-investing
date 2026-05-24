@@ -18,6 +18,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from utils.nse_bhavcopy import (
     fetch_index_close_all,
+    load_nse_etf_weekly_histories,
     load_nse_index_weekly_histories,
     resolve_index_name,
     today_ist,
@@ -25,9 +26,17 @@ from utils.nse_bhavcopy import (
 sys.path.insert(0, str(Path(__file__).resolve().parent / "etf"))
 from etf_universe import (
     RRG_BENCHMARK_NSE,
-    RRG_DEFAULT_VISIBLE_INDICES,
-    RRG_NSE_INDICES,
+    RRG_DEFAULT_VISIBLE_IDS,
+    RRG_ETF_LABELS,
+    RRG_ETF_ROW_IDS,
+    RRG_INDEX_ROW_IDS,
+    RRG_LOAD_ETF_NSE_SYMBOLS,
+    RRG_LOAD_NSE_INDEX_NAMES,
+    RRG_ROW_BY_ID,
+    RRG_ROWS,
     index_ref_etf_label,
+    row_display_label,
+    row_kind,
 )
 
 
@@ -91,37 +100,41 @@ def get_color(x, y):
     elif get_status(x, y) == 'weakening':
         return 'yellow'
     
-period = '1y'
-requested_indices = RRG_NSE_INDICES.copy()
+# Price lookback: '6m' ≈ six months on the Date slider (swing); '1y' for longer history.
+period = '6m'
+RRG_NAV_WEEKS = 26  # ~6 months of week-ends on the Date slider when period == '6m'
+requested_indices = [r.row_id for r in RRG_ROWS]
 indices = requested_indices.copy()
-index_metadata = {'ref_etf': [], 'index': []}
+index_metadata = {'ref_etf': [], 'index': [], 'kind': []}
 
-for index_name in indices:
-    index_metadata['ref_etf'].append(index_ref_etf_label(index_name))
-    index_metadata['index'].append(index_name)
+for row in RRG_ROWS:
+    index_metadata['ref_etf'].append(row.ref_etf)
+    index_metadata['index'].append(row.label)
+    index_metadata['kind'].append(row.kind)
 
 _use_default_indices_on_load = False
 indices_to_show = (
-    [n for n in indices if n in RRG_DEFAULT_VISIBLE_INDICES]
+    [n for n in indices if n in RRG_DEFAULT_VISIBLE_IDS]
     if _use_default_indices_on_load
     else indices.copy()
 )
 
 window = 14
 min_weekly_points = window + 2
-
-
 def _build_rrg_date_index():
-    """Week-ending dates where every index has RRG values."""
-    if not rsr_tickers:
+    """Week-ending dates for the Date slider from benchmark EOD minus RRG warmup."""
+    bench = benchmark_data.dropna().sort_index()
+    warmup = window * 2 + 2
+    if len(bench) > warmup:
+        cal = bench.index[warmup:]
+    elif not rsm_tickers:
         return pd.Index([])
-    common = rsr_tickers[0].index
-    for rsr in rsr_tickers[1:]:
-        common = common.intersection(rsr.index)
-    common = common.sort_values()
-    if len(common) >= 2:
-        return common
-    return rsr_tickers[0].index.sort_values()
+    else:
+        longest = max(rsm_tickers, key=lambda s: len(s.index))
+        cal = longest.index.sort_values()
+    if period == '6m' and len(cal) > RRG_NAV_WEEKS:
+        cal = cal[-RRG_NAV_WEEKS:]
+    return cal
 
 
 def _resolve_nse_index_name(requested: str) -> str | None:
@@ -129,7 +142,7 @@ def _resolve_nse_index_name(requested: str) -> str | None:
     text = requested.strip()
     if not text:
         return None
-    if text in indices:
+    if text in RRG_INDEX_ROW_IDS:
         return text
     d = today_ist()
     for _ in range(12):
@@ -144,6 +157,36 @@ def _resolve_nse_index_name(requested: str) -> str | None:
     return None
 
 
+def _resolve_etf_symbol(requested: str) -> str | None:
+    """Resolve display text or symbol to a bhavcopy ETF row id (e.g. ``GOLDBEES``)."""
+    text = requested.strip().upper().replace('.NS', '')
+    if not text:
+        return None
+    if text in RRG_ETF_ROW_IDS:
+        return text
+    for sym, label in RRG_ETF_LABELS.items():
+        bare = sym.replace('.NS', '')
+        if text == bare.upper() or requested.strip().lower() == label.lower():
+            return bare
+    return None
+
+
+def _resolve_row_id(requested: str) -> str | None:
+    """Resolve table Index field to a universe ``row_id`` (index name or ETF symbol)."""
+    text = requested.strip()
+    if not text:
+        return None
+    if text in RRG_ROW_BY_ID:
+        return text
+    for row_id, row in RRG_ROW_BY_ID.items():
+        if text.lower() == row.label.lower():
+            return row_id
+    idx = _resolve_nse_index_name(text)
+    if idx:
+        return idx
+    return _resolve_etf_symbol(text)
+
+
 def load_index_history(index_name: str) -> pd.Series:
     """Weekly closes for one NSE index from ``ind_close_all`` archives."""
     return load_nse_index_weekly_histories(
@@ -151,16 +194,49 @@ def load_index_history(index_name: str) -> pd.Series:
     ).get(index_name, pd.Series(dtype=float))
 
 
-print("Loading NSE index EOD (ind_close_all) for RRG...")
-weekly_by_index = load_nse_index_weekly_histories(
-    list(dict.fromkeys(indices + [RRG_BENCHMARK_NSE])),
-    period=period,
-    min_points=min_weekly_points,
-)
+def load_etf_history(nse_symbol: str) -> pd.Series:
+    """Weekly closes for one NSE-listed ETF from CM bhavcopy."""
+    return load_nse_etf_weekly_histories(
+        [nse_symbol], period=period, min_points=min_weekly_points
+    ).get(nse_symbol, pd.Series(dtype=float))
+
+
+def _load_rrg_price_histories() -> dict[str, pd.Series]:
+    """Index EOD + ETF bhavcopy weekly closes for the hardcoded RRG universe only."""
+    out: dict[str, pd.Series] = {}
+
+    print(
+        f"RRG universe: {len(RRG_LOAD_NSE_INDEX_NAMES)} NSE indices "
+        f"+ {len(RRG_LOAD_ETF_NSE_SYMBOLS)} ETFs (hardcoded in etf_universe.py)"
+    )
+    print("Loading NSE index EOD (ind_close_all) for RRG...")
+    index_batch = load_nse_index_weekly_histories(
+        RRG_LOAD_NSE_INDEX_NAMES,
+        period=period,
+        min_points=min_weekly_points,
+    )
+    for name in RRG_INDEX_ROW_IDS:
+        out[name] = index_batch.get(name, pd.Series(dtype=float))
+    out[RRG_BENCHMARK_NSE] = index_batch.get(RRG_BENCHMARK_NSE, pd.Series(dtype=float))
+
+    if RRG_LOAD_ETF_NSE_SYMBOLS:
+        print("Loading NSE ETF EOD (CM bhavcopy) for RRG...")
+        etf_batch = load_nse_etf_weekly_histories(
+            RRG_LOAD_ETF_NSE_SYMBOLS,
+            period=period,
+            min_points=min_weekly_points,
+        )
+        for sym in RRG_LOAD_ETF_NSE_SYMBOLS:
+            out[sym] = etf_batch.get(sym, pd.Series(dtype=float))
+
+    return out
+
+
+weekly_by_row = _load_rrg_price_histories()
+benchmark_data = weekly_by_row.get(RRG_BENCHMARK_NSE, pd.Series(dtype=float))
 indices_data = pd.DataFrame(
-    {name: weekly_by_index.get(name, pd.Series(dtype=float)) for name in indices}
+    {row_id: weekly_by_row.get(row_id, pd.Series(dtype=float)) for row_id in indices}
 )
-benchmark_data = weekly_by_index.get(RRG_BENCHMARK_NSE, pd.Series(dtype=float))
 
 available_indices = [
     n
@@ -169,17 +245,20 @@ available_indices = [
 ]
 missing = set(indices) - set(available_indices)
 if missing:
-    print(f"Skipping indices with insufficient NSE data: {sorted(missing)}")
+    print(f"Skipping rows with insufficient NSE data: {sorted(missing)}")
 indices = available_indices
 indices_to_show = [n for n in indices_to_show if n in indices]
 aligned_ref = []
 aligned_index = []
+aligned_kind = []
 for name in indices:
     pos = requested_indices.index(name)
     aligned_ref.append(index_metadata['ref_etf'][pos])
     aligned_index.append(index_metadata['index'][pos])
+    aligned_kind.append(index_metadata['kind'][pos])
 index_metadata['ref_etf'] = aligned_ref
 index_metadata['index'] = aligned_index
+index_metadata['kind'] = aligned_kind
 
 rs_tickers = []
 rsr_tickers = []
@@ -201,17 +280,32 @@ indices = indices[: len(rsr_tickers)]
 indices_to_show = [n for n in indices_to_show if n in indices]
 index_metadata['ref_etf'] = index_metadata['ref_etf'][: len(indices)]
 index_metadata['index'] = index_metadata['index'][: len(indices)]
+index_metadata['kind'] = index_metadata['kind'][: len(indices)]
 
 if not rsr_tickers:
     raise SystemExit(
-        "No NSE indices with enough price history. Check NSE ind_close_all downloads."
+        "No RRG rows with enough price history. Check NSE ind_close_all / bhavcopy downloads."
     )
 
 _rrg_index = _build_rrg_date_index()
 _last_nse = pd.Timestamp(_rrg_index[-1]).date() if len(_rrg_index) else None
+_first_nav = (
+    pd.Timestamp(_rrg_index[tail]).date()
+    if len(_rrg_index) > tail
+    else (_last_nse if _last_nse else None)
+)
+_n_index = sum(1 for k in index_metadata['kind'] if k == 'index')
+_n_etf = sum(1 for k in index_metadata['kind'] if k == 'etf')
 print(
-    f"RRG: NSE index EOD through {_last_nse} "
-    f"({len(_rrg_index)} weeks, benchmark {RRG_BENCHMARK_NSE})"
+    f"RRG: NSE EOD through {_last_nse} "
+    f"({len(_rrg_index)} RRG weeks, Date slider {_first_nav} .. {_last_nse}, "
+    f"{_n_index} indices + {_n_etf} ETFs, benchmark {RRG_BENCHMARK_NSE})"
+)
+_bench_weeks = len(benchmark_data.dropna())
+print(
+    f"  Benchmark weekly bars: {_bench_weeks}; slider min index={tail} (Tail); "
+    f"first slider week: "
+    f"{pd.Timestamp(_rrg_index[0]).date() if len(_rrg_index) else 'n/a'}"
 )
 
 
@@ -231,7 +325,7 @@ def update_rrg():
         rsm_tickers[i] = rsm
 
 root = tk.Tk()
-root.title('RRG — NSE Indices (Bhavcopy EOD)')
+root.title('RRG — NSE Indices & ETFs (EOD)')
 root.geometry('1100x900')
 root.minsize(900, 650)
 root.resizable(True, True)
@@ -305,9 +399,10 @@ def _format_hover_text(point):
 
 
 def _append_hover_points(j, filtered_rsr, filtered_rsm):
-    index_name = indices[j]
+    row_id = indices[j]
     ref_etf = index_metadata['ref_etf'][j]
-    prices = indices_data[index_name]
+    display = index_metadata['index'][j]
+    prices = indices_data[row_id]
     n = len(filtered_rsr)
     for k in range(n):
         date = filtered_rsr.index[k]
@@ -324,7 +419,7 @@ def _append_hover_points(j, filtered_rsr, filtered_rsm):
             {
                 'x': rsr_val,
                 'y': rsm_val,
-                'index': index_name,
+                'index': display,
                 'ref_etf': ref_etf,
                 'date': str(date).split(' ')[0],
                 'rsr': rsr_val,
@@ -429,6 +524,10 @@ def on_tail_change(val):
         end_date_idx = tail
         date_scale.set(end_date_idx)
     date_value_label.config(text=format_date_label(end_date_idx))
+    if len(_rrg_index) > tail:
+        date_range_label.config(
+            text=f"{format_date_label(tail)} … {format_date_label(date_max_idx)}"
+        )
     redraw_chart()
 
 
@@ -508,7 +607,7 @@ def on_select_all_toggle():
 def apply_default_indices_visibility(use_defaults: bool):
     global indices_to_show
     if use_defaults:
-        indices_to_show = [n for n in indices if n in RRG_DEFAULT_VISIBLE_INDICES]
+        indices_to_show = [n for n in indices if n in RRG_DEFAULT_VISIBLE_IDS]
     else:
         indices_to_show = indices.copy()
     for i, index_name in enumerate(indices):
@@ -560,6 +659,15 @@ date_scale.set(end_date_idx)
 date_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
 date_value_label = tk.Label(date_row, text=format_date_label(end_date_idx), width=12, anchor='w')
 date_value_label.pack(side=tk.LEFT, padx=(8, 0))
+_date_range_hint = ''
+if len(_rrg_index) > tail:
+    _date_range_hint = (
+        f"{format_date_label(tail)} … {format_date_label(date_max_idx)}"
+    )
+date_range_label = tk.Label(
+    date_row, text=_date_range_hint, anchor='w', fg='gray', font=('Arial', 9)
+)
+date_range_label.pack(side=tk.LEFT, padx=(4, 0))
 
 table_section = tk.Frame(root)
 table_section.grid(row=2, column=0, sticky='nsew', padx=4, pady=(0, 4))
@@ -675,7 +783,7 @@ def _compute_column_widths_px(end_ts, start_ts) -> list[int]:
         rank_w = max(rank_w, _text_px(str(n)))
         for j in range(n):
             ref_w = max(ref_w, _text_px(index_metadata['ref_etf'][j] or '-'))
-            idx_w = max(idx_w, _text_px(indices[j]))
+            idx_w = max(idx_w, _text_px(index_metadata['index'][j]))
             try:
                 p = round(float(indices_data[indices[j]].loc[end_ts]), 2)
                 price_w = max(price_w, _text_px(p))
@@ -702,7 +810,7 @@ def _sync_index_entry_widths():
     font, _ = _get_table_fonts()
     chars = max(
         len(_TABLE_HEADERS[_COL_INDEX]),
-        max((len(indices[i]) for i in range(len(indices))), default=0),
+        max((len(index_metadata['index'][i]) for i in range(len(indices))), default=0),
     )
     entry_px = int(chars * font.measure('0') + _TABLE_CELL_PAD_PX + 8)
     if entry_px > _table_col_widths_px[_COL_INDEX]:
@@ -832,21 +940,26 @@ def update_entry(event):
     row = event.widget._row_idx
     requested = event.widget.get().strip()
     try:
-        index_name = _resolve_nse_index_name(requested)
-        if not index_name:
-            raise ValueError(f'unknown NSE index: {requested!r}')
-        series = load_index_history(index_name)
+        row_id = _resolve_row_id(requested)
+        if not row_id:
+            raise ValueError(f'unknown index/ETF: {requested!r}')
+        kind = row_kind(row_id)
+        if kind == 'index':
+            series = load_index_history(row_id)
+        else:
+            series = load_etf_history(row_id)
         if len(series) < min_weekly_points:
             raise ValueError('insufficient NSE weekly history')
         previous = indices[row]
         if previous in indices_to_show:
             indices_to_show.remove(previous)
-        indices[row] = index_name
-        indices_data[index_name] = series
-        if checkbox_vars[row].get() and index_name not in indices_to_show:
-            indices_to_show.append(index_name)
-        index_metadata['ref_etf'][row] = index_ref_etf_label(index_name)
-        index_metadata['index'][row] = index_name
+        indices[row] = row_id
+        indices_data[row_id] = series
+        if checkbox_vars[row].get() and row_id not in indices_to_show:
+            indices_to_show.append(row_id)
+        index_metadata['ref_etf'][row] = index_ref_etf_label(row_id)
+        index_metadata['index'][row] = row_display_label(row_id)
+        index_metadata['kind'][row] = kind
         table_widgets[row]['ref_label'].config(text=index_metadata['ref_etf'][row])
         update_rrg()
         redraw_chart()
@@ -954,18 +1067,19 @@ checkbox_vars = []
 table_widgets = []
 
 for i in range(len(indices)):
-    index_name = indices[i]
+    row_id = indices[i]
+    display_label = index_metadata['index'][i]
     ref_etf = index_metadata['ref_etf'][i]
-    price = round(float(indices_data[index_name].loc[end_date]), 2)
+    price = round(float(indices_data[row_id].loc[end_date]), 2)
     chg = round(
-        (float(indices_data[index_name].loc[end_date]) - float(indices_data[index_name].loc[start_date]))
-        / float(indices_data[index_name].loc[start_date])
+        (float(indices_data[row_id].loc[end_date]) - float(indices_data[row_id].loc[start_date]))
+        / float(indices_data[row_id].loc[start_date])
         * 100,
         1,
     )
     bg_color = get_color(rsr_tickers[i].iloc[-1], rsm_tickers[i].iloc[-1])
     fg_color = 'white' if bg_color in ('red', 'green', 'blue') else 'black'
-    index_var = tk.StringVar(value=index_name)
+    index_var = tk.StringVar(value=display_label)
     rank_label = tk.Label(
         table_body,
         text=i + 1,
@@ -1121,7 +1235,7 @@ def update_frame():
             head_arrows[j] = None
         line_plots[j] = ax_rrg.plot(xs, ys, color='black', alpha=0.2, zorder=2)[0]
         annotations[j] = ax_rrg.annotate(
-            indices[j],
+            index_metadata['index'][j],
             (filtered_rsr_tickers.values[-1], filtered_rsm_tickers.values[-1]),
             fontsize=8,
         )
