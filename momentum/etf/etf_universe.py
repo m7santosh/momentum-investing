@@ -91,6 +91,23 @@ ETF_TO_NSE_INDEX: dict[str, str | None] = {
 # ETFs with a mapped NSE index (plot in RRG)
 RRG_ETF_TICKERS: list[str] = [t for t in ETF_TICKERS if ETF_TO_NSE_INDEX.get(t)]
 
+# NSE index names for RRG (ETF list is only used to derive this universe)
+RRG_NSE_INDICES: list[str] = list(
+    dict.fromkeys(v for v in ETF_TO_NSE_INDEX.values() if v)
+)
+
+# One reference ETF ticker per index (for table label only; RRG uses index EOD)
+INDEX_REF_ETF: dict[str, str] = {}
+for _etf, _index in ETF_TO_NSE_INDEX.items():
+    if _index and _index not in INDEX_REF_ETF:
+        INDEX_REF_ETF[_index] = _etf.replace(".NS", "")
+
+
+def index_ref_etf_label(index_name: str) -> str:
+    """Reference ETF ticker for an NSE index, or empty if none."""
+    return INDEX_REF_ETF.get(index_name, "")
+
+
 # Default visible on launch (sector / thematic India indices)
 RRG_DEFAULT_VISIBLE: set[str] = {
     "AUTOBEES.NS",
@@ -112,4 +129,10 @@ RRG_DEFAULT_VISIBLE: set[str] = {
     "PVTBANIETF.NS",
     "CHEMICAL.NS",
     "GROWWRAIL.NS",
+}
+
+RRG_DEFAULT_VISIBLE_INDICES: set[str] = {
+    ETF_TO_NSE_INDEX[e]
+    for e in RRG_DEFAULT_VISIBLE
+    if ETF_TO_NSE_INDEX.get(e)
 }

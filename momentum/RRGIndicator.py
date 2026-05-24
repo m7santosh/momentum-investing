@@ -1,9 +1,9 @@
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch
 from scipy import interpolate
@@ -16,29 +16,22 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.nse_bhavcopy import (
-    fetch_weekly_close_series,
+    fetch_index_close_all,
     load_nse_index_weekly_histories,
+    resolve_index_name,
+    today_ist,
 )
 sys.path.insert(0, str(Path(__file__).resolve().parent / "etf"))
 from etf_universe import (
-    ETF_TO_NSE_INDEX,
     RRG_BENCHMARK_NSE,
-    RRG_DEFAULT_VISIBLE,
-    RRG_ETF_TICKERS,
+    RRG_DEFAULT_VISIBLE_INDICES,
+    RRG_NSE_INDICES,
+    index_ref_etf_label,
 )
 
 
-def get_close_prices(downloaded):
-    if isinstance(downloaded.columns, pd.MultiIndex):
-        level0 = downloaded.columns.get_level_values(0)
-        price_key = 'Close' if 'Close' in level0 else 'Adj Close'
-        return downloaded[price_key]
-    price_key = 'Close' if 'Close' in downloaded.columns else 'Adj Close'
-    return downloaded[price_key].squeeze()
-
-
-def compute_rrg_indicators(ticker_series, benchmark_series, window=14):
-    rs = 100 * (ticker_series / benchmark_series)
+def compute_rrg_indicators(index_series, benchmark_series, window=14):
+    rs = 100 * (index_series / benchmark_series)
     rsr = (
         100
         + (rs - rs.rolling(window=window).mean())
@@ -98,120 +91,146 @@ def get_color(x, y):
         return 'yellow'
     
 period = '1y'
-requested_tickers = RRG_ETF_TICKERS.copy()
-tickers = requested_tickers.copy()
-tickers_metadata_dict = {'symbol': [], 'name': []}
+requested_indices = RRG_NSE_INDICES.copy()
+indices = requested_indices.copy()
+index_metadata = {'ref_etf': [], 'index': []}
 
-for etf in tickers:
-    nse_index = ETF_TO_NSE_INDEX[etf]
-    tickers_metadata_dict['symbol'].append(etf.replace('.NS', ''))
-    tickers_metadata_dict['name'].append(f"{etf.replace('.NS', '')} → {nse_index}")
+for index_name in indices:
+    index_metadata['ref_etf'].append(index_ref_etf_label(index_name))
+    index_metadata['index'].append(index_name)
 
 _use_default_indices_on_load = False
-tickers_to_show = (
-    [t for t in tickers if t in RRG_DEFAULT_VISIBLE]
+indices_to_show = (
+    [n for n in indices if n in RRG_DEFAULT_VISIBLE_INDICES]
     if _use_default_indices_on_load
-    else tickers.copy()
+    else indices.copy()
 )
 
 window = 14
 min_weekly_points = window + 2
 
-unmapped = sorted(t for t in ETF_TO_NSE_INDEX if not ETF_TO_NSE_INDEX.get(t))
-if unmapped:
-    print(f"RRG: skipping ETFs without NSE index map: {unmapped}")
+
+def _build_rrg_date_index():
+    """Week-ending dates where every index has RRG values."""
+    if not rsr_tickers:
+        return pd.Index([])
+    common = rsr_tickers[0].index
+    for rsr in rsr_tickers[1:]:
+        common = common.intersection(rsr.index)
+    common = common.sort_values()
+    if len(common) >= 2:
+        return common
+    return rsr_tickers[0].index.sort_values()
 
 
-def load_price_history(etf_symbol: str) -> pd.Series:
-    """Reload one series: mapped NSE index weekly, else Yahoo/bhavcopy fallback."""
-    index_name = ETF_TO_NSE_INDEX.get(etf_symbol)
-    if index_name:
-        weekly = load_nse_index_weekly_histories(
-            [index_name], period=period, min_points=min_weekly_points
-        ).get(index_name, pd.Series(dtype=float))
-        if len(weekly) >= min_weekly_points:
-            return weekly
-    return fetch_weekly_close_series(etf_symbol, period=period, min_points=min_weekly_points)
+def _resolve_nse_index_name(requested: str) -> str | None:
+    """Resolve user input to an exact ``ind_close_all`` index name."""
+    text = requested.strip()
+    if not text:
+        return None
+    if text in indices:
+        return text
+    d = today_ist()
+    for _ in range(12):
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        day_map = fetch_index_close_all(d, quiet=True)
+        if day_map:
+            canonical = resolve_index_name(text, day_map)
+            if canonical:
+                return canonical
+        d -= timedelta(days=1)
+    return None
 
 
-print("Loading NSE index EOD (mapped ETFs) for RRG...")
-unique_indices = list(dict.fromkeys(ETF_TO_NSE_INDEX[t] for t in tickers))
+def load_index_history(index_name: str) -> pd.Series:
+    """Weekly closes for one NSE index from ``ind_close_all`` archives."""
+    return load_nse_index_weekly_histories(
+        [index_name], period=period, min_points=min_weekly_points
+    ).get(index_name, pd.Series(dtype=float))
+
+
+print("Loading NSE index EOD (ind_close_all) for RRG...")
 weekly_by_index = load_nse_index_weekly_histories(
-    list(dict.fromkeys(unique_indices + [RRG_BENCHMARK_NSE])),
+    list(dict.fromkeys(indices + [RRG_BENCHMARK_NSE])),
     period=period,
     min_points=min_weekly_points,
 )
-ticker_frames = {
-    etf: weekly_by_index.get(ETF_TO_NSE_INDEX[etf], pd.Series(dtype=float))
-    for etf in tickers
-}
-tickers_data = pd.DataFrame(ticker_frames)
+indices_data = pd.DataFrame(
+    {name: weekly_by_index.get(name, pd.Series(dtype=float)) for name in indices}
+)
 benchmark_data = weekly_by_index.get(RRG_BENCHMARK_NSE, pd.Series(dtype=float))
 
-available_tickers = [
-    t for t in tickers
-    if t in tickers_data.columns and tickers_data[t].notna().sum() > window
+available_indices = [
+    n
+    for n in indices
+    if n in indices_data.columns and indices_data[n].notna().sum() > window
 ]
-missing = set(tickers) - set(available_tickers)
+missing = set(indices) - set(available_indices)
 if missing:
-    print(f"Skipping tickers with insufficient data: {sorted(missing)}")
-tickers = available_tickers
-tickers_to_show = [t for t in tickers_to_show if t in tickers]
-aligned_symbols = []
-aligned_names = []
-for t in tickers:
-    idx = requested_tickers.index(t)
-    aligned_symbols.append(tickers_metadata_dict['symbol'][idx])
-    aligned_names.append(tickers_metadata_dict['name'][idx])
-tickers_metadata_dict['symbol'] = aligned_symbols
-tickers_metadata_dict['name'] = aligned_names
+    print(f"Skipping indices with insufficient NSE data: {sorted(missing)}")
+indices = available_indices
+indices_to_show = [n for n in indices_to_show if n in indices]
+aligned_ref = []
+aligned_index = []
+for name in indices:
+    pos = requested_indices.index(name)
+    aligned_ref.append(index_metadata['ref_etf'][pos])
+    aligned_index.append(index_metadata['index'][pos])
+index_metadata['ref_etf'] = aligned_ref
+index_metadata['index'] = aligned_index
 
 rs_tickers = []
 rsr_tickers = []
 rsr_roc_tickers = []
 rsm_tickers = []
 
-for i in range(len(tickers)):
+for i in range(len(indices)):
     rsr, rsr_roc, rsm = compute_rrg_indicators(
-        tickers_data[tickers[i]], benchmark_data, window
+        indices_data[indices[i]], benchmark_data, window
     )
     if rsr is None:
         continue
-    rs_tickers.append(100 * (tickers_data[tickers[i]] / benchmark_data))
+    rs_tickers.append(100 * (indices_data[indices[i]] / benchmark_data))
     rsr_tickers.append(rsr)
     rsr_roc_tickers.append(rsr_roc)
     rsm_tickers.append(rsm)
 
-tickers = tickers[: len(rsr_tickers)]
-tickers_to_show = [t for t in tickers_to_show if t in tickers]
-tickers_metadata_dict['symbol'] = tickers_metadata_dict['symbol'][: len(tickers)]
-tickers_metadata_dict['name'] = tickers_metadata_dict['name'][: len(tickers)]
+indices = indices[: len(rsr_tickers)]
+indices_to_show = [n for n in indices_to_show if n in indices]
+index_metadata['ref_etf'] = index_metadata['ref_etf'][: len(indices)]
+index_metadata['index'] = index_metadata['index'][: len(indices)]
 
 if not rsr_tickers:
     raise SystemExit(
-        "No tickers with enough price history. Check symbols or try a longer period."
+        "No NSE indices with enough price history. Check NSE ind_close_all downloads."
     )
 
-def update_rrg():
-    global rs_tickers, rsr_tickers, rsr_roc_tickers, rsm_tickers
-    rs_tickers = []
-    rsr_tickers = []
-    rsr_roc_tickers = []
-    rsm_tickers = []
+_rrg_index = _build_rrg_date_index()
+_last_nse = pd.Timestamp(_rrg_index[-1]).date() if len(_rrg_index) else None
+print(
+    f"RRG: NSE index EOD through {_last_nse} "
+    f"({len(_rrg_index)} weeks, benchmark {RRG_BENCHMARK_NSE})"
+)
 
-    for i in range(len(tickers)):
+
+def update_rrg():
+    """Recompute RSR/RSM for every row (same length as ``indices``)."""
+    global rs_tickers, rsr_tickers, rsr_roc_tickers, rsm_tickers
+    for i in range(len(indices)):
+        name = indices[i]
         rsr, rsr_roc, rsm = compute_rrg_indicators(
-            tickers_data[tickers[i]], benchmark_data, window
+            indices_data[name], benchmark_data, window
         )
         if rsr is None:
             continue
-        rs_tickers.append(100 * (tickers_data[tickers[i]] / benchmark_data))
-        rsr_tickers.append(rsr)
-        rsr_roc_tickers.append(rsr_roc)
-        rsm_tickers.append(rsm)
+        rs_tickers[i] = 100 * (indices_data[name] / benchmark_data)
+        rsr_tickers[i] = rsr
+        rsr_roc_tickers[i] = rsr_roc
+        rsm_tickers[i] = rsm
 
 root = tk.Tk()
-root.title('RRG Indicator')
+root.title('RRG — NSE Indices (Bhavcopy EOD)')
 root.geometry('1100x900')
 root.minsize(900, 650)
 root.resizable(True, True)
@@ -267,8 +286,11 @@ def _hide_hover_tooltip():
 
 
 def _format_hover_text(point):
+    title = point['index']
+    if point.get('ref_etf'):
+        title = f"{point['index']} (ref ETF: {point['ref_etf']})"
     lines = [
-        f"{point['ticker']} ({point['name']})",
+        title,
         f"Date: {point['date']}",
         f"RS Ratio: {point['rsr']:.2f}  |  RS Momentum: {point['rsm']:.2f}",
         f"Quadrant: {point['status']}",
@@ -282,9 +304,9 @@ def _format_hover_text(point):
 
 
 def _append_hover_points(j, filtered_rsr, filtered_rsm):
-    ticker = tickers[j]
-    name = tickers_metadata_dict['name'][j]
-    prices = tickers_data[ticker]
+    index_name = indices[j]
+    ref_etf = index_metadata['ref_etf'][j]
+    prices = indices_data[index_name]
     n = len(filtered_rsr)
     for k in range(n):
         date = filtered_rsr.index[k]
@@ -301,8 +323,8 @@ def _append_hover_points(j, filtered_rsr, filtered_rsm):
             {
                 'x': rsr_val,
                 'y': rsm_val,
-                'ticker': ticker,
-                'name': name,
+                'index': index_name,
+                'ref_etf': ref_etf,
                 'date': str(date).split(' ')[0],
                 'rsr': rsr_val,
                 'rsm': rsm_val,
@@ -357,11 +379,10 @@ controls_frame.grid_propagate(False)
 
 default_indices_var = tk.BooleanVar(value=_use_default_indices_on_load)
 select_all_var = tk.BooleanVar(
-    value=not _use_default_indices_on_load or len(tickers_to_show) == len(tickers)
+    value=not _use_default_indices_on_load or len(indices_to_show) == len(indices)
 )
 _select_all_updating = False
 
-_rrg_index = rsr_tickers[0].index
 date_max_idx = len(_rrg_index) - 1
 end_date_idx = date_max_idx
 start_date = _rrg_index[end_date_idx - tail]
@@ -369,7 +390,7 @@ end_date = _rrg_index[end_date_idx]
 
 
 def format_date_label(idx):
-    return str(rsr_tickers[0].index[int(idx)]).split(' ')[0]
+    return str(_rrg_index[int(idx)]).split(' ')[0]
 
 
 def _tail_marker_sizes(n_points: int) -> list[int]:
@@ -417,11 +438,27 @@ def on_date_change(val):
     redraw_chart()
 
 
-def update_next_week_button():
-    if int(date_scale.get()) >= date_max_idx:
+def update_week_step_buttons():
+    current_idx = int(date_scale.get())
+    if current_idx <= tail:
+        prev_week_button.state(['disabled'])
+    else:
+        prev_week_button.state(['!disabled'])
+    if current_idx >= date_max_idx:
         next_week_button.state(['disabled'])
     else:
         next_week_button.state(['!disabled'])
+
+
+def step_previous_week():
+    global end_date_idx
+    current_idx = int(date_scale.get())
+    if current_idx <= tail:
+        return
+    end_date_idx = current_idx - 1
+    date_scale.set(end_date_idx)
+    date_value_label.config(text=format_date_label(end_date_idx))
+    redraw_chart()
 
 
 def step_next_week():
@@ -435,22 +472,26 @@ def step_next_week():
     redraw_chart()
 
 
-next_week_button = ttk.Button(controls_frame, text='Next Week', width=10, command=step_next_week)
-next_week_button.pack(side=tk.LEFT, padx=(0, 12))
+week_nav_frame = tk.Frame(controls_frame)
+week_nav_frame.pack(side=tk.LEFT, padx=(0, 12), anchor='n')
+prev_week_button = ttk.Button(week_nav_frame, text='Previous Week', command=step_previous_week)
+prev_week_button.pack(side=tk.TOP, fill=tk.X, pady=(0, 2))
+next_week_button = ttk.Button(week_nav_frame, text='Next Week', command=step_next_week)
+next_week_button.pack(side=tk.TOP, fill=tk.X)
 
 
 def _sync_select_all_checkbox():
     if not checkbox_vars:
         return
-    select_all_var.set(all(checkbox_vars[i].get() for i in range(len(tickers))))
+    select_all_var.set(all(checkbox_vars[i].get() for i in range(len(indices))))
 
 
 def apply_select_all(select_all: bool):
-    global tickers_to_show, _select_all_updating
+    global indices_to_show, _select_all_updating
     _select_all_updating = True
     default_indices_var.set(False)
-    tickers_to_show = tickers.copy() if select_all else []
-    for i in range(len(tickers)):
+    indices_to_show = indices.copy() if select_all else []
+    for i in range(len(indices)):
         checkbox_vars[i].set(select_all)
     select_all_var.set(select_all)
     _select_all_updating = False
@@ -464,13 +505,13 @@ def on_select_all_toggle():
 
 
 def apply_default_indices_visibility(use_defaults: bool):
-    global tickers_to_show
+    global indices_to_show
     if use_defaults:
-        tickers_to_show = [t for t in tickers if t in RRG_DEFAULT_VISIBLE]
+        indices_to_show = [n for n in indices if n in RRG_DEFAULT_VISIBLE_INDICES]
     else:
-        tickers_to_show = tickers.copy()
-    for i, etf in enumerate(tickers):
-        checkbox_vars[i].set(etf in tickers_to_show)
+        indices_to_show = indices.copy()
+    for i, index_name in enumerate(indices):
+        checkbox_vars[i].set(index_name in indices_to_show)
     _sync_select_all_checkbox()
     redraw_chart()
 
@@ -567,13 +608,19 @@ table_body = tk.Frame(table_canvas)
 _table_canvas_win = table_canvas.create_window((0, 0), window=table_body, anchor='nw')
 
 # Character widths — header and body use the same values for alignment.
-_TABLE_COL_CHARS = [9, 34, 9, 6, 9]
+_COL_RANK = 0
+_COL_REF = 1
+_COL_INDEX = 2
+_COL_PRICE = 3
+_COL_CHANGE = 4
+_COL_VISIBLE = 5
+_TABLE_COL_CHARS = [4, 8, 34, 9, 6, 9]
 _TABLE_CELL_PADX = (2, 1)
 _TABLE_ROW_PADY = 1
 _TABLE_FONT = ('Arial', 10)
 _TABLE_FONT_BOLD = ('Arial', 10, 'bold')
 _TABLE_NEUTRAL_BG = root.cget('bg')
-_VISIBLE_COL = 4
+_VISIBLE_COL = _COL_VISIBLE
 
 
 def _sync_table_layout(_event=None):
@@ -610,9 +657,9 @@ for widget in (table_canvas, table_body, table_header, body_wrap, scroll_wrap, t
     widget.bind('<Button-4>', _on_table_mousewheel)
     widget.bind('<Button-5>', _on_table_mousewheel)
 
-headers = ['Symbol', 'Name', 'Price', 'Change', 'Visible']
+headers = ['Rank', 'Ref ETF', 'Index', 'Price', 'Change', 'Visible']
 for j in range(len(headers)):
-    if j == _VISIBLE_COL:
+    if j == _COL_VISIBLE:
         visible_header = tk.Frame(
             table_header, relief=tk.RIDGE, bg=_TABLE_NEUTRAL_BG, highlightthickness=0
         )
@@ -634,7 +681,7 @@ for j in range(len(headers)):
         select_all_cb = ttk.Checkbutton(visible_header, variable=select_all_var)
         select_all_cb.pack(side=tk.LEFT)
     else:
-        anchor = 'e' if j in (2, 3) else 'w'
+        anchor = 'e' if j in (_COL_RANK, _COL_PRICE, _COL_CHANGE) else 'w'
         tk.Label(
             table_header,
             text=headers[j],
@@ -652,62 +699,45 @@ for j in range(len(headers)):
         )
 
 def update_entry(event):
-    global tickers_data
-    symbol = event.widget.get().strip()
-    if not symbol.endswith('.NS'):
-        symbol = f'{symbol}.NS'
-    row = int(event.widget.grid_info()['row'])
+    global indices_data, indices, indices_to_show
+    row = event.widget._row_idx
+    requested = event.widget.get().strip()
     try:
-        series = load_price_history(symbol)
+        index_name = _resolve_nse_index_name(requested)
+        if not index_name:
+            raise ValueError(f'unknown NSE index: {requested!r}')
+        series = load_index_history(index_name)
         if len(series) < min_weekly_points:
-            raise ValueError('insufficient weekly history')
-        tickers_data[symbol] = series
-        try:
-            ticker = yf.Ticker(symbol).info
-            long_name = ticker.get('longName', symbol)
-        except Exception:
-            long_name = symbol
-        index_name = ETF_TO_NSE_INDEX.get(symbol)
-        display_name = (
-            f"{symbol.replace('.NS', '')} → {index_name}"
-            if index_name
-            else long_name
-        )
-        # If previous symbol is in the ticker to show list, replace it with the new symbol 
-        previous_symbol = tickers[row]
-
-        if previous_symbol in tickers_to_show:
-            tickers_to_show.remove(previous_symbol)
-
-        tickers[row] = symbol
-
-        if checkbox_vars[row].get() and symbol not in tickers_to_show:
-            tickers_to_show.append(symbol)
-
-        # Check if symbol is in the metadata dictionary 
-        tickers_metadata_dict['symbol'][row] = symbol.replace('.NS', '')
-        tickers_metadata_dict['name'][row] = display_name
-        table_body.grid_slaves(row=row, column=1)[0].config(text=display_name)
+            raise ValueError('insufficient NSE weekly history')
+        previous = indices[row]
+        if previous in indices_to_show:
+            indices_to_show.remove(previous)
+        indices[row] = index_name
+        indices_data[index_name] = series
+        if checkbox_vars[row].get() and index_name not in indices_to_show:
+            indices_to_show.append(index_name)
+        index_metadata['ref_etf'][row] = index_ref_etf_label(index_name)
+        index_metadata['index'][row] = index_name
+        table_widgets[row]['ref_label'].config(text=index_metadata['ref_etf'][row])
         update_rrg()
         redraw_chart()
     except Exception as e:
         print(e)
-        # Reset the entry to the previous symbol
         entry = event.widget
-        row = int(entry.grid_info()['row'])
+        row = entry._row_idx
         entry.delete(0, tk.END)
-        entry.insert(0, tickers_metadata_dict['symbol'][row])
+        entry.insert(0, index_metadata['index'][row])
 
 def on_visibility_toggle(row_idx):
-    global tickers_to_show
+    global indices_to_show
     if default_indices_var.get():
         default_indices_var.set(False)
-    symbol = tickers[row_idx]
+    index_name = indices[row_idx]
     if checkbox_vars[row_idx].get():
-        if symbol not in tickers_to_show:
-            tickers_to_show.append(symbol)
+        if index_name not in indices_to_show:
+            indices_to_show.append(index_name)
     else:
-        tickers_to_show = [t for t in tickers_to_show if t != symbol]
+        indices_to_show = [n for n in indices_to_show if n != index_name]
     _sync_select_all_checkbox()
     redraw_chart()
 
@@ -718,64 +748,170 @@ def on_enter(event):
 def on_leave(event):
     event.widget.configure(text='')
 
-checkbox_vars = []
 
-for i in range(len(tickers)):
-    etf = tickers[i]
-    symbol = tickers_metadata_dict['symbol'][i]
-    name = tickers_metadata_dict['name'][i]
-    price = round(tickers_data[etf][end_date], 2)
-    chg = round((price - tickers_data[etf][start_date]) / tickers_data[etf][start_date] * 100, 1)
+def _tail_change_pct(row_idx: int, start_ts, end_ts):
+    """% price change over the visible tail window (for ranking)."""
+    index_name = indices[row_idx]
+    try:
+        p_start = float(indices_data[index_name].loc[start_ts])
+        p_end = float(indices_data[index_name].loc[end_ts])
+        if p_start == 0:
+            return float('-inf')
+        return (p_end - p_start) / p_start * 100
+    except (KeyError, TypeError, ValueError):
+        return float('-inf')
+
+
+def refresh_table_ranking():
+    """Reorder table rows by tail-window performance (best % change first)."""
+    end_date_idx = int(date_scale.get())
+    end_ts = _rrg_index[end_date_idx]
+    start_ts = _rrg_index[end_date_idx - tail]
+
+    ranked = sorted(
+        range(len(indices)),
+        key=lambda j: _tail_change_pct(j, start_ts, end_ts),
+        reverse=True,
+    )
+
+    for display_row, j in enumerate(ranked):
+        w = table_widgets[j]
+        index_name = indices[j]
+        chg = _tail_change_pct(j, start_ts, end_ts)
+        try:
+            price = round(float(indices_data[index_name].loc[end_ts]), 2)
+        except (KeyError, TypeError, ValueError):
+            price = ''
+        try:
+            bg_color = get_color(
+                float(rsr_tickers[j].loc[end_ts]), float(rsm_tickers[j].loc[end_ts])
+            )
+        except (KeyError, TypeError, ValueError):
+            bg_color = 'gray'
+        fg_color = 'white' if bg_color in ('red', 'green', 'blue') else 'black'
+
+        rank_num = display_row + 1
+        w['rank_label'].grid(
+            row=display_row,
+            column=_COL_RANK,
+            sticky='ew',
+            padx=_TABLE_CELL_PADX,
+            pady=_TABLE_ROW_PADY,
+        )
+        w['ref_label'].grid(
+            row=display_row,
+            column=_COL_REF,
+            sticky='ew',
+            padx=_TABLE_CELL_PADX,
+            pady=_TABLE_ROW_PADY,
+        )
+        w['index_entry'].grid(
+            row=display_row,
+            column=_COL_INDEX,
+            sticky='ew',
+            padx=_TABLE_CELL_PADX,
+            pady=_TABLE_ROW_PADY,
+        )
+        w['price_label'].grid(
+            row=display_row,
+            column=_COL_PRICE,
+            sticky='ew',
+            padx=_TABLE_CELL_PADX,
+            pady=_TABLE_ROW_PADY,
+        )
+        w['chg_label'].grid(
+            row=display_row,
+            column=_COL_CHANGE,
+            sticky='ew',
+            padx=_TABLE_CELL_PADX,
+            pady=_TABLE_ROW_PADY,
+        )
+        w['visible_cell'].grid(
+            row=display_row,
+            column=_COL_VISIBLE,
+            sticky='ew',
+            padx=_TABLE_CELL_PADX,
+            pady=_TABLE_ROW_PADY,
+        )
+        w['rank_label'].config(text=rank_num)
+        w['price_label'].config(text=price)
+        chg_text = round(chg, 1) if chg != float('-inf') else ''
+        w['chg_label'].config(text=chg_text)
+        for key in ('rank_label', 'ref_label', 'index_entry', 'price_label', 'chg_label'):
+            w[key].config(bg=bg_color, fg=fg_color)
+
+
+checkbox_vars = []
+table_widgets = []
+
+for i in range(len(indices)):
+    index_name = indices[i]
+    ref_etf = index_metadata['ref_etf'][i]
+    price = round(float(indices_data[index_name].loc[end_date]), 2)
+    chg = round(
+        (float(indices_data[index_name].loc[end_date]) - float(indices_data[index_name].loc[start_date]))
+        / float(indices_data[index_name].loc[start_date])
+        * 100,
+        1,
+    )
     bg_color = get_color(rsr_tickers[i].iloc[-1], rsm_tickers[i].iloc[-1])
-    fg_color = 'white' if bg_color in ['red', 'green'] else 'black'
-    symbol_var = tk.StringVar()
-    symbol_var.set(symbol)
-    entry = tk.Entry(
+    fg_color = 'white' if bg_color in ('red', 'green', 'blue') else 'black'
+    index_var = tk.StringVar(value=index_name)
+    rank_label = tk.Label(
         table_body,
-        textvariable=symbol_var,
-        width=_TABLE_COL_CHARS[0],
+        text=i + 1,
+        width=_TABLE_COL_CHARS[_COL_RANK],
         relief=tk.RIDGE,
+        anchor='e',
         bg=bg_color,
         fg=fg_color,
         font=_TABLE_FONT,
     )
-    entry.grid(row=i, column=0, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
-    entry.bind('<Return>', update_entry)
-    tk.Label(
+    ref_label = tk.Label(
         table_body,
-        text=name,
-        width=_TABLE_COL_CHARS[1],
+        text=ref_etf,
+        width=_TABLE_COL_CHARS[_COL_REF],
         relief=tk.RIDGE,
         anchor='w',
         bg=bg_color,
         fg=fg_color,
         font=_TABLE_FONT,
-    ).grid(row=i, column=1, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
-    tk.Label(
+    )
+    index_entry = tk.Entry(
+        table_body,
+        textvariable=index_var,
+        width=_TABLE_COL_CHARS[_COL_INDEX],
+        relief=tk.RIDGE,
+        bg=bg_color,
+        fg=fg_color,
+        font=_TABLE_FONT,
+    )
+    index_entry._row_idx = i
+    index_entry.bind('<Return>', update_entry)
+    price_label = tk.Label(
         table_body,
         text=price,
-        width=_TABLE_COL_CHARS[2],
+        width=_TABLE_COL_CHARS[_COL_PRICE],
         relief=tk.RIDGE,
         anchor='e',
         bg=bg_color,
         fg=fg_color,
         font=_TABLE_FONT,
-    ).grid(row=i, column=2, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
-    tk.Label(
+    )
+    chg_label = tk.Label(
         table_body,
         text=chg,
-        width=_TABLE_COL_CHARS[3],
+        width=_TABLE_COL_CHARS[_COL_CHANGE],
         relief=tk.RIDGE,
         anchor='e',
         bg=bg_color,
         fg=fg_color,
         font=_TABLE_FONT,
-    ).grid(row=i, column=3, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
+    )
     visible_cell = tk.Frame(
         table_body, relief=tk.RIDGE, bg=_TABLE_NEUTRAL_BG, highlightthickness=0
     )
-    visible_cell.grid(row=i, column=4, sticky='ew', padx=_TABLE_CELL_PADX, pady=_TABLE_ROW_PADY)
-    checkbox_var = tk.BooleanVar(value=tickers[i] in tickers_to_show)
+    checkbox_var = tk.BooleanVar(value=indices[i] in indices_to_show)
     checkbox_vars.append(checkbox_var)
     checkbox = ttk.Checkbutton(
         visible_cell,
@@ -783,18 +919,29 @@ for i in range(len(tickers)):
         command=lambda idx=i: on_visibility_toggle(idx),
     )
     checkbox.pack(side=tk.LEFT)
+    table_widgets.append(
+        {
+            'rank_label': rank_label,
+            'ref_label': ref_label,
+            'index_entry': index_entry,
+            'price_label': price_label,
+            'chg_label': chg_label,
+            'visible_cell': visible_cell,
+        }
+    )
 
 select_all_cb.config(command=on_select_all_toggle)
+refresh_table_ranking()
 _sync_select_all_checkbox()
 root.update_idletasks()
 _sync_header_scroll_gutter()
 _sync_table_layout()
 
 
-scatter_plots = [None] * len(tickers)
-line_plots = [None] * len(tickers)
-head_arrows = [None] * len(tickers)
-annotations = [None] * len(tickers)
+scatter_plots = [None] * len(indices)
+line_plots = [None] * len(indices)
+head_arrows = [None] * len(indices)
+annotations = [None] * len(indices)
 
 
 def remove_ticker_artists(j):
@@ -810,7 +957,7 @@ def remove_ticker_artists(j):
 
 def redraw_chart():
     update_frame()
-    update_next_week_button()
+    update_week_step_buttons()
     if root.winfo_exists():
         try:
             canvas.draw_idle()
@@ -828,30 +975,15 @@ def update_frame():
     _hide_hover_tooltip()
 
     end_date_idx = int(date_scale.get())
-    end_date = rsr_tickers[0].index[end_date_idx]
-    start_date = rsr_tickers[0].index[end_date_idx - tail]
+    end_date = _rrg_index[end_date_idx]
+    start_date = _rrg_index[end_date_idx - tail]
 
-    for j in range(len(tickers)):
+    refresh_table_ranking()
+
+    for j in range(len(indices)):
         remove_ticker_artists(j)
-        try:
-            price = round(tickers_data[tickers[j]][end_date], 2)
-            chg = round(
-                (price - tickers_data[tickers[j]][start_date])
-                / tickers_data[tickers[j]][start_date]
-                * 100,
-                1,
-            )
-            table_body.grid_slaves(row=j, column=2)[0].config(text=price)
-            table_body.grid_slaves(row=j, column=3)[0].config(text=chg)
-            bg_color = get_color(rsr_tickers[j][end_date], rsm_tickers[j][end_date])
-            fg_color = 'white' if bg_color in ['red', 'green', 'blue'] else 'black'
-            for k in range(4):
-                cell = table_body.grid_slaves(row=j, column=k)[0]
-                cell.config(bg=bg_color, fg=fg_color)
-        except (tk.TclError, IndexError, KeyError):
-            pass
 
-        if tickers[j] not in tickers_to_show:
+        if indices[j] not in indices_to_show:
             continue
 
         filtered_rsr_tickers = rsr_tickers[j].loc[
@@ -882,7 +1014,7 @@ def update_frame():
             head_arrows[j] = None
         line_plots[j] = ax_rrg.plot(xs, ys, color='black', alpha=0.2, zorder=2)[0]
         annotations[j] = ax_rrg.annotate(
-            tickers[j],
+            indices[j],
             (filtered_rsr_tickers.values[-1], filtered_rsm_tickers.values[-1]),
             fontsize=8,
         )
