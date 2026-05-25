@@ -1,7 +1,7 @@
 """India-listed NSE ETFs.
 
 Edit ``tickers``, ``ETF_TO_NSE_INDEX``, and ``ETF_LABELS`` here.
-Used by momentum ETF scripts, ETF RRG (etf_rrg_universe.py), and RRGIndicator.py.
+Used by momentum ETF scripts, ETF RRG (etf_rrg_universe.py), and RRGIndicatorEtfs.py.
 """
 
 KEY = "india"

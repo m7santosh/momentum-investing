@@ -8,7 +8,7 @@ Rank: separate abs-momentum and RS ranks on 1W/2W/1M/3M → weighted Blended_Ran
 vs other ETF scripts:
 - momentum_etfs.py — abs returns only; no benchmark RS; simpler weekly scan.
 - momentum_rs_etfs_adaptive.py — same filters; RS-only rank on 1W/2W/1M (3M dropped); tactical.
-- ../RRGIndicator.py — visual RRG (indices + ETFs); not a ranker.
+- RRGIndicatorEtfs.py — visual RRG (indices + ETFs); not a ranker.
 
 Trend filters (established listings only, >= ~252 sessions):
 1. Price must be above the 200-day EMA.

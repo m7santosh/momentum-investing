@@ -8,7 +8,7 @@ Rank: weighted 1W / 2W / 1M total-return ranks (lower Final_Rank = better) → t
 vs other ETF scripts:
 - momentum_rs_etfs.py — adds RS vs ^CRSLDX; blends abs + RS ranks (1W–3M); swing hold.
 - momentum_rs_etfs_adaptive.py — same filters; ranks RS vs N500 on 1W/2W/1M only (tactical).
-- ../RRGIndicator.py — visual RRG (indices + ETFs); not a ranker.
+- RRGIndicatorEtfs.py — visual RRG (indices + ETFs); not a ranker.
 """
 import yfinance as yf
 import pandas as pd

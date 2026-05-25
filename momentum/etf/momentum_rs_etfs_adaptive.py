@@ -8,7 +8,7 @@ Rank: weighted RS vs N500 on 1W/2W/1M only (3M shown but excluded from score).
 vs other ETF scripts:
 - momentum_etfs.py — abs returns only; no RS vs benchmark.
 - momentum_rs_etfs.py — blends abs + RS on 1W–3M; longer swing hold.
-- ../RRGIndicator.py — visual RRG (indices + ETFs); not a ranker.
+- RRGIndicatorEtfs.py — visual RRG (indices + ETFs); not a ranker.
 
 Output: final_result/etf/momentum_rs_etfs_adaptive.xlsx (Leaders + Run_Info).
 """

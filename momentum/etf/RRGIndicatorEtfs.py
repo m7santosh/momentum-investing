@@ -1,6 +1,6 @@
 """RRG chart for NSE indices and ETFs (JdK RS ratio vs momentum).
 
-Universe: etf/universes/india.py (via etf_rrg_universe.py) — index EOD + ETF bhavcopy.
+Universe: universes/india.py (via etf_rrg_universe.py) — index EOD + ETF bhavcopy.
 Not a ranker: interactive quadrant plot with tail/date sliders and sector table.
 
 vs momentum ETF rankers (Excel output):
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
