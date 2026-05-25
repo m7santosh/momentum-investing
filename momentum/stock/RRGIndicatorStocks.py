@@ -1,6 +1,7 @@
 """RRG chart for stocks vs Nifty 500 (selectable universe via CLI/env).
 
 Universe: universes/*.py (quality, n500, bse_largemidcap, nifty_largemidcap) via stock_rrg_universe.py.
+Analysis: 6-month lookback (26 weekly points on Date slider); downloads extra ~30w for RRG warmup.
 Not a ranker: interactive quadrant plot with tail/date sliders.
 
 vs stock momentum rankers (Excel output):
@@ -27,6 +28,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from momentum.rrg_app import RrgAppConfig, run_rrg_app
+from momentum.rrg_core import RRG_WINDOW_DEFAULT
 from momentum.stock.stock_rrg_universe import (
     RRG_BENCHMARK_NSE,
     RRG_DEFAULT_VISIBLE_IDS,
@@ -47,6 +49,10 @@ from utils.nse_bhavcopy import (
     load_nse_equity_weekly_histories,
     load_nse_index_weekly_histories,
 )
+
+# Stock RRG: 6-month analysis (26 weekly points), 14-week rolling window.
+STOCK_RRG_PERIOD = "6m"
+STOCK_RRG_WINDOW = RRG_WINDOW_DEFAULT
 
 
 def _parse_args() -> argparse.Namespace:
@@ -72,13 +78,16 @@ def _resolve_row_id(requested: str) -> str | None:
     return None
 
 
-def _load_all_histories(period: str, min_weekly_points: int) -> dict[str, pd.Series]:
+def _load_all_histories(
+    period: str, min_weekly_points: int, rrg_window: int = 14
+) -> dict[str, pd.Series]:
     out: dict[str, pd.Series] = {}
     print("Loading NSE index EOD (ind_close_all) for RRG benchmark...")
     index_batch = load_nse_index_weekly_histories(
         RRG_LOAD_NSE_INDEX_NAMES,
         period=period,
         min_points=min_weekly_points,
+        rrg_window=rrg_window,
     )
     out[RRG_BENCHMARK_NSE] = index_batch.get(RRG_BENCHMARK_NSE, pd.Series(dtype=float))
 
@@ -87,6 +96,7 @@ def _load_all_histories(period: str, min_weekly_points: int) -> dict[str, pd.Ser
         RRG_LOAD_NSE_STOCK_SYMBOLS,
         period=period,
         min_points=min_weekly_points,
+        rrg_window=rrg_window,
     )
     for sym in RRG_STOCK_ROW_IDS:
         out[sym] = stock_batch.get(sym, pd.Series(dtype=float))
@@ -94,14 +104,20 @@ def _load_all_histories(period: str, min_weekly_points: int) -> dict[str, pd.Ser
 
 
 def _load_row_history(
-    row_id: str, kind: str, period: str, min_weekly_points: int
+    row_id: str, kind: str, period: str, min_weekly_points: int, rrg_window: int = 14
 ) -> pd.Series:
     if kind == "index":
         return load_nse_index_weekly_histories(
-            [row_id], period=period, min_points=min_weekly_points
+            [row_id],
+            period=period,
+            min_points=min_weekly_points,
+            rrg_window=rrg_window,
         ).get(row_id, pd.Series(dtype=float))
     return load_nse_equity_weekly_histories(
-        [row_id], period=period, min_points=min_weekly_points
+        [row_id],
+        period=period,
+        min_points=min_weekly_points,
+        rrg_window=rrg_window,
     ).get(row_id, pd.Series(dtype=float))
 
 
@@ -113,7 +129,7 @@ def _count_summary(kind_list: list[str]) -> str:
 def _build_config() -> RrgAppConfig:
     mod = active_universe_module()
     return RrgAppConfig(
-        window_title=f"RRG — {mod.LABEL} (EOD)",
+        window_title=f"RRG — {mod.LABEL} ({STOCK_RRG_PERIOD} EOD)",
         benchmark_nse=RRG_BENCHMARK_NSE,
         rows=RRG_ROWS,
         row_by_id=RRG_ROW_BY_ID,
@@ -125,7 +141,7 @@ def _build_config() -> RrgAppConfig:
         universe_summary=(
             f"RRG universe: {active_universe_key()} ({mod.LABEL}, "
             f"{len(RRG_LOAD_NSE_STOCK_SYMBOLS)} names) — {mod.DESCRIPTION}; "
-            f"benchmark {RRG_BENCHMARK_NSE}"
+            f"benchmark {RRG_BENCHMARK_NSE}; analysis {STOCK_RRG_PERIOD}"
         ),
         row_ref_label=row_ref_label,
         row_display_label=row_display_label,
@@ -134,6 +150,8 @@ def _build_config() -> RrgAppConfig:
         load_all_histories=_load_all_histories,
         load_row_history=_load_row_history,
         count_summary=_count_summary,
+        analysis_period=STOCK_RRG_PERIOD,
+        rrg_window=STOCK_RRG_WINDOW,
     )
 
 

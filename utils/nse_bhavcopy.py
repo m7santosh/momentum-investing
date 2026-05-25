@@ -410,15 +410,49 @@ def fetch_index_close_histories(
     return out
 
 
-def period_calendar_days(period: str) -> int:
-    """Calendar lookback for weekly RRG (includes ~30w warmup before navigable window)."""
-    if period in ("6m", "6mo"):
-        return 400
-    if period == "1y":
-        return 600
-    if period == "2y":
+def period_calendar_days(period: str, *, rrg_window: int = 14) -> int:
+    """Calendar days to download for weekly RRG history.
+
+    Uses warmup (``rrg_window * 2 + 2`` weeks) plus the analysis window for *period*.
+    The chart Date slider shows only the analysis window; extra days are not plotted.
+    """
+    from momentum.rrg_core import rrg_fetch_calendar_days
+
+    if period in ("1y", "2y"):
+        if period == "1y":
+            return 600
         return 1150
-    return 400
+    return rrg_fetch_calendar_days(period, rrg_window)
+
+
+def rrg_period_label(period: str) -> str:
+    """Human label for the RRG analysis window (what the chart navigates)."""
+    from momentum.rrg_core import rrg_period_label as _label
+
+    return _label(period)
+
+
+def log_rrg_data_fetch_plan(
+    period: str,
+    *,
+    source: str = "RRG",
+    item_count: int | None = None,
+    rrg_window: int = 14,
+) -> tuple[date, date]:
+    """Log fetch range vs analysis window; return ``(start, end)`` download dates."""
+    from momentum.rrg_core import rrg_warmup_weeks
+
+    end = today_ist()
+    cal_days = period_calendar_days(period, rrg_window=rrg_window)
+    start = end - timedelta(days=cal_days)
+    items = f", {item_count} names" if item_count is not None else ""
+    print(
+        f"[{source}] Download EOD {start:%Y-%m-%d} .. {end:%Y-%m-%d} "
+        f"({cal_days} calendar days{items}). "
+        f"RRG chart analysis: {rrg_period_label(period)}; "
+        f"earlier dates are indicator warmup only (~{rrg_warmup_weeks(rrg_window)} weeks)."
+    )
+    return start, end
 
 
 def _load_nse_cm_weekly_histories(
@@ -428,6 +462,7 @@ def _load_nse_cm_weekly_histories(
     min_points: int = 15,
     quiet: bool = False,
     asset_label: str = "CM symbol",
+    rrg_window: int = 14,
 ) -> dict[str, "pd.Series"]:
     """Weekly closes from NSE CM bhavcopy (EQ series).
 
@@ -442,7 +477,14 @@ def _load_nse_cm_weekly_histories(
 
     want = set(unique)
     end = today_ist()
-    start = end - timedelta(days=period_calendar_days(period))
+    start = end - timedelta(days=period_calendar_days(period, rrg_window=rrg_window))
+    if not quiet:
+        log_rrg_data_fetch_plan(
+            period,
+            source=f"NSE Bhavcopy ({asset_label})",
+            item_count=len(unique),
+            rrg_window=rrg_window,
+        )
     buckets: dict[str, list[tuple[pd.Timestamp, float]]] = {s: [] for s in unique}
     sessions_loaded = 0
 
@@ -480,6 +522,7 @@ def load_nse_etf_weekly_histories(
     period: str = "1y",
     min_points: int = 15,
     quiet: bool = False,
+    rrg_window: int = 14,
 ) -> dict[str, "pd.Series"]:
     """Weekly closes from NSE CM bhavcopy only (NSE-listed ETFs, EQ series)."""
     return _load_nse_cm_weekly_histories(
@@ -488,6 +531,7 @@ def load_nse_etf_weekly_histories(
         min_points=min_points,
         quiet=quiet,
         asset_label="ETF symbol",
+        rrg_window=rrg_window,
     )
 
 
@@ -497,6 +541,7 @@ def load_nse_equity_weekly_histories(
     period: str = "1y",
     min_points: int = 15,
     quiet: bool = False,
+    rrg_window: int = 14,
 ) -> dict[str, "pd.Series"]:
     """Weekly closes from NSE CM bhavcopy (EQ-series stocks)."""
     return _load_nse_cm_weekly_histories(
@@ -505,6 +550,7 @@ def load_nse_equity_weekly_histories(
         min_points=min_points,
         quiet=quiet,
         asset_label="equity symbol",
+        rrg_window=rrg_window,
     )
 
 
@@ -513,6 +559,7 @@ def load_nse_index_weekly_histories(
     *,
     period: str = "1y",
     min_points: int = 15,
+    rrg_window: int = 14,
 ) -> dict[str, "pd.Series"]:
     """Weekly closes from NSE ``ind_close_all`` (Friday week-end)."""
     import pandas as pd
@@ -522,7 +569,10 @@ def load_nse_index_weekly_histories(
         return {}
 
     end = today_ist()
-    start = end - timedelta(days=period_calendar_days(period))
+    start = end - timedelta(days=period_calendar_days(period, rrg_window=rrg_window))
+    log_rrg_data_fetch_plan(
+        period, source="NSE Index EOD", item_count=len(unique), rrg_window=rrg_window
+    )
     daily_batch = fetch_index_close_histories(unique, start, end, quiet=False)
 
     out: dict[str, pd.Series] = {}

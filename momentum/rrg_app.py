@@ -16,11 +16,15 @@ from tkinter import ttk
 from momentum.rrg_core import (
     HEAD_ARROW_SCALE,
     HOVER_PIXEL_RADIUS,
-    RRG_NAV_WEEKS,
+    RRG_WINDOW_DEFAULT,
     TAIL_MARKER_SIZE,
     compute_rrg_indicators as compute,
     get_color,
     get_status,
+    rrg_nav_weeks,
+    rrg_period_display,
+    rrg_period_label,
+    rrg_warmup_weeks,
 )
 
 
@@ -42,21 +46,24 @@ class RrgAppConfig:
     row_display_label: Callable[[str], str]
     row_kind: Callable[[str], str]
     resolve_row_id: Callable[[str], str | None]
-    load_all_histories: Callable[[str, int], dict[str, pd.Series]]
-    load_row_history: Callable[[str, str, str, int], pd.Series]
+    load_all_histories: Callable[..., dict[str, pd.Series]]
+    load_row_history: Callable[..., pd.Series]
     count_summary: Callable[[list[str]], str]
+    analysis_period: str = "6m"
+    rrg_window: int = RRG_WINDOW_DEFAULT
 
 
 def run_rrg_app(config: RrgAppConfig) -> None:
     """Build UI, load data, and run the RRG main loop."""
-    period = '6m'
+    period = config.analysis_period
+    nav_weeks = rrg_nav_weeks(period)
+    window = config.rrg_window
     tail = 5
     end_date_idx = None
     start_date, end_date = None, None
     hover_points = []
     _last_hover_idx = None
 
-    window = 14
     min_weekly_points = window + 2
 
     requested_indices = [row.row_id for row in config.rows]
@@ -77,9 +84,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     )
 
     def _build_rrg_date_index():
-        """Week-ending dates for the Date slider from benchmark EOD minus RRG warmup."""
+        """Week-ending dates for the Date slider (analysis window after warmup)."""
         bench = benchmark_data.dropna().sort_index()
-        warmup = window * 2 + 2
+        warmup = rrg_warmup_weeks(window)
         if len(bench) > warmup:
             cal = bench.index[warmup:]
         elif not rsm_tickers:
@@ -87,12 +94,16 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         else:
             longest = max(rsm_tickers, key=lambda s: len(s.index))
             cal = longest.index.sort_values()
-        if period == '6m' and len(cal) > RRG_NAV_WEEKS:
-            cal = cal[-RRG_NAV_WEEKS:]
+        if len(cal) > nav_weeks:
+            cal = cal[-nav_weeks:]
         return cal
 
     print(config.universe_summary)
-    weekly_by_row = config.load_all_histories(period, min_weekly_points)
+    print(
+        f"RRG analysis: {rrg_period_label(period)}, rolling window {window}w "
+        f"(warmup ~{rrg_warmup_weeks(window)}w before slider)."
+    )
+    weekly_by_row = config.load_all_histories(period, min_weekly_points, window)
     benchmark_data = weekly_by_row.get(config.benchmark_nse, pd.Series(dtype=float))
     indices_data = pd.DataFrame(
         {row_id: weekly_by_row.get(row_id, pd.Series(dtype=float)) for row_id in indices}
@@ -154,17 +165,17 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         if len(_rrg_index) > tail
         else (_last_nse if _last_nse else None)
     )
+    _slider_first = pd.Timestamp(_rrg_index[0]).date() if len(_rrg_index) else None
     print(
-        f"RRG: EOD through {_last_nse} "
-        f"({len(_rrg_index)} RRG weeks, Date slider {_first_nav} .. {_last_nse}, "
+        f"RRG ready: {rrg_period_display(period)} analysis window {_slider_first} .. {_last_nse} "
+        f"({len(_rrg_index)} weeks on Date slider; tail default from {_first_nav}), "
         f"{config.count_summary(index_metadata['kind'])}, "
-        f"benchmark {config.benchmark_nse})"
+        f"benchmark {config.benchmark_nse}"
     )
     _bench_weeks = len(benchmark_data.dropna())
     print(
-        f"  Benchmark weekly bars: {_bench_weeks}; slider min index={tail} (Tail); "
-        f"first slider week: "
-        f"{pd.Timestamp(_rrg_index[0]).date() if len(_rrg_index) else 'n/a'}"
+        f"  Downloaded {_bench_weeks} benchmark weekly bars total "
+        f"(includes ~{rrg_warmup_weeks(window)}w warmup before slider start {_slider_first})."
     )
 
     def update_rrg():
@@ -778,7 +789,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 raise ValueError(f'unknown {col_name}: {requested!r}')
             kind = config.row_kind(row_id)
             series = config.load_row_history(
-                row_id, kind, period, min_weekly_points
+                row_id, kind, period, min_weekly_points, window
             )
             if len(series) < min_weekly_points:
                 raise ValueError('insufficient weekly history')
