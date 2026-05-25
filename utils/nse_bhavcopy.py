@@ -410,11 +410,11 @@ def fetch_index_close_histories(
     return out
 
 
-def period_calendar_days(period: str, *, rrg_window: int = 14) -> int:
+def period_calendar_days(period: str, *, rrg_window: int = 14, tail: int = 10) -> int:
     """Calendar days to download for weekly RRG history.
 
-    Uses warmup (``rrg_window * 2 + 2`` weeks) plus the analysis window for *period*.
-    The chart Date slider shows only the analysis window; extra days are not plotted.
+    Uses warmup (``rrg_window * 2 + 2`` weeks) plus analysis window and tail buffer.
+    The chart Date slider shows the analysis window; extra days are not plotted.
     """
     from momentum.rrg_core import rrg_fetch_calendar_days
 
@@ -422,7 +422,7 @@ def period_calendar_days(period: str, *, rrg_window: int = 14) -> int:
         if period == "1y":
             return 600
         return 1150
-    return rrg_fetch_calendar_days(period, rrg_window)
+    return rrg_fetch_calendar_days(period, rrg_window, tail=tail)
 
 
 def rrg_period_label(period: str) -> str:

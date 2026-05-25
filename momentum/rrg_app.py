@@ -16,6 +16,8 @@ from tkinter import ttk
 from momentum.rrg_core import (
     HEAD_ARROW_SCALE,
     HOVER_PIXEL_RADIUS,
+    RRG_DEFAULT_TAIL,
+    RRG_MAX_TAIL,
     RRG_WINDOW_DEFAULT,
     TAIL_MARKER_SIZE,
     compute_rrg_indicators as compute,
@@ -24,6 +26,7 @@ from momentum.rrg_core import (
     rrg_nav_weeks,
     rrg_period_display,
     rrg_period_label,
+    rrg_slider_index_weeks,
     rrg_warmup_weeks,
 )
 
@@ -51,6 +54,10 @@ class RrgAppConfig:
     count_summary: Callable[[list[str]], str]
     analysis_period: str = "6m"
     rrg_window: int = RRG_WINDOW_DEFAULT
+    top_movers_panel: bool = False
+    top_movers_count: int = 7
+    top_movers_kind: str | None = None
+    top_movers_title: str = "Top movers"
 
 
 def run_rrg_app(config: RrgAppConfig) -> None:
@@ -58,7 +65,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     period = config.analysis_period
     nav_weeks = rrg_nav_weeks(period)
     window = config.rrg_window
-    tail = 5
+    tail = RRG_DEFAULT_TAIL
     end_date_idx = None
     start_date, end_date = None, None
     hover_points = []
@@ -84,9 +91,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     )
 
     def _build_rrg_date_index():
-        """Week-ending dates for the Date slider (analysis window after warmup)."""
+        """Week-ending dates for the Date slider (analysis window + tail buffer)."""
         bench = benchmark_data.dropna().sort_index()
         warmup = rrg_warmup_weeks(window)
+        slider_weeks = rrg_slider_index_weeks(period, tail=RRG_MAX_TAIL)
         if len(bench) > warmup:
             cal = bench.index[warmup:]
         elif not rsm_tickers:
@@ -94,9 +102,25 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         else:
             longest = max(rsm_tickers, key=lambda s: len(s.index))
             cal = longest.index.sort_values()
-        if len(cal) > nav_weeks:
-            cal = cal[-nav_weeks:]
+        if len(cal) > slider_weeks:
+            cal = cal[-slider_weeks:]
         return cal
+
+    def _date_slider_max_idx() -> int:
+        """Latest week on the index (most recent EOD / today)."""
+        return len(_rrg_index) - 1
+
+    def _date_slider_min_idx() -> int:
+        """Earliest end date: ``nav_weeks`` back from latest (still room for tail)."""
+        return max(tail, len(_rrg_index) - nav_weeks)
+
+    def _date_range_hint_text() -> str:
+        if len(_rrg_index) < 2:
+            return ''
+        return (
+            f"{format_date_label(_date_slider_min_idx())} … "
+            f"{format_date_label(_date_slider_max_idx())}"
+        )
 
     print(config.universe_summary)
     print(
@@ -160,15 +184,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     _rrg_index = _build_rrg_date_index()
     _last_nse = pd.Timestamp(_rrg_index[-1]).date() if len(_rrg_index) else None
-    _first_nav = (
-        pd.Timestamp(_rrg_index[tail]).date()
-        if len(_rrg_index) > tail
-        else (_last_nse if _last_nse else None)
-    )
     _slider_first = pd.Timestamp(_rrg_index[0]).date() if len(_rrg_index) else None
     print(
-        f"RRG ready: {rrg_period_display(period)} analysis window {_slider_first} .. {_last_nse} "
-        f"({len(_rrg_index)} weeks on Date slider; tail default from {_first_nav}), "
+        f"RRG ready: {rrg_period_display(period)} — date ends "
+        f"{pd.Timestamp(_rrg_index[_date_slider_min_idx()]).date() if len(_rrg_index) else 'n/a'}"
+        f" .. {_last_nse} ({nav_weeks} weeks, default latest), "
         f"{config.count_summary(index_metadata['kind'])}, "
         f"benchmark {config.benchmark_nse}"
     )
@@ -195,8 +215,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     root = tk.Tk()
     root.title(config.window_title)
-    root.geometry('1100x900')
-    root.minsize(900, 650)
+    root.geometry('1400x900' if config.top_movers_panel else '1100x900')
+    root.minsize(1280 if config.top_movers_panel else 900, 650)
     root.resizable(True, True)
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=2)
@@ -343,7 +363,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     )
     _select_all_updating = False
 
-    date_max_idx = len(_rrg_index) - 1
+    date_max_idx = _date_slider_max_idx()
+    date_min_idx = _date_slider_min_idx()
     end_date_idx = date_max_idx
     start_date = _rrg_index[end_date_idx - tail]
     end_date = _rrg_index[end_date_idx]
@@ -379,15 +400,17 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             tail_scale.set(tail)
             return
         tail = new_tail
-        date_scale.config(from_=tail)
-        if end_date_idx < tail:
-            end_date_idx = tail
+        date_min = _date_slider_min_idx()
+        date_max = _date_slider_max_idx()
+        date_scale.config(from_=date_min, to=date_max)
+        if end_date_idx < date_min:
+            end_date_idx = date_min
+            date_scale.set(end_date_idx)
+        elif end_date_idx > date_max:
+            end_date_idx = date_max
             date_scale.set(end_date_idx)
         date_value_label.config(text=format_date_label(end_date_idx))
-        if len(_rrg_index) > tail:
-            date_range_label.config(
-                text=f"{format_date_label(tail)} … {format_date_label(date_max_idx)}"
-            )
+        date_range_label.config(text=_date_range_hint_text())
         redraw_chart()
 
     def on_date_change(val):
@@ -398,11 +421,13 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     def update_week_step_buttons():
         current_idx = int(date_scale.get())
-        if current_idx <= tail:
+        date_min = _date_slider_min_idx()
+        date_max = _date_slider_max_idx()
+        if current_idx <= date_min:
             prev_week_button.state(['disabled'])
         else:
             prev_week_button.state(['!disabled'])
-        if current_idx >= date_max_idx:
+        if current_idx >= date_max:
             next_week_button.state(['disabled'])
         else:
             next_week_button.state(['!disabled'])
@@ -410,7 +435,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     def step_previous_week():
         nonlocal end_date_idx
         current_idx = int(date_scale.get())
-        if current_idx <= tail:
+        if current_idx <= _date_slider_min_idx():
             return
         end_date_idx = current_idx - 1
         date_scale.set(end_date_idx)
@@ -420,7 +445,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     def step_next_week():
         nonlocal end_date_idx
         current_idx = int(date_scale.get())
-        if current_idx >= date_max_idx:
+        if current_idx >= _date_slider_max_idx():
             return
         end_date_idx = current_idx + 1
         date_scale.set(end_date_idx)
@@ -499,7 +524,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     tk.Label(date_row, text='Date', width=6, anchor='w').pack(side=tk.LEFT)
     date_scale = tk.Scale(
         date_row,
-        from_=tail,
+        from_=date_min_idx,
         to=date_max_idx,
         orient=tk.HORIZONTAL,
         showvalue=False,
@@ -512,23 +537,172 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         date_row, text=format_date_label(end_date_idx), width=12, anchor='w'
     )
     date_value_label.pack(side=tk.LEFT, padx=(8, 0))
-    _date_range_hint = ''
-    if len(_rrg_index) > tail:
-        _date_range_hint = (
-            f"{format_date_label(tail)} … {format_date_label(date_max_idx)}"
-        )
     date_range_label = tk.Label(
-        date_row, text=_date_range_hint, anchor='w', fg='gray', font=('Arial', 9)
+        date_row, text=_date_range_hint_text(), anchor='w', fg='gray', font=('Arial', 9)
     )
     date_range_label.pack(side=tk.LEFT, padx=(4, 0))
 
     table_section = tk.Frame(root)
     table_section.grid(row=2, column=0, sticky='nsew', padx=4, pady=(0, 4))
-    table_section.columnconfigure(0, weight=1)
     table_section.rowconfigure(0, weight=1)
+    table_section.columnconfigure(0, weight=1)
 
-    scroll_wrap = tk.Frame(table_section)
-    scroll_wrap.grid(row=0, column=0, sticky='nsew')
+    tables_row = tk.Frame(table_section)
+    tables_row.grid(row=0, column=0, sticky='nsew')
+    tables_row.rowconfigure(0, weight=1)
+    tables_row.columnconfigure(0, weight=1)
+
+    movers_panel = None
+    movers_dates_label = None
+    movers_row_widgets: list[dict[str, tk.Label]] = []
+    side_panel = None
+    if config.top_movers_panel:
+        _RRG_ROW_LEGEND = (
+            (
+                'green',
+                'Leading',
+                'RS ratio & momentum both above benchmark — hold or add to leaders.',
+            ),
+            (
+                'yellow',
+                'Weakening',
+                'Still strong on RS but momentum fading — trim size or tighten stops.',
+            ),
+            (
+                'blue',
+                'Improving',
+                'RS recovering with rising momentum — watchlist / early accumulation.',
+            ),
+            (
+                'red',
+                'Lagging',
+                'Weak RS and falling momentum — avoid or underweight.',
+            ),
+            (
+                'gray',
+                'N/A',
+                'Insufficient RRG data at the selected date.',
+            ),
+        )
+
+        side_panel = tk.Frame(tables_row)
+        side_panel.pack(side=tk.RIGHT, fill=tk.Y, anchor='n', padx=(16, 0))
+
+        movers_panel = tk.Frame(
+            side_panel,
+            padx=6,
+            pady=4,
+            relief=tk.GROOVE,
+            borderwidth=1,
+        )
+        movers_panel.pack(side=tk.LEFT, anchor='nw', fill=tk.Y)
+        tk.Label(
+            movers_panel,
+            text=config.top_movers_title,
+            font=('Arial', 10, 'bold'),
+            anchor='w',
+        ).pack(fill=tk.X)
+        movers_dates_label = tk.Label(
+            movers_panel,
+            text='',
+            font=('Arial', 9),
+            anchor='w',
+            fg='gray',
+            wraplength=320,
+            justify=tk.LEFT,
+        )
+        movers_dates_label.pack(fill=tk.X, pady=(0, 4))
+        hdr = tk.Frame(movers_panel)
+        hdr.pack(fill=tk.X)
+        for col, (text, width, anchor) in enumerate(
+            [
+                ('#', 2, 'e'),
+                ('Was', 14, 'w'),
+                ('Now', 14, 'w'),
+            ]
+        ):
+            tk.Label(
+                hdr,
+                text=text,
+                font=('Arial', 9, 'bold'),
+                width=width,
+                anchor=anchor,
+            ).grid(row=0, column=col, sticky='ew')
+        hdr.columnconfigure(1, weight=1)
+        hdr.columnconfigure(2, weight=1)
+        body = tk.Frame(movers_panel)
+        body.pack(fill=tk.X)
+        for _ in range(config.top_movers_count):
+            row = tk.Frame(body)
+            row.pack(fill=tk.X, pady=1)
+            movers_row_widgets.append(
+                {
+                    'rank': tk.Label(row, font=('Arial', 9), width=2, anchor='e'),
+                    'was': tk.Label(row, font=('Arial', 9), width=14, anchor='w'),
+                    'now': tk.Label(row, font=('Arial', 9), width=14, anchor='w'),
+                }
+            )
+            movers_row_widgets[-1]['rank'].grid(row=0, column=0, sticky='e')
+            movers_row_widgets[-1]['was'].grid(row=0, column=1, sticky='w')
+            movers_row_widgets[-1]['now'].grid(row=0, column=2, sticky='w')
+            row.columnconfigure(1, weight=1)
+            row.columnconfigure(2, weight=1)
+
+        legend_panel = tk.Frame(
+            side_panel,
+            padx=6,
+            pady=4,
+            relief=tk.GROOVE,
+            borderwidth=1,
+        )
+        legend_panel.pack(side=tk.LEFT, anchor='nw', fill=tk.Y, padx=(12, 0))
+        tk.Label(
+            legend_panel,
+            text='Main table row colors (RRG)',
+            font=('Arial', 10, 'bold'),
+            anchor='w',
+        ).pack(fill=tk.X, pady=(0, 4))
+        tk.Label(
+            legend_panel,
+            text='Row background = RRG quadrant at the selected Date (vs benchmark).',
+            font=('Arial', 9),
+            anchor='w',
+            fg='gray',
+            wraplength=280,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X, pady=(0, 6))
+        for bg, title, hint in _RRG_ROW_LEGEND:
+            item = tk.Frame(legend_panel)
+            item.pack(fill=tk.X, pady=2)
+            swatch_fg = 'white' if bg in ('green', 'red', 'blue') else 'black'
+            tk.Label(
+                item,
+                text='  ',
+                bg=bg,
+                fg=swatch_fg,
+                width=2,
+                relief=tk.RIDGE,
+                borderwidth=1,
+            ).pack(side=tk.LEFT, padx=(0, 6))
+            text_wrap = tk.Frame(item)
+            text_wrap.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            tk.Label(
+                text_wrap,
+                text=title,
+                font=('Arial', 9, 'bold'),
+                anchor='w',
+            ).pack(fill=tk.X)
+            tk.Label(
+                text_wrap,
+                text=hint,
+                font=('Arial', 9),
+                anchor='w',
+                wraplength=250,
+                justify=tk.LEFT,
+            ).pack(fill=tk.X)
+
+    scroll_wrap = tk.Frame(tables_row)
+    scroll_wrap.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scroll_wrap.columnconfigure(0, weight=1)
     scroll_wrap.rowconfigure(1, weight=1)
 
@@ -551,9 +725,6 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     table_scroll_y = tk.Scrollbar(scroll_wrap, orient=tk.VERTICAL)
     table_scroll_y.grid(row=1, column=1, sticky='ns')
 
-    table_scroll_x = tk.Scrollbar(scroll_wrap, orient=tk.HORIZONTAL)
-    table_scroll_x.grid(row=2, column=0, sticky='ew')
-
     table_canvas = tk.Canvas(
         body_wrap,
         highlightthickness=0,
@@ -561,17 +732,6 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     )
     table_canvas.grid(row=0, column=0, sticky='nsew')
     table_scroll_y.config(command=table_canvas.yview)
-
-    def _table_xscroll_set(first, last):
-        table_scroll_x.set(first, last)
-
-    def _table_xscroll(*args):
-        table_canvas.xview(*args)
-        header_canvas.xview(*args)
-
-    table_canvas.configure(xscrollcommand=_table_xscroll_set)
-    header_canvas.configure(xscrollcommand=_table_xscroll_set)
-    table_scroll_x.config(command=_table_xscroll)
 
     def _sync_header_scroll_gutter(_event=None):
         table_scroll_y.update_idletasks()
@@ -583,13 +743,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     _table_canvas_win = table_canvas.create_window((0, 0), window=table_body, anchor='nw')
 
     _COL_RANK = 0
-    _COL_REF = 1
-    _COL_INDEX = 2
-    _COL_PRICE = 3
-    _COL_CHANGE = 4
-    _COL_VISIBLE = 5
+    _COL_RANK_DELTA = 1
+    _COL_REF = 2
+    _COL_INDEX = 3
+    _COL_PRICE = 4
+    _COL_CHANGE = 5
+    _COL_VISIBLE = 6
     _TABLE_HEADERS = [
         'Rank',
+        'Rank Δ',
         config.ref_column_header,
         config.name_column_header,
         'Price',
@@ -621,9 +783,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         f = font_bold if bold else font
         return int(f.measure(str(text))) + _TABLE_CELL_PAD_PX
 
-    def _compute_column_widths_px(end_ts, start_ts) -> list[int]:
+    def _compute_column_widths_px(end_ts, start_ts, rank_delta_texts: list[str]) -> list[int]:
         """Pixel width per column from header text and current table values."""
         rank_w = _text_px(_TABLE_HEADERS[_COL_RANK], bold=True)
+        rank_delta_w = _text_px(_TABLE_HEADERS[_COL_RANK_DELTA], bold=True)
         ref_w = _text_px(_TABLE_HEADERS[_COL_REF], bold=True)
         idx_w = _text_px(_TABLE_HEADERS[_COL_INDEX], bold=True)
         price_w = _text_px(_TABLE_HEADERS[_COL_PRICE], bold=True)
@@ -633,6 +796,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         n = len(indices)
         if n:
             rank_w = max(rank_w, _text_px(str(n)))
+            for text in rank_delta_texts:
+                rank_delta_w = max(rank_delta_w, _text_px(text))
             for j in range(n):
                 ref_w = max(ref_w, _text_px(index_metadata['ref_label'][j] or '-'))
                 idx_w = max(idx_w, _text_px(index_metadata['display'][j]))
@@ -645,7 +810,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 if chg != float('-inf'):
                     chg_w = max(chg_w, _text_px(round(chg, 1)))
 
-        return [rank_w, ref_w, idx_w, price_w, chg_w, vis_w]
+        return [rank_w, rank_delta_w, ref_w, idx_w, price_w, chg_w, vis_w]
 
     def _apply_table_column_widths(widths_px: list[int]):
         nonlocal _table_col_widths_px
@@ -670,10 +835,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         for w in table_widgets:
             w['index_entry'].config(width=chars)
 
-    def _update_table_column_widths(end_ts, start_ts):
+    def _update_table_column_widths(end_ts, start_ts, rank_delta_texts: list[str]):
         if not indices:
             return
-        _apply_table_column_widths(_compute_column_widths_px(end_ts, start_ts))
+        _apply_table_column_widths(
+            _compute_column_widths_px(end_ts, start_ts, rank_delta_texts)
+        )
         _sync_index_entry_widths()
         for row in range(len(indices)):
             table_body.grid_rowconfigure(row, minsize=_TABLE_ROW_MIN_PX)
@@ -690,8 +857,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     def _sync_table_layout(_event=None):
         table_scroll_y.update_idletasks()
         gutter_w = table_scroll_y.winfo_width()
-        if gutter_w > 1:
-            header_scroll_gutter.configure(width=gutter_w)
+        if gutter_w <= 1:
+            gutter_w = 18
+        header_scroll_gutter.configure(width=gutter_w)
         table_header.update_idletasks()
         table_body.update_idletasks()
         _sync_header_row_height()
@@ -701,8 +869,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             total_w = max(table_header.winfo_reqwidth(), table_body.winfo_reqwidth(), 1)
         table_canvas.itemconfigure(_table_canvas_win, width=total_w)
         header_canvas.itemconfigure(_header_canvas_win, width=total_w)
-        table_canvas.configure(scrollregion=table_canvas.bbox('all'))
-        header_canvas.configure(scrollregion=header_canvas.bbox('all'))
+        body_h = max(table_body.winfo_reqheight(), 1)
+        header_h = max(table_header.winfo_reqheight(), _HEADER_ROW_PX)
+        table_canvas.configure(scrollregion=(0, 0, total_w, body_h))
+        header_canvas.configure(scrollregion=(0, 0, total_w, header_h))
+        table_canvas.xview_moveto(0)
+        header_canvas.xview_moveto(0)
 
     def _sync_table_scroll_region(_event=None):
         _sync_table_layout()
@@ -720,6 +892,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     table_header.bind('<Configure>', _sync_table_layout)
     header_canvas.bind('<Configure>', _sync_table_layout)
     table_scroll_y.bind('<Configure>', _sync_header_scroll_gutter)
+    tables_row.bind('<Configure>', _sync_table_layout)
     for widget in (
         table_canvas,
         header_canvas,
@@ -727,6 +900,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         table_header,
         body_wrap,
         scroll_wrap,
+        tables_row,
         table_section,
     ):
         widget.bind('<MouseWheel>', _on_table_mousewheel)
@@ -760,7 +934,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             select_all_cb = ttk.Checkbutton(vis_hdr_inner, variable=select_all_var)
             select_all_cb.pack(side=tk.LEFT, padx=(4, 0))
         else:
-            anchor = 'e' if j in (_COL_RANK, _COL_PRICE, _COL_CHANGE) else 'w'
+            anchor = 'e' if j in (_COL_RANK, _COL_RANK_DELTA, _COL_PRICE, _COL_CHANGE) else 'w'
             tk.Label(
                 table_header,
                 text=_TABLE_HEADERS[j],
@@ -840,17 +1014,134 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         except (KeyError, TypeError, ValueError):
             return float('-inf')
 
+    def _rank_by_row(end_date_idx_local: int) -> dict[int, int]:
+        """Row index -> rank (1 = best tail-window change) at the given week index."""
+        if end_date_idx_local < tail:
+            return {}
+        end_ts = _rrg_index[end_date_idx_local]
+        start_ts = _rrg_index[end_date_idx_local - tail]
+        ranked = sorted(
+            range(len(indices)),
+            key=lambda j: _tail_change_pct(j, start_ts, end_ts),
+            reverse=True,
+        )
+        return {j: display_rank + 1 for display_rank, j in enumerate(ranked)}
+
+    def _format_rank_delta(curr_rank: int, prev_rank: int | None) -> str:
+        """Change vs prior week (+ = moved up in rank)."""
+        if prev_rank is None:
+            return '—'
+        delta = prev_rank - curr_rank
+        if delta == 0:
+            return '0'
+        if delta > 0:
+            return f'+{delta}'
+        return str(delta)
+
+    def _rank_delta_fg(delta_text: str) -> str:
+        if delta_text.startswith('+'):
+            return '#006400'
+        if delta_text.startswith('-'):
+            return '#8b0000'
+        return 'black'
+
+    def _ranked_rows_at(end_date_idx_local: int) -> list[int]:
+        """Same row order as the main table at the given week index."""
+        if end_date_idx_local < tail:
+            return []
+        end_ts = _rrg_index[end_date_idx_local]
+        start_ts = _rrg_index[end_date_idx_local - tail]
+        return sorted(
+            range(len(indices)),
+            key=lambda j: _tail_change_pct(j, start_ts, end_ts),
+            reverse=True,
+        )
+
+    def _movers_cell_text(row_idx: int, table_rank: int | str) -> str:
+        ref = (
+            index_metadata['ref_label'][row_idx]
+            or index_metadata['display'][row_idx]
+        )
+        name = ref if len(ref) <= 11 else f"{ref[:9]}…"
+        return f"{name} ({table_rank})"
+
+    def refresh_top_movers_panel(now_ranked: list[int] | None = None):
+        """Top-N main-table rows: Was = prior week top-N, Now = current top-N."""
+        if not config.top_movers_panel or movers_dates_label is None:
+            return
+        end_date_idx_local = int(date_scale.get())
+        prev_date_idx = (
+            end_date_idx_local - 1 if end_date_idx_local > tail else None
+        )
+        curr_ranks = _rank_by_row(end_date_idx_local)
+        if now_ranked is None:
+            now_ranked = _ranked_rows_at(end_date_idx_local)
+        now_top_rows = now_ranked[: config.top_movers_count]
+        was_top_rows = (
+            _ranked_rows_at(prev_date_idx)[: config.top_movers_count]
+            if prev_date_idx is not None
+            else []
+        )
+        now_label = format_date_label(end_date_idx_local)
+        was_label = (
+            format_date_label(prev_date_idx)
+            if prev_date_idx is not None
+            else '—'
+        )
+
+        movers_dates_label.config(
+            text=(
+                f"Was: {was_label}   Now: {now_label} — "
+                f"Was (rank) = that ETF today; Now (rank) = selected week"
+            )
+        )
+
+        for slot, widgets in enumerate(movers_row_widgets):
+            was_text = ''
+            now_text = ''
+            if slot < len(was_top_rows):
+                j = was_top_rows[slot]
+                was_rank = curr_ranks.get(j)
+                was_text = _movers_cell_text(
+                    j, was_rank if was_rank is not None else '—'
+                )
+            if slot < len(now_top_rows):
+                j = now_top_rows[slot]
+                now_rank = curr_ranks.get(j)
+                now_text = _movers_cell_text(
+                    j, now_rank if now_rank is not None else '—'
+                )
+            widgets['rank'].config(text=str(slot + 1))
+            widgets['was'].config(text=was_text)
+            widgets['now'].config(text=now_text)
+
     def refresh_table_ranking():
         """Reorder table rows by tail-window performance (best % change first)."""
         end_date_idx_local = int(date_scale.get())
         end_ts = _rrg_index[end_date_idx_local]
         start_ts = _rrg_index[end_date_idx_local - tail]
 
+        curr_ranks = _rank_by_row(end_date_idx_local)
+        prev_ranks = (
+            _rank_by_row(end_date_idx_local - 1)
+            if end_date_idx_local > tail
+            else {}
+        )
+
         ranked = sorted(
             range(len(indices)),
             key=lambda j: _tail_change_pct(j, start_ts, end_ts),
             reverse=True,
         )
+
+        rank_delta_texts: list[str] = []
+        for j in ranked:
+            rank_delta_texts.append(
+                _format_rank_delta(
+                    curr_ranks.get(j, len(indices)),
+                    prev_ranks.get(j),
+                )
+            )
 
         for display_row, j in enumerate(ranked):
             w = table_widgets[j]
@@ -869,8 +1160,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             fg_color = 'white' if bg_color in ('red', 'green', 'blue') else 'black'
 
             rank_num = display_row + 1
+            rank_delta_text = rank_delta_texts[display_row]
+            rank_delta_fg = _rank_delta_fg(rank_delta_text)
             for col, key in (
                 (_COL_RANK, 'rank_label'),
+                (_COL_RANK_DELTA, 'rank_delta_label'),
                 (_COL_REF, 'ref_label'),
                 (_COL_INDEX, 'index_entry'),
                 (_COL_PRICE, 'price_label'),
@@ -891,12 +1185,26 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 pady=_TABLE_ROW_PADY,
             )
             w['rank_label'].config(text=rank_num)
+            w['rank_delta_label'].config(
+                text=rank_delta_text, fg=rank_delta_fg if fg_color == 'black' else 'white'
+            )
             w['price_label'].config(text=price)
             chg_text = round(chg, 1) if chg != float('-inf') else ''
             w['chg_label'].config(text=chg_text)
-            for key in ('rank_label', 'ref_label', 'index_entry', 'price_label', 'chg_label'):
+            for key in (
+                'rank_label',
+                'rank_delta_label',
+                'ref_label',
+                'index_entry',
+                'price_label',
+                'chg_label',
+            ):
                 w[key].config(bg=bg_color, fg=fg_color)
-        _update_table_column_widths(end_ts, start_ts)
+            w['rank_delta_label'].config(
+                fg=rank_delta_fg if fg_color == 'black' else 'white'
+            )
+        _update_table_column_widths(end_ts, start_ts, rank_delta_texts)
+        refresh_top_movers_panel(ranked)
 
     checkbox_vars = []
     table_widgets = []
@@ -921,6 +1229,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         rank_label = tk.Label(
             table_body,
             text=i + 1,
+            relief=tk.RIDGE,
+            anchor='e',
+            bg=bg_color,
+            fg=fg_color,
+            font=_TABLE_FONT,
+        )
+        rank_delta_label = tk.Label(
+            table_body,
+            text='—',
             relief=tk.RIDGE,
             anchor='e',
             bg=bg_color,
@@ -981,6 +1298,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         table_widgets.append(
             {
                 'rank_label': rank_label,
+                'rank_delta_label': rank_delta_label,
                 'ref_label': ref_label_widget,
                 'index_entry': index_entry,
                 'price_label': price_label,
@@ -995,6 +1313,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     root.update_idletasks()
     _sync_header_scroll_gutter()
     _sync_table_layout()
+    root.after_idle(_sync_table_layout)
 
     scatter_plots = [None] * len(indices)
     line_plots = [None] * len(indices)

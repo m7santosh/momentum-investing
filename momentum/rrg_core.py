@@ -79,6 +79,9 @@ RRG_NAV_WEEKS = RRG_NAV_WEEKS_6M  # default / stock RRG
 RRG_WINDOW_DEFAULT = 14
 RRG_WINDOW_ETF = 10  # faster response for tactical ETF rotation
 
+RRG_DEFAULT_TAIL = 5
+RRG_MAX_TAIL = 10  # tail slider max; extra index weeks reserved for fetch/slider
+
 
 def rrg_nav_weeks(period: str) -> int:
     """Analysis window length (Date slider) for ``period``."""
@@ -95,9 +98,19 @@ def rrg_warmup_weeks(window: int) -> int:
     return window * 2 + 2
 
 
-def rrg_fetch_calendar_days(period: str, window: int = RRG_WINDOW_DEFAULT) -> int:
-    """Calendar days to download: warmup + analysis window + small buffer."""
-    total_weeks = rrg_warmup_weeks(window) + rrg_nav_weeks(period)
+def rrg_slider_index_weeks(period: str, *, tail: int = RRG_MAX_TAIL) -> int:
+    """Weekly points on the Date index: analysis window + room for tail at early ends."""
+    return rrg_nav_weeks(period) + tail
+
+
+def rrg_fetch_calendar_days(
+    period: str,
+    window: int = RRG_WINDOW_DEFAULT,
+    *,
+    tail: int = RRG_MAX_TAIL,
+) -> int:
+    """Calendar days to download: warmup + analysis window + tail buffer + small pad."""
+    total_weeks = rrg_warmup_weeks(window) + rrg_slider_index_weeks(period, tail=tail)
     return total_weeks * 7 + 14
 
 

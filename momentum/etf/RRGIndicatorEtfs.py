@@ -2,6 +2,7 @@
 
 Universe: universes/india.py (via etf_rrg_universe.py) — index EOD + ETF bhavcopy.
 Analysis: default 3-month lookback (13 weekly points, 10w rolling window); optional --period 6m.
+Side panel: top 7 main-table rows (Was vs Now) + RRG row-color legend.
 Downloads extra history for RRG warmup (~22w for 3m / ~30w for 6m) — not plotted on the slider.
 Not a ranker: interactive quadrant plot with tail/date sliders and sector table.
 
@@ -206,6 +207,9 @@ def _build_config(analysis_period: str, rrg_window: int) -> RrgAppConfig:
         count_summary=_count_summary,
         analysis_period=analysis_period,
         rrg_window=rrg_window,
+        top_movers_panel=True,
+        top_movers_count=7,
+        top_movers_title="Top 7 — Was vs Now",
     )
 
 

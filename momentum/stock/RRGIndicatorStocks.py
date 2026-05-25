@@ -2,6 +2,7 @@
 
 Universe: universes/*.py (quality, n500, bse_largemidcap, nifty_largemidcap) via stock_rrg_universe.py.
 Analysis: 6-month lookback (26 weekly points on Date slider); downloads extra ~30w for RRG warmup.
+Table: Rank Δ vs prior week when using Previous/Next Week or the Date slider (shared rrg_app UI).
 Not a ranker: interactive quadrant plot with tail/date sliders.
 
 vs stock momentum rankers (Excel output):
