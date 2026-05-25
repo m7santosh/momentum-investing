@@ -42,7 +42,7 @@ def fetch_bhavcopy_for_date(date_obj):
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
-            print("फाइल मिल गई! अब इसे खोल रहे हैं...")लाइव मार्केट डेटा
+            print("फाइल मिल गई! अब इसे खोल रहे हैं...")
             with zipfile.ZipFile(io.BytesIO(response.content)) as z:
                 csv_filename = z.namelist()[0]
                 with z.open(csv_filename) as f:
