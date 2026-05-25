@@ -1,8 +1,13 @@
 """
-ETF momentum for a weekly rebalance: rank the universe on recent total returns (1W / 2W / 1M / 3M),
-combine ranks, and keep names trading above a long trend (200 EMA) and not far below recent highs.
+US ETFs — absolute momentum rank (no relative strength vs index).
 
-Close_Below_9EMA: Exit if last Close is below 9 EMA of Close, else Hold (chart parity; returns use Adj Close).
+Universe: universes/us.py
+Filters: above 200 EMA, within 30% of 52w high.
+Rank: weighted 2W / 1M / 3M total-return ranks (lower Final_Rank = better) → top 10.
+
+vs other ETF scripts:
+- momentum_us_rs_etfs.py — adds RS vs ^GSPC; blends abs + RS (2W/1M/3M).
+- momentum_us_rs_etfs_adaptive.py — RS vs S&P on 1W/2W/1M only.
 """
 import yfinance as yf
 import pandas as pd
@@ -19,10 +24,8 @@ from utils.output_paths import FINAL_RESULT_ETF_DIR
 
 ETF_EMA_9 = 9
 
-# Universe: US ETFs/indices on Yahoo
-tickers = [
-    "XLC", "QQQ", "XLK", "SPY", "IWM", "VEA", "EEM", "MCHI", "CQQQ", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLRE", "XLY", "XLB", "SOXX", "SKYY", "ARKK", "ICLN", "TAN", "GLD", "GDX", "USO", "VNQ", "EWJ", "EWZ", "EWT", "EWY", "EWA", "EWG", "EWC", "EIDO", "FM", "KSA", "ARGT", "TUR", "THD", "GREK", "UUP", "MTUM", "QUAL", "USMV", "DXYZ", "DBC", "CPER", "FXI", "EFA", "PICK", "XME", "URA", "DBA", "UNG", "WEAT", "CORN", "FXE", "FXY", "FXB", "BITO"
-]
+# Universe: edit tickers in momentum/etf/universes/us.py
+from momentum.etf.universes.us import tickers
 
 
 def get_data(ticker, start_date, end_date):

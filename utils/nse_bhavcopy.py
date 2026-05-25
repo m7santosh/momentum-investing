@@ -421,16 +421,17 @@ def period_calendar_days(period: str) -> int:
     return 400
 
 
-def load_nse_etf_weekly_histories(
+def _load_nse_cm_weekly_histories(
     nse_symbols: list[str],
     *,
     period: str = "1y",
     min_points: int = 15,
     quiet: bool = False,
+    asset_label: str = "CM symbol",
 ) -> dict[str, "pd.Series"]:
-    """Weekly closes from NSE CM bhavcopy only (NSE-listed ETFs, EQ series).
+    """Weekly closes from NSE CM bhavcopy (EQ series).
 
-    *nse_symbols* are bare NSE tickers (e.g. ``GOLDBEES``, not ``GOLDBEES.NS``).
+    *nse_symbols* are bare NSE tickers (e.g. ``GOLDBEES``, ``TCS``).
     One bhavcopy download per trading day, shared across all symbols.
     """
     import pandas as pd
@@ -459,7 +460,7 @@ def load_nse_etf_weekly_histories(
     if not quiet and sessions_loaded:
         print(
             f"  [NSE Bhavcopy] RRG: {sessions_loaded} sessions × {len(unique)} "
-            f"hardcoded ETF symbol(s) (from CM file, not full-universe API)"
+            f"hardcoded {asset_label}(s) (from CM file, not full-universe API)"
         )
 
     out: dict[str, pd.Series] = {}
@@ -471,6 +472,40 @@ def load_nse_etf_weekly_histories(
         weekly = daily.resample("W-FRI").last().dropna()
         out[sym] = weekly if len(weekly) >= min_points else pd.Series(dtype=float)
     return out
+
+
+def load_nse_etf_weekly_histories(
+    nse_symbols: list[str],
+    *,
+    period: str = "1y",
+    min_points: int = 15,
+    quiet: bool = False,
+) -> dict[str, "pd.Series"]:
+    """Weekly closes from NSE CM bhavcopy only (NSE-listed ETFs, EQ series)."""
+    return _load_nse_cm_weekly_histories(
+        nse_symbols,
+        period=period,
+        min_points=min_points,
+        quiet=quiet,
+        asset_label="ETF symbol",
+    )
+
+
+def load_nse_equity_weekly_histories(
+    nse_symbols: list[str],
+    *,
+    period: str = "1y",
+    min_points: int = 15,
+    quiet: bool = False,
+) -> dict[str, "pd.Series"]:
+    """Weekly closes from NSE CM bhavcopy (EQ-series stocks)."""
+    return _load_nse_cm_weekly_histories(
+        nse_symbols,
+        period=period,
+        min_points=min_points,
+        quiet=quiet,
+        asset_label="equity symbol",
+    )
 
 
 def load_nse_index_weekly_histories(

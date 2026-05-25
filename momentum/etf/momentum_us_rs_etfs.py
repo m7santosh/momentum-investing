@@ -1,14 +1,13 @@
 """
-US ETF relative strength vs S&P 500 (^GSPC): excess returns vs index over multiple horizons.
+US ETFs — relative strength vs S&P 500 (^GSPC), swing blend.
 
-Trend filters: price above 200 EMA and within 30% of 52-week high (same universe as momentum_us_etfs.py).
-Final_Rank blends absolute return ranks (2W / 1M / 3M) with RS ranks (equal weights).
+Universe: universes/us.py
+Filters: above 200 EMA, within 30% of 52w high.
+Rank: blends abs-momentum and RS ranks on 2W/1M/3M → Final_Rank (lower = better).
 
-RS_* columns are ETF minus ^GSPC over the same horizons (Adj Close, date-aligned).
-
-Close_Below_9EMA: Exit if last Close is below 9 EMA of Close, else Hold (chart parity; returns use Adj Close).
-
-Companion: momentum_us_rs_etfs_adaptive.py ranks by weighted 1W/2W/1M RS only (3M omitted).
+vs other ETF scripts:
+- momentum_us_etfs.py — abs returns only; no RS vs benchmark.
+- momentum_us_rs_etfs_adaptive.py — same filters; RS-only rank on 1W/2W/1M (tactical).
 """
 from __future__ import annotations
 
@@ -44,10 +43,8 @@ MIN_HISTORY_SESSIONS = LB_3M
 TOP_N = 10
 OUT_FILENAME = "momentum_us_rs_etfs.xlsx"
 
-# Universe: US ETFs/indices on Yahoo (same as momentum_us_etfs.py)
-tickers = [
-    "XLC", "QQQ", "XLK", "SPY", "IWM", "VEA", "EEM", "MCHI", "CQQQ", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLRE", "XLY", "XLB", "SOXX", "SKYY", "ARKK", "ICLN", "TAN", "GLD", "GDX", "USO", "VNQ", "EWJ", "EWZ", "EWT", "EWY", "EWA", "EWG", "EWC", "EIDO", "FM", "KSA", "ARGT", "TUR", "THD", "GREK", "UUP", "MTUM", "QUAL", "USMV", "DXYZ", "DBC", "CPER", "FXI", "EFA", "PICK", "XME", "URA", "DBA", "UNG", "WEAT", "CORN", "FXE", "FXY", "FXB", "BITO"
-]
+# Universe: edit tickers in momentum/etf/universes/us.py
+from momentum.etf.universes.us import tickers
 
 
 def get_data(ticker: str, start_date, end_date):

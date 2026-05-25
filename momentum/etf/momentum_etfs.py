@@ -1,6 +1,14 @@
 """
-ETF momentum for a weekly rebalance: rank the universe on recent total returns (1W / 2W / 1M),
-combine ranks, and keep names trading above a long trend (200 EMA) and not far below recent highs.
+India NSE ETFs — absolute momentum rank (no relative strength vs index).
+
+Universe: universes/india.py
+Filters: above 200 EMA, within 30% of 52w high.
+Rank: weighted 1W / 2W / 1M total-return ranks (lower Final_Rank = better) → top 10.
+
+vs other ETF scripts:
+- momentum_rs_etfs.py — adds RS vs ^CRSLDX; blends abs + RS ranks (1W–3M); swing hold.
+- momentum_rs_etfs_adaptive.py — same filters; ranks RS vs N500 on 1W/2W/1M only (tactical).
+- ../RRGIndicator.py — visual RRG (indices + ETFs); not a ranker.
 """
 import yfinance as yf
 import pandas as pd
@@ -25,8 +33,8 @@ def _symbol_for_excel(yahoo_ticker: str) -> str:
     return yahoo_ticker
 
 
-# Universe: India-listed ETFs/indices on Yahoo (.NS)
-tickers = ["ALPHA.NS", "AUTOBEES.NS", "BANKBEES.NS","CONSUMBEES.NS","CPSEETF.NS","MOENERGY.NS", "FMCGIETF.NS", "GOLDBEES.NS", "GROWWPOWER.NS", "GROWWRAIL.NS", "HDFCSML250.NS", "HEALTHIETF.NS", "HNGSNGBEES.NS", "ICICIB22.NS", "INFRABEES.NS", "ITBEES.NS", "LIQUIDCASE.NS", "MAFANG.NS", "MAHKTECH.NS", "METALIETF.NS", "MIDCAPETF.NS", "MOCAPITAL.NS", "MODEFENCE.NS", "MON100.NS", "MOREALTY.NS", "MOTOUR.NS", "MOVALUE.NS", "NEXT50IETF.NS", "NIFTYBEES.NS", "OILIETF.NS", "PHARMABEES.NS", "PSUBNKBEES.NS", "PVTBANIETF.NS", "MOMIDMTM.NS", "SILVERBEES.NS", "SMALLCAP.NS", "CHEMICAL.NS", "GROWWNET.NS"]
+# Universe: edit tickers in momentum/etf/universes/india.py
+from momentum.etf.universes.india import tickers
 
 # Function to fetch historical data
 def get_data(ticker, start_date, end_date):

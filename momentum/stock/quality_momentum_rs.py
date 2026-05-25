@@ -1,18 +1,19 @@
 """
-Stock relative strength vs Nifty 500 TR (^CRSLDX). Universe: Nifty 100 Quality 30, Midcap 150 Quality 50, Smallcap 250 Quality 50 (each ticker `marketcap`: Largecap / Midcap / Smallcap). Configure PORTFOLIO_SIZE (mix %) vs OUTPUT_RANKED_SIZE (Excel depth).
+Quality ~130 — relative strength vs Nifty 500 TR (^CRSLDX); daily ranked scan.
 
-#### NO REBALANCE PARAMETER PASSED, SO IT WILL RUN DAILY. ####
+Universe: universes/quality.py (Quality 30 + Midcap Q50 + Smallcap Q50)
+Filters: above 200 EMA, within 30% of 52w high, ADTV > 5 Cr (no low-vol gate).
+Rank: blends abs-momentum and RS ranks on 3M/6M/9M → Blended_Rank; top-N mix by marketcap/industry.
+No rebalance calendar or portfolio state — run fresh each day.
 
-Filters:
-1. Trend: Price must be above 200-day EMA.
-2. Proximity: Price must be within 30% of its 52-week high.
-3. Liquidity: Average Daily Turnover (ADTV) must be > 5 Crores INR.
-
-Blended Ranking Logic:
-- Abs_Momentum_Rank: Weighted rank on raw returns (0.50·3M + 0.30·6M + 0.20·9M).
-- Relative_Strength_Rank: Weighted rank on RS vs Benchmark (0.50·3M + 0.30·6M + 0.20·9M).
-- Blended_Rank: Average of the above two. Lower is better.
-- Volatility_Score: Standard deviation of last 21 days (lower = smoother trend).
+vs other stock scripts:
+- quality_momentum_rs_lv.py — same universe/rank; + low-vol quantile; rebalance + state JSON.
+- quality_momentum_rs_no_lv.py — same universe; rebalance/state; no low-vol (like this + rebalance).
+- quality_momentum_rs_lv_list.py — same filters as _lv; list-only snapshot, no state.
+- momentum_rs_lv_n500.py — Nifty 500 universe; + low-vol; rebalance + state.
+- momentum_stocks.py — BSE LargeMidcap; abs returns only.
+- momentum_rs_stocks.py — Nifty LargeMidcap; RS vs LM250 benchmark.
+- RRGIndicatorStocks.py — visual RRG (selectable universe); not a ranker.
 """
 
 import yfinance as yf
@@ -46,140 +47,7 @@ LB_9M = 189
 W_3M, W_6M, W_9M = 0.50, 0.30, 0.20
 
 # --- Ticker Universe: Nifty 100 Quality 30, Midcap 150 Quality 50, Smallcap 250 Quality 50 ---
-tickers = [
-    {"symbol": "ABB.NS", "industry": "Capital Goods", "marketcap": "Largecap"},
-    {"symbol": "ASIANPAINT.NS", "industry": "Consumer Durables", "marketcap": "Largecap"},
-    {"symbol": "BAJAJ-AUTO.NS", "industry": "Automobile and Auto Components", "marketcap": "Largecap"},
-    {"symbol": "BEL.NS", "industry": "Capital Goods", "marketcap": "Largecap"},
-    {"symbol": "BOSCHLTD.NS", "industry": "Automobile and Auto Components", "marketcap": "Largecap"},
-    {"symbol": "BRITANNIA.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Largecap"},
-    {"symbol": "COALINDIA.NS", "industry": "Oil Gas & Consumable Fuels", "marketcap": "Largecap"},
-    {"symbol": "DIVISLAB.NS", "industry": "Healthcare", "marketcap": "Largecap"},
-    {"symbol": "DRREDDY.NS", "industry": "Healthcare", "marketcap": "Largecap"},
-    {"symbol": "EICHERMOT.NS", "industry": "Automobile and Auto Components", "marketcap": "Largecap"},
-    {"symbol": "GODREJCP.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Largecap"},
-    {"symbol": "HCLTECH.NS", "industry": "Information Technology", "marketcap": "Largecap"},
-    {"symbol": "HAVELLS.NS", "industry": "Consumer Durables", "marketcap": "Largecap"},
-    {"symbol": "HAL.NS", "industry": "Capital Goods", "marketcap": "Largecap"},
-    {"symbol": "HINDUNILVR.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Largecap"},
-    {"symbol": "HINDZINC.NS", "industry": "Metals & Mining", "marketcap": "Largecap"},
-    {"symbol": "ITC.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Largecap"},
-    {"symbol": "INFY.NS", "industry": "Information Technology", "marketcap": "Largecap"},
-    {"symbol": "LTM.NS", "industry": "Information Technology", "marketcap": "Largecap"},
-    {"symbol": "MARUTI.NS", "industry": "Automobile and Auto Components", "marketcap": "Largecap"},
-    {"symbol": "MAZDOCK.NS", "industry": "Capital Goods", "marketcap": "Largecap"},
-    {"symbol": "NESTLEIND.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Largecap"},
-    {"symbol": "PIDILITIND.NS", "industry": "Chemicals", "marketcap": "Largecap"},
-    {"symbol": "SOLARINDS.NS", "industry": "Chemicals", "marketcap": "Largecap"},
-    {"symbol": "TCS.NS", "industry": "Information Technology", "marketcap": "Largecap"},
-    {"symbol": "TECHM.NS", "industry": "Information Technology", "marketcap": "Largecap"},
-    {"symbol": "UNITDSPR.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Largecap"},
-    {"symbol": "VBL.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Largecap"},
-    {"symbol": "WIPRO.NS", "industry": "Information Technology", "marketcap": "Largecap"},
-    {"symbol": "ZYDUSLIFE.NS", "industry": "Healthcare", "marketcap": "Largecap"},
-
-    {"symbol": "360ONE.NS", "industry": "Financial Services", "marketcap": "Midcap"},
-    {"symbol": "3MINDIA.NS", "industry": "Diversified", "marketcap": "Midcap"},
-    {"symbol": "AIAENG.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "APLAPOLLO.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "ABBOTINDIA.NS", "industry": "Healthcare", "marketcap": "Midcap"},
-    {"symbol": "AJANTPHARM.NS", "industry": "Healthcare", "marketcap": "Midcap"},
-    {"symbol": "ALKEM.NS", "industry": "Healthcare", "marketcap": "Midcap"},
-    {"symbol": "APARINDS.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "ASTRAL.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "BALKRISIND.NS", "industry": "Automobile and Auto Components", "marketcap": "Midcap"},
-    {"symbol": "MAHABANK.NS", "industry": "Financial Services", "marketcap": "Midcap"},
-    {"symbol": "BERGEPAINT.NS", "industry": "Consumer Durables", "marketcap": "Midcap"},
-    {"symbol": "BDL.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "CRISIL.NS", "industry": "Financial Services", "marketcap": "Midcap"},
-    {"symbol": "COFORGE.NS", "industry": "Information Technology", "marketcap": "Midcap"},
-    {"symbol": "COLPAL.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Midcap"},
-    {"symbol": "COROMANDEL.NS", "industry": "Chemicals", "marketcap": "Midcap"},
-    {"symbol": "CUMMINSIND.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "DIXON.NS", "industry": "Consumer Durables", "marketcap": "Midcap"},
-    {"symbol": "GLAXO.NS", "industry": "Healthcare", "marketcap": "Midcap"},
-    {"symbol": "GODFRYPHLP.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Midcap"},
-    {"symbol": "GUJGASLTD.NS", "industry": "Oil Gas & Consumable Fuels", "marketcap": "Midcap"},
-    {"symbol": "HDFCAMC.NS", "industry": "Financial Services", "marketcap": "Midcap"},
-    {"symbol": "HEROMOTOCO.NS", "industry": "Automobile and Auto Components", "marketcap": "Midcap"},
-    {"symbol": "HONAUT.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "IRCTC.NS", "industry": "Consumer Services", "marketcap": "Midcap"},
-    {"symbol": "IGL.NS", "industry": "Oil Gas & Consumable Fuels", "marketcap": "Midcap"},
-    {"symbol": "KPRMILL.NS", "industry": "Textiles", "marketcap": "Midcap"},
-    {"symbol": "KEI.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "KPITTECH.NS", "industry": "Information Technology", "marketcap": "Midcap"},
-    {"symbol": "LTTS.NS", "industry": "Information Technology", "marketcap": "Midcap"},
-    {"symbol": "MARICO.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Midcap"},
-    {"symbol": "MOTILALOFS.NS", "industry": "Financial Services", "marketcap": "Midcap"},
-    {"symbol": "MPHASIS.NS", "industry": "Information Technology", "marketcap": "Midcap"},
-    {"symbol": "MUTHOOTFIN.NS", "industry": "Financial Services", "marketcap": "Midcap"},
-    {"symbol": "NMDC.NS", "industry": "Metals & Mining", "marketcap": "Midcap"},
-    {"symbol": "NAM-INDIA.NS", "industry": "Financial Services", "marketcap": "Midcap"},
-    {"symbol": "OFSS.NS", "industry": "Information Technology", "marketcap": "Midcap"},
-    {"symbol": "PIIND.NS", "industry": "Chemicals", "marketcap": "Midcap"},
-    {"symbol": "PAGEIND.NS", "industry": "Textiles", "marketcap": "Midcap"},
-    {"symbol": "PERSISTENT.NS", "industry": "Information Technology", "marketcap": "Midcap"},
-    {"symbol": "PETRONET.NS", "industry": "Oil Gas & Consumable Fuels", "marketcap": "Midcap"},
-    {"symbol": "POLYCAB.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "PGHH.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Midcap"},
-    {"symbol": "SCHAEFFLER.NS", "industry": "Automobile and Auto Components", "marketcap": "Midcap"},
-    {"symbol": "SONACOMS.NS", "industry": "Automobile and Auto Components", "marketcap": "Midcap"},
-    {"symbol": "SUPREMEIND.NS", "industry": "Capital Goods", "marketcap": "Midcap"},
-    {"symbol": "SYNGENE.NS", "industry": "Healthcare", "marketcap": "Midcap"},
-    {"symbol": "TATAELXSI.NS", "industry": "Information Technology", "marketcap": "Midcap"},
-    {"symbol": "TIINDIA.NS", "industry": "Automobile and Auto Components", "marketcap": "Midcap"},
-
-    {"symbol": "ACE.NS", "industry": "Capital Goods", "marketcap": "Smallcap"},
-    {"symbol": "ABSLAMC.NS", "industry": "Financial Services", "marketcap": "Smallcap"},
-    {"symbol": "AFFLE.NS", "industry": "Information Technology", "marketcap": "Smallcap"},
-    {"symbol": "ARE&M.NS", "industry": "Automobile and Auto Components", "marketcap": "Smallcap"},
-    {"symbol": "ANGELONE.NS", "industry": "Financial Services", "marketcap": "Smallcap"},
-    {"symbol": "APTUS.NS", "industry": "Financial Services", "marketcap": "Smallcap"},
-    {"symbol": "BLS.NS", "industry": "Consumer Services", "marketcap": "Smallcap"},
-    {"symbol": "BAYERCROP.NS", "industry": "Chemicals", "marketcap": "Smallcap"},
-    {"symbol": "BSOFT.NS", "industry": "Information Technology", "marketcap": "Smallcap"},
-    {"symbol": "MAPMYINDIA.NS", "industry": "Information Technology", "marketcap": "Smallcap"},
-    {"symbol": "CANFINHOME.NS", "industry": "Financial Services", "marketcap": "Smallcap"},
-    {"symbol": "CASTROLIND.NS", "industry": "Oil Gas & Consumable Fuels", "marketcap": "Smallcap"},
-    {"symbol": "CDSL.NS", "industry": "Financial Services", "marketcap": "Smallcap"},
-    {"symbol": "CHAMBLFERT.NS", "industry": "Chemicals", "marketcap": "Smallcap"},
-    {"symbol": "CLEAN.NS", "industry": "Chemicals", "marketcap": "Smallcap"},
-    {"symbol": "CAMS.NS", "industry": "Financial Services", "marketcap": "Smallcap"},
-    {"symbol": "CYIENT.NS", "industry": "Information Technology", "marketcap": "Smallcap"},
-    {"symbol": "LALPATHLAB.NS", "industry": "Healthcare", "marketcap": "Smallcap"},
-    {"symbol": "ELGIEQUIP.NS", "industry": "Capital Goods", "marketcap": "Smallcap"},
-    {"symbol": "EMAMILTD.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Smallcap"},
-    {"symbol": "ENGINERSIN.NS", "industry": "Construction", "marketcap": "Smallcap"},
-    {"symbol": "FINCABLES.NS", "industry": "Capital Goods", "marketcap": "Smallcap"},
-    {"symbol": "GILLETTE.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Smallcap"},
-    {"symbol": "GPIL.NS", "industry": "Capital Goods", "marketcap": "Smallcap"},
-    {"symbol": "GRAVITA.NS", "industry": "Metals & Mining", "marketcap": "Smallcap"},
-    {"symbol": "GSPL.NS", "industry": "Oil Gas & Consumable Fuels", "marketcap": "Smallcap"},
-    {"symbol": "INDIAMART.NS", "industry": "Consumer Services", "marketcap": "Smallcap"},
-    {"symbol": "IEX.NS", "industry": "Financial Services", "marketcap": "Smallcap"},
-    {"symbol": "JBCHEPHARM.NS", "industry": "Healthcare", "marketcap": "Smallcap"},
-    {"symbol": "JSWDULUX.NS", "industry": "Consumer Durables", "marketcap": "Smallcap"},
-    {"symbol": "KAJARIACER.NS", "industry": "Consumer Durables", "marketcap": "Smallcap"},
-    {"symbol": "KARURVYSYA.NS", "industry": "Financial Services", "marketcap": "Smallcap"},
-    {"symbol": "KIRLOSBROS.NS", "industry": "Capital Goods", "marketcap": "Smallcap"},
-    {"symbol": "LTFOODS.NS", "industry": "Fast Moving Consumer Goods", "marketcap": "Smallcap"},
-    {"symbol": "MGL.NS", "industry": "Oil Gas & Consumable Fuels", "marketcap": "Smallcap"},
-    {"symbol": "METROPOLIS.NS", "industry": "Healthcare", "marketcap": "Smallcap"},
-    {"symbol": "MSUMI.NS", "industry": "Automobile and Auto Components", "marketcap": "Smallcap"},
-    {"symbol": "PFIZER.NS", "industry": "Healthcare", "marketcap": "Smallcap"},
-    {"symbol": "POLYMED.NS", "industry": "Healthcare", "marketcap": "Smallcap"},
-    {"symbol": "PRAJIND.NS", "industry": "Capital Goods", "marketcap": "Smallcap"},
-    {"symbol": "RITES.NS", "industry": "Construction", "marketcap": "Smallcap"},
-    {"symbol": "RAILTEL.NS", "industry": "Telecommunication", "marketcap": "Smallcap"},
-    {"symbol": "SONATSOFTW.NS", "industry": "Information Technology", "marketcap": "Smallcap"},
-    {"symbol": "SUMICHEM.NS", "industry": "Chemicals", "marketcap": "Smallcap"},
-    {"symbol": "SUNTV.NS", "industry": "Media Entertainment & Publication", "marketcap": "Smallcap"},
-    {"symbol": "TIMKEN.NS", "industry": "Capital Goods", "marketcap": "Smallcap"},
-    {"symbol": "TRITURBINE.NS", "industry": "Capital Goods", "marketcap": "Smallcap"},
-    {"symbol": "UTIAMC.NS", "industry": "Financial Services", "marketcap": "Smallcap"},
-    {"symbol": "ZENSARTECH.NS", "industry": "Information Technology", "marketcap": "Smallcap"},
-    {"symbol": "ECLERX.NS", "industry": "Services", "marketcap": "Smallcap"},
-]
+from momentum.stock.universes.quality import tickers
 
 # --- Helper Functions ---
 

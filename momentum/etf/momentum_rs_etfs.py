@@ -1,5 +1,14 @@
 """
-ETF relative strength vs Nifty 500 (^CRSLDX): excess returns vs index over multiple horizons.
+India NSE ETFs — relative strength vs Nifty 500 (^CRSLDX), swing / all-weather blend.
+
+Universe: universes/india.py
+Filters: 200 EMA + 52w-high proximity (or ADTV for new listings).
+Rank: separate abs-momentum and RS ranks on 1W/2W/1M/3M → weighted Blended_Rank (lower = better).
+
+vs other ETF scripts:
+- momentum_etfs.py — abs returns only; no benchmark RS; simpler weekly scan.
+- momentum_rs_etfs_adaptive.py — same filters; RS-only rank on 1W/2W/1M (3M dropped); tactical.
+- ../RRGIndicator.py — visual RRG (indices + ETFs); not a ranker.
 
 Trend filters (established listings only, >= ~252 sessions):
 1. Price must be above the 200-day EMA.
@@ -86,16 +95,8 @@ ADTV_LOOKBACK = 20
 
 RETURN_SUFFIXES = ("1W", "2W", "1M", "3M")
 
-# --- Ticker universe ---
-tickers = [
-    "ALPHA.NS", "AUTOBEES.NS", "BANKBEES.NS", "CONSUMBEES.NS", "CPSEETF.NS",
-    "MOENERGY.NS", "FMCGIETF.NS", "GOLDBEES.NS", "GROWWPOWER.NS", "GROWWRAIL.NS",
-    "HEALTHIETF.NS", "HNGSNGBEES.NS", "ICICIB22.NS", "INFRABEES.NS", "ITBEES.NS",
-    "LIQUIDCASE.NS", "MAHKTECH.NS", "METALIETF.NS", "MIDCAPETF.NS", "MOCAPITAL.NS",
-    "MODEFENCE.NS", "MON100.NS", "MOREALTY.NS", "MOTOUR.NS", "MOVALUE.NS",
-    "NEXT50IETF.NS", "NIFTYBEES.NS", "OILIETF.NS", "PHARMABEES.NS", "PSUBNKBEES.NS",
-    "PVTBANIETF.NS", "MOMIDMTM.NS", "SILVERBEES.NS", "SMALLCAP.NS", "CHEMICAL.NS", "GROWWNET.NS"
-]
+# --- Ticker universe: momentum/etf/universes/india.py (edit tickers there) ---
+from momentum.etf.universes.india import tickers
 
 
 def _symbol_for_excel(yahoo_ticker: str) -> str:
