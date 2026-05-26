@@ -11,6 +11,9 @@ vs momentum ETF rankers (Excel output):
 - momentum_rs_etfs.py / momentum_us_rs_etfs.py — abs + RS blended ranks (swing).
 - momentum_rs_etfs_adaptive.py / momentum_us_rs_etfs_adaptive.py — RS-only, short horizons.
 
+vs US ETF RRG:
+    RRGIndicatorUsEtfs.py — same UI; US ETFs on Yahoo vs ^GSPC (universes/us.py).
+
 Examples:
     python momentum/etf/RRGIndicatorEtfs.py
     python momentum/etf/RRGIndicatorEtfs.py --period 6m

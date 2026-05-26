@@ -1,11 +1,31 @@
 """US-listed ETFs.
 
-Edit ``tickers`` below. Used by momentum_us_etfs.py and momentum_us_rs_etfs.py.
+Edit ``tickers`` below. Used by momentum US rankers and ``RRGIndicatorUsEtfs.py``.
 """
 
 KEY = "us"
 LABEL = "US ETFs"
 DESCRIPTION = "US sector, thematic, and commodity ETFs on Yahoo Finance"
+BENCHMARK_YAHOO = "^GSPC"
+
+DEFAULT_VISIBLE = {
+    "SPY",
+    "QQQ",
+    "XLK",
+    "XLF",
+    "XLE",
+    "XLV",
+    "XLI",
+    "XLP",
+    "GLD",
+    "IWM",
+    "EEM",
+    "SOXX",
+    "ARKK",
+    "VNQ",
+    "EWJ",
+    "FXI",
+}
 
 tickers = [
     'XLC',
@@ -70,5 +90,69 @@ tickers = [
     'FXB',
     'BITO',
 ]
+
+ETF_LABELS = {
+    "XLC": "Communication",
+    "QQQ": "Nasdaq 100",
+    "XLK": "Technology",
+    "SPY": "S&P 500",
+    "IWM": "Russell 2000",
+    "VEA": "Developed ex-US",
+    "EEM": "Emerging Markets",
+    "MCHI": "China",
+    "CQQQ": "China Internet",
+    "XLF": "Financials",
+    "XLE": "Energy",
+    "XLV": "Health Care",
+    "XLI": "Industrials",
+    "XLP": "Consumer Staples",
+    "XLU": "Utilities",
+    "XLRE": "Real Estate",
+    "XLY": "Consumer Disc.",
+    "XLB": "Materials",
+    "SOXX": "Semiconductors",
+    "SKYY": "Cloud Computing",
+    "ARKK": "ARK Innovation",
+    "ICLN": "Clean Energy",
+    "TAN": "Solar",
+    "GLD": "Gold",
+    "GDX": "Gold Miners",
+    "USO": "Crude Oil",
+    "VNQ": "REIT",
+    "EWJ": "Japan",
+    "EWZ": "Brazil",
+    "EWT": "Taiwan",
+    "EWY": "South Korea",
+    "EWA": "Australia",
+    "EWG": "Germany",
+    "EWC": "Canada",
+    "EIDO": "Indonesia",
+    "FM": "Frontier Markets",
+    "KSA": "Saudi Arabia",
+    "ARGT": "Argentina",
+    "TUR": "Turkey",
+    "THD": "Thailand",
+    "GREK": "Greece",
+    "UUP": "US Dollar",
+    "MTUM": "Momentum",
+    "QUAL": "Quality",
+    "USMV": "Min Volatility",
+    "DXYZ": "Destiny Tech100",
+    "DBC": "Commodities",
+    "CPER": "Copper",
+    "FXI": "China Large-Cap",
+    "EFA": "EAFE",
+    "PICK": "Metals & Mining",
+    "XME": "Metals & Mining SPDR",
+    "URA": "Uranium",
+    "DBA": "Agriculture",
+    "UNG": "Natural Gas",
+    "WEAT": "Wheat",
+    "CORN": "Corn",
+    "FXE": "Euro",
+    "FXY": "Yen",
+    "FXB": "Pound",
+    "BITO": "Bitcoin Strategy",
+}
 
 # --- end ticker universe ---
