@@ -62,6 +62,9 @@ class RrgAppConfig:
     top_movers_count: int = 7
     top_movers_kind: str | None = None
     top_movers_title: str = "Top movers"
+    default_tail: int = RRG_DEFAULT_TAIL
+    side_cheat_sheet_title: str = "Swing trading cheat sheet"
+    side_cheat_sheet: tuple[tuple[str, tuple[str, ...]], ...] | None = None
 
 
 def run_rrg_app(config: RrgAppConfig) -> None:
@@ -72,7 +75,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     nav_bars = rrg_nav_bars(period, bar_unit)
     effective_window = rrg_effective_window(window, bar_unit)
     min_history_bars = rrg_min_history_bars(window, bar_unit)
-    tail = RRG_DEFAULT_TAIL
+    tail = config.default_tail
     end_date_idx = None
     start_date, end_date = None, None
     hover_points = []
@@ -375,7 +378,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     canvas.mpl_connect('motion_notify_event', on_mouse_move)
 
-    controls_frame = tk.Frame(root, height=88, padx=8, pady=6)
+    controls_frame = tk.Frame(root, height=104, padx=8, pady=6)
     controls_frame.grid(row=1, column=0, sticky='ew')
     controls_frame.grid_propagate(False)
 
@@ -642,6 +645,47 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     )
     date_range_label.pack(side=tk.LEFT, padx=(4, 0))
 
+    calc_row = tk.Frame(controls_frame)
+    calc_row.pack(side=tk.TOP, fill=tk.X, pady=(2, 0))
+    calc_context_label = tk.Label(
+        calc_row,
+        text='',
+        anchor='w',
+        fg='#333333',
+        font=('Arial', 9),
+        wraplength=1100,
+        justify=tk.LEFT,
+    )
+    calc_context_label.pack(side=tk.LEFT, padx=(6, 0))
+
+    def update_calc_context_label():
+        """Show Change % / rank window for current Tail, Date, and Unit."""
+        if not len(_rrg_index):
+            calc_context_label.config(text='')
+            return
+        end_i = int(date_scale.get())
+        tail_n = int(float(tail_scale.get()))
+        unit_plural = 'days' if bar_unit == 'day' else 'weeks'
+        if end_i < tail_n:
+            calc_context_label.config(
+                text=(
+                    f'Change % start → end: — (tail {tail_n} {unit_plural} '
+                    f'exceeds available history at this date)'
+                )
+            )
+            return
+        start_ts = format_date_label(end_i - tail_n)
+        end_ts = format_date_label(end_i)
+        rank_vs = ''
+        if end_i > tail_n:
+            rank_vs = f'  ·  Rank Δ vs prior bar: {format_date_label(end_i - 1)}'
+        calc_context_label.config(
+            text=(
+                f'Change % start → end: {start_ts} → {end_ts} '
+                f'(tail={tail_n} {unit_plural}){rank_vs}'
+            )
+        )
+
     table_section = tk.Frame(root)
     table_section.grid(row=2, column=0, sticky='nsew', padx=4, pady=(0, 4))
     table_section.rowconfigure(0, weight=1)
@@ -657,34 +701,6 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     movers_row_widgets: list[dict[str, tk.Label]] = []
     side_panel = None
     if config.top_movers_panel:
-        _RRG_ROW_LEGEND = (
-            (
-                'green',
-                'Leading',
-                'RS ratio & momentum both above benchmark — hold or add to leaders.',
-            ),
-            (
-                'yellow',
-                'Weakening',
-                'Still strong on RS but momentum fading — trim size or tighten stops.',
-            ),
-            (
-                'blue',
-                'Improving',
-                'RS recovering with rising momentum — watchlist / early accumulation.',
-            ),
-            (
-                'red',
-                'Lagging',
-                'Weak RS and falling momentum — avoid or underweight.',
-            ),
-            (
-                'gray',
-                'N/A',
-                'Insufficient RRG data at the selected date.',
-            ),
-        )
-
         side_panel = tk.Frame(tables_row)
         side_panel.pack(side=tk.RIGHT, fill=tk.Y, anchor='n', padx=(16, 0))
 
@@ -748,58 +764,40 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             row.columnconfigure(1, weight=1)
             row.columnconfigure(2, weight=1)
 
-        legend_panel = tk.Frame(
-            side_panel,
-            padx=6,
-            pady=4,
-            relief=tk.GROOVE,
-            borderwidth=1,
-        )
-        legend_panel.pack(side=tk.LEFT, anchor='nw', fill=tk.Y, padx=(12, 0))
-        tk.Label(
-            legend_panel,
-            text='Main table row colors (RRG)',
-            font=('Arial', 10, 'bold'),
-            anchor='w',
-        ).pack(fill=tk.X, pady=(0, 4))
-        tk.Label(
-            legend_panel,
-            text='Row background = RRG quadrant at the selected Date (vs benchmark).',
-            font=('Arial', 9),
-            anchor='w',
-            fg='gray',
-            wraplength=280,
-            justify=tk.LEFT,
-        ).pack(fill=tk.X, pady=(0, 6))
-        for bg, title, hint in _RRG_ROW_LEGEND:
-            item = tk.Frame(legend_panel)
-            item.pack(fill=tk.X, pady=2)
-            swatch_fg = 'white' if bg in ('green', 'red', 'blue') else 'black'
-            tk.Label(
-                item,
-                text='  ',
-                bg=bg,
-                fg=swatch_fg,
-                width=2,
-                relief=tk.RIDGE,
+        if config.side_cheat_sheet:
+            cheat_panel = tk.Frame(
+                side_panel,
+                padx=6,
+                pady=4,
+                relief=tk.GROOVE,
                 borderwidth=1,
-            ).pack(side=tk.LEFT, padx=(0, 6))
-            text_wrap = tk.Frame(item)
-            text_wrap.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            )
+            cheat_panel.pack(side=tk.LEFT, anchor='nw', fill=tk.Y, padx=(12, 0))
             tk.Label(
-                text_wrap,
-                text=title,
-                font=('Arial', 9, 'bold'),
+                cheat_panel,
+                text=config.side_cheat_sheet_title,
+                font=('Arial', 10, 'bold'),
                 anchor='w',
-            ).pack(fill=tk.X)
-            tk.Label(
-                text_wrap,
-                text=hint,
-                font=('Arial', 9),
-                anchor='w',
-                wraplength=250,
-                justify=tk.LEFT,
-            ).pack(fill=tk.X)
+            ).pack(fill=tk.X, pady=(0, 4))
+            for section_title, bullets in config.side_cheat_sheet:
+                block = tk.Frame(cheat_panel)
+                block.pack(fill=tk.X, pady=(0, 8))
+                tk.Label(
+                    block,
+                    text=section_title,
+                    font=('Arial', 9, 'bold'),
+                    anchor='w',
+                    justify=tk.LEFT,
+                ).pack(fill=tk.X, anchor='w')
+                for line in bullets:
+                    tk.Label(
+                        block,
+                        text=f'• {line}',
+                        font=('Arial', 9),
+                        anchor='w',
+                        fg='#333333',
+                        justify=tk.LEFT,
+                    ).pack(fill=tk.X, anchor='w', padx=(8, 0), pady=(1, 0))
 
     scroll_wrap = tk.Frame(tables_row)
     scroll_wrap.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1506,6 +1504,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         date_scale.set(end_date_idx)
         date_value_label.config(text=format_date_label(end_date_idx))
         date_range_label.config(text=_date_range_hint_text())
+        update_calc_context_label()
         _ensure_plot_slots()
         print(
             f"RRG bar unit: {bar_unit} — {len(indices)} rows, "
@@ -1566,6 +1565,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         end_date_idx = int(date_scale.get())
         end_date = _rrg_index[end_date_idx]
         start_date = _rrg_index[end_date_idx - tail]
+        update_calc_context_label()
 
         refresh_table_ranking()
 

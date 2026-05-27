@@ -2,7 +2,7 @@
 
 Universe: universes/us.py (via us_rrg_universe.py) — Yahoo Finance weekly EOD.
 Analysis: default 3-month lookback (13 weekly points, 10w rolling window); optional --period 6m.
-Side panel: top 7 main-table rows (Was vs Now) + RRG row-color legend.
+Side panel: top 10 (Was vs Now) + swing trading cheat sheet.
 Downloads extra history for RRG warmup (~22w for 3m / ~30w for 6m) — not plotted on the slider.
 Not a ranker: interactive quadrant plot with tail/date sliders and sector table.
 
@@ -15,6 +15,7 @@ vs India ETF RRG:
     RRGIndicatorEtfs.py — NSE indices + ETFs (bhavcopy / ind_close_all).
 
 Examples:
+    python momentum/etf/RRGIndicatorUsEtfs3m.py
     python momentum/etf/RRGIndicatorUsEtfs.py
     python momentum/etf/RRGIndicatorUsEtfs.py --period 6m
     python momentum/etf/RRGIndicatorUsEtfs.py --period 3m --window 10
@@ -47,6 +48,7 @@ from momentum.etf.us_rrg_universe import (  # noqa: E402
 )
 from momentum.rrg_app import RrgAppConfig, run_rrg_app  # noqa: E402
 from momentum.rrg_core import RRG_WINDOW_DEFAULT, RRG_WINDOW_ETF  # noqa: E402
+from momentum.rrg_swing_cheat_sheet import ETF_SWING_CHEAT_SHEET  # noqa: E402
 from utils.yahoo_weekly import load_yahoo_histories  # noqa: E402
 
 ENV_US_ETF_PERIOD = "RRG_US_ETF_PERIOD"
@@ -166,9 +168,11 @@ def _build_config(analysis_period: str, rrg_window: int) -> RrgAppConfig:
         count_summary=_count_summary,
         analysis_period=analysis_period,
         rrg_window=rrg_window,
+        default_tail=1,
         top_movers_panel=True,
-        top_movers_count=7,
-        top_movers_title="Top 7 — Was vs Now",
+        top_movers_count=10,
+        top_movers_title="Top 10 — Was vs Now",
+        side_cheat_sheet=ETF_SWING_CHEAT_SHEET,
     )
 
 
