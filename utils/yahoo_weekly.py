@@ -52,15 +52,19 @@ def _closes_from_download(raw: pd.DataFrame, tickers: list[str]) -> dict[str, pd
     return out
 
 
-def load_yahoo_weekly_histories(
+def load_yahoo_histories(
     yahoo_tickers: list[str],
     *,
     period: str = "3m",
     min_points: int = 15,
     rrg_window: int = 14,
     quiet: bool = False,
+    freq: str = "week",
 ) -> dict[str, pd.Series]:
-    """Weekly adjusted closes from Yahoo (W-FRI), keyed by ticker symbol."""
+    """Yahoo adjusted closes: weekly (W-FRI) or daily, keyed by ticker symbol."""
+    from momentum.rrg_core import rrg_normalize_bar_unit
+
+    bar_unit = rrg_normalize_bar_unit(freq)
     unique = list(dict.fromkeys(t.strip() for t in yahoo_tickers if t and t.strip()))
     if not unique:
         return {}
@@ -90,9 +94,14 @@ def load_yahoo_weekly_histories(
         )
         daily_map = _closes_from_download(raw, unique)
         for ticker, daily in daily_map.items():
-            weekly = _daily_to_weekly(daily, min_points)
-            if len(weekly):
-                out[ticker] = weekly
+            daily = pd.to_numeric(daily, errors="coerce").dropna().sort_index()
+            if bar_unit == "day":
+                if len(daily) >= min_points:
+                    out[ticker] = daily
+            else:
+                weekly = _daily_to_weekly(daily, min_points)
+                if len(weekly):
+                    out[ticker] = weekly
     except Exception as exc:
         print(f"[Yahoo Finance] batch download failed: {exc}")
 
@@ -108,11 +117,29 @@ def load_yahoo_weekly_histories(
                 progress=False,
             )
             daily_map = _closes_from_download(raw_one, [ticker])
-            weekly = _daily_to_weekly(daily_map.get(ticker, pd.Series(dtype=float)), min_points)
-            if len(weekly):
-                out[ticker] = weekly
-                print(f"  [Yahoo Finance] Weekly series for {ticker} ({len(weekly)} wks)")
+            daily = pd.to_numeric(
+                daily_map.get(ticker, pd.Series(dtype=float)), errors="coerce"
+            ).dropna().sort_index()
+            if bar_unit == "day":
+                if len(daily) >= min_points:
+                    out[ticker] = daily
+                    print(
+                        f"  [Yahoo Finance] Daily series for {ticker} ({len(daily)} days)"
+                    )
+            else:
+                weekly = _daily_to_weekly(daily, min_points)
+                if len(weekly):
+                    out[ticker] = weekly
+                    print(
+                        f"  [Yahoo Finance] Weekly series for {ticker} ({len(weekly)} wks)"
+                    )
         except Exception as exc:
             print(f"  [Yahoo Finance] {ticker}: {exc}")
 
     return out
+
+
+def load_yahoo_weekly_histories(*args, **kwargs) -> dict[str, pd.Series]:
+    """Backward-compatible alias for weekly Yahoo loads."""
+    kwargs.setdefault("freq", "week")
+    return load_yahoo_histories(*args, **kwargs)

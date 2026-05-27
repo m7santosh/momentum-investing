@@ -410,19 +410,27 @@ def fetch_index_close_histories(
     return out
 
 
-def period_calendar_days(period: str, *, rrg_window: int = 14, tail: int = 10) -> int:
-    """Calendar days to download for weekly RRG history.
+def period_calendar_days(
+    period: str,
+    *,
+    rrg_window: int = 14,
+    tail: int = 10,
+    unit: str = "week",
+) -> int:
+    """Calendar days to download for RRG history (weekly or daily bars).
 
-    Uses warmup (``rrg_window * 2 + 2`` weeks) plus analysis window and tail buffer.
+    Uses warmup plus analysis window and tail buffer at ``unit`` frequency.
     The chart Date slider shows the analysis window; extra days are not plotted.
     """
-    from momentum.rrg_core import rrg_fetch_calendar_days
+    from momentum.rrg_core import rrg_fetch_calendar_days, rrg_normalize_bar_unit
 
     if period in ("1y", "2y"):
         if period == "1y":
             return 600
         return 1150
-    return rrg_fetch_calendar_days(period, rrg_window, tail=tail)
+    return rrg_fetch_calendar_days(
+        period, rrg_window, tail=tail, unit=rrg_normalize_bar_unit(unit)
+    )
 
 
 def rrg_period_label(period: str) -> str:
@@ -455,7 +463,7 @@ def log_rrg_data_fetch_plan(
     return start, end
 
 
-def _load_nse_cm_weekly_histories(
+def _load_nse_cm_histories(
     nse_symbols: list[str],
     *,
     period: str = "1y",
@@ -463,12 +471,16 @@ def _load_nse_cm_weekly_histories(
     quiet: bool = False,
     asset_label: str = "CM symbol",
     rrg_window: int = 14,
+    freq: str = "week",
 ) -> dict[str, "pd.Series"]:
-    """Weekly closes from NSE CM bhavcopy (EQ series).
+    """NSE CM bhavcopy closes: weekly (W-FRI) or daily trading-day series.
 
     *nse_symbols* are bare NSE tickers (e.g. ``GOLDBEES``, ``TCS``).
     One bhavcopy download per trading day, shared across all symbols.
     """
+    from momentum.rrg_core import rrg_normalize_bar_unit
+
+    bar_unit = rrg_normalize_bar_unit(freq)
     import pandas as pd
 
     unique = list(dict.fromkeys(s.strip().upper() for s in nse_symbols if s))
@@ -477,7 +489,9 @@ def _load_nse_cm_weekly_histories(
 
     want = set(unique)
     end = today_ist()
-    start = end - timedelta(days=period_calendar_days(period, rrg_window=rrg_window))
+    start = end - timedelta(
+        days=period_calendar_days(period, rrg_window=rrg_window, unit=bar_unit)
+    )
     if not quiet:
         log_rrg_data_fetch_plan(
             period,
@@ -511,9 +525,18 @@ def _load_nse_cm_weekly_histories(
             out[sym] = pd.Series(dtype=float)
             continue
         daily = pd.Series({ts: val for ts, val in rows}).sort_index()
-        weekly = daily.resample("W-FRI").last().dropna()
-        out[sym] = weekly if len(weekly) >= min_points else pd.Series(dtype=float)
+        if bar_unit == "day":
+            out[sym] = daily if len(daily) >= min_points else pd.Series(dtype=float)
+        else:
+            weekly = daily.resample("W-FRI").last().dropna()
+            out[sym] = weekly if len(weekly) >= min_points else pd.Series(dtype=float)
     return out
+
+
+def _load_nse_cm_weekly_histories(*args, **kwargs) -> dict[str, "pd.Series"]:
+    """Backward-compatible alias for weekly CM bhavcopy loads."""
+    kwargs.setdefault("freq", "week")
+    return _load_nse_cm_histories(*args, **kwargs)
 
 
 def load_nse_etf_weekly_histories(
@@ -523,15 +546,17 @@ def load_nse_etf_weekly_histories(
     min_points: int = 15,
     quiet: bool = False,
     rrg_window: int = 14,
+    freq: str = "week",
 ) -> dict[str, "pd.Series"]:
-    """Weekly closes from NSE CM bhavcopy only (NSE-listed ETFs, EQ series)."""
-    return _load_nse_cm_weekly_histories(
+    """NSE CM bhavcopy closes for ETFs (weekly or daily)."""
+    return _load_nse_cm_histories(
         nse_symbols,
         period=period,
         min_points=min_points,
         quiet=quiet,
         asset_label="ETF symbol",
         rrg_window=rrg_window,
+        freq=freq,
     )
 
 
@@ -542,15 +567,17 @@ def load_nse_equity_weekly_histories(
     min_points: int = 15,
     quiet: bool = False,
     rrg_window: int = 14,
+    freq: str = "week",
 ) -> dict[str, "pd.Series"]:
-    """Weekly closes from NSE CM bhavcopy (EQ-series stocks)."""
-    return _load_nse_cm_weekly_histories(
+    """NSE CM bhavcopy closes for equities (weekly or daily)."""
+    return _load_nse_cm_histories(
         nse_symbols,
         period=period,
         min_points=min_points,
         quiet=quiet,
         asset_label="equity symbol",
         rrg_window=rrg_window,
+        freq=freq,
     )
 
 
@@ -560,16 +587,21 @@ def load_nse_index_weekly_histories(
     period: str = "1y",
     min_points: int = 15,
     rrg_window: int = 14,
+    freq: str = "week",
 ) -> dict[str, "pd.Series"]:
-    """Weekly closes from NSE ``ind_close_all`` (Friday week-end)."""
+    """NSE ``ind_close_all`` closes (weekly W-FRI or daily trading days)."""
     import pandas as pd
+    from momentum.rrg_core import rrg_normalize_bar_unit
 
+    bar_unit = rrg_normalize_bar_unit(freq)
     unique = list(dict.fromkeys(index_names))
     if not unique:
         return {}
 
     end = today_ist()
-    start = end - timedelta(days=period_calendar_days(period, rrg_window=rrg_window))
+    start = end - timedelta(
+        days=period_calendar_days(period, rrg_window=rrg_window, unit=bar_unit)
+    )
     log_rrg_data_fetch_plan(
         period, source="NSE Index EOD", item_count=len(unique), rrg_window=rrg_window
     )
@@ -581,8 +613,11 @@ def load_nse_index_weekly_histories(
         if len(daily) < min_points:
             out[name] = pd.Series(dtype=float)
             continue
-        weekly = daily.resample("W-FRI").last().dropna()
-        out[name] = weekly if len(weekly) >= min_points else pd.Series(dtype=float)
+        if bar_unit == "day":
+            out[name] = daily
+        else:
+            weekly = daily.resample("W-FRI").last().dropna()
+            out[name] = weekly if len(weekly) >= min_points else pd.Series(dtype=float)
     return out
 
 

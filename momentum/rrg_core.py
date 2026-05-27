@@ -81,6 +81,8 @@ RRG_WINDOW_ETF = 10  # faster response for tactical ETF rotation
 
 RRG_DEFAULT_TAIL = 5
 RRG_MAX_TAIL = 10  # tail slider max; extra index weeks reserved for fetch/slider
+RRG_TRADING_DAYS_PER_WEEK = 5
+RRG_BAR_UNITS = ("week", "day")
 
 
 def rrg_nav_weeks(period: str) -> int:
@@ -93,9 +95,39 @@ def rrg_nav_weeks(period: str) -> int:
     return RRG_NAV_WEEKS_6M
 
 
+def rrg_normalize_bar_unit(unit: str) -> str:
+    """``week`` or ``day`` (default ``week``)."""
+    u = (unit or "week").strip().lower()
+    return u if u in RRG_BAR_UNITS else "week"
+
+
+def rrg_nav_bars(period: str, unit: str = "week") -> int:
+    """Navigable bars on the Date slider for ``period`` at ``unit`` frequency."""
+    weeks = rrg_nav_weeks(period)
+    if rrg_normalize_bar_unit(unit) == "day":
+        return weeks * RRG_TRADING_DAYS_PER_WEEK
+    return weeks
+
+
+def rrg_effective_window(window: int, unit: str = "week") -> int:
+    """Rolling-window length in bars (weeks or trading days)."""
+    if rrg_normalize_bar_unit(unit) == "day":
+        return window * RRG_TRADING_DAYS_PER_WEEK
+    return window
+
+
+def rrg_min_history_bars(window: int, unit: str = "week") -> int:
+    return rrg_effective_window(window, unit) + 2
+
+
 def rrg_warmup_weeks(window: int) -> int:
     """Weeks of history before the first valid RRG point (``window * 2 + 2``)."""
     return window * 2 + 2
+
+
+def rrg_warmup_bars(window: int, unit: str = "week") -> int:
+    """Bars of history before the first valid RRG point at ``unit`` frequency."""
+    return rrg_warmup_weeks(rrg_effective_window(window, unit))
 
 
 def rrg_slider_index_weeks(period: str, *, tail: int = RRG_MAX_TAIL) -> int:
@@ -103,15 +135,28 @@ def rrg_slider_index_weeks(period: str, *, tail: int = RRG_MAX_TAIL) -> int:
     return rrg_nav_weeks(period) + tail
 
 
+def rrg_slider_index_bars(
+    period: str, *, tail: int = RRG_MAX_TAIL, unit: str = "week"
+) -> int:
+    """Date-index length: analysis window + tail buffer at ``unit`` frequency."""
+    return rrg_nav_bars(period, unit) + tail
+
+
 def rrg_fetch_calendar_days(
     period: str,
     window: int = RRG_WINDOW_DEFAULT,
     *,
     tail: int = RRG_MAX_TAIL,
+    unit: str = "week",
 ) -> int:
     """Calendar days to download: warmup + analysis window + tail buffer + small pad."""
-    total_weeks = rrg_warmup_weeks(window) + rrg_slider_index_weeks(period, tail=tail)
-    return total_weeks * 7 + 14
+    eff = rrg_effective_window(window, unit)
+    total_bars = rrg_warmup_bars(window, unit) + rrg_slider_index_bars(
+        period, tail=tail, unit=unit
+    )
+    if rrg_normalize_bar_unit(unit) == "day":
+        return int(total_bars * 7 / RRG_TRADING_DAYS_PER_WEEK) + 21
+    return total_bars * 7 + 14
 
 
 def rrg_period_display(period: str) -> str:
@@ -128,6 +173,8 @@ def rrg_period_display(period: str) -> str:
     return period
 
 
-def rrg_period_label(period: str) -> str:
+def rrg_period_label(period: str, unit: str = "week") -> str:
     """Human label for the RRG analysis window (what the chart navigates)."""
-    return f"{rrg_period_display(period)} lookback ({rrg_nav_weeks(period)} weekly points)"
+    bars = rrg_nav_bars(period, unit)
+    bar_word = "daily" if rrg_normalize_bar_unit(unit) == "day" else "weekly"
+    return f"{rrg_period_display(period)} lookback ({bars} {bar_word} points)"

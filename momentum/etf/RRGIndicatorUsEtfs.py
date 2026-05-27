@@ -47,7 +47,7 @@ from momentum.etf.us_rrg_universe import (  # noqa: E402
 )
 from momentum.rrg_app import RrgAppConfig, run_rrg_app  # noqa: E402
 from momentum.rrg_core import RRG_WINDOW_DEFAULT, RRG_WINDOW_ETF  # noqa: E402
-from utils.yahoo_weekly import load_yahoo_weekly_histories  # noqa: E402
+from utils.yahoo_weekly import load_yahoo_histories  # noqa: E402
 
 ENV_US_ETF_PERIOD = "RRG_US_ETF_PERIOD"
 
@@ -103,14 +103,15 @@ def _resolve_row_id(requested: str) -> str | None:
 
 
 def _load_all_histories(
-    period: str, min_weekly_points: int, rrg_window: int
+    period: str, min_weekly_points: int, rrg_window: int, freq: str = "week"
 ) -> dict[str, pd.Series]:
-    print("Loading US ETF weekly EOD (Yahoo Finance) for RRG...")
-    batch = load_yahoo_weekly_histories(
+    print(f"Loading US ETF EOD (Yahoo Finance) for RRG ({freq})...")
+    batch = load_yahoo_histories(
         RRG_LOAD_YAHOO_TICKERS,
         period=period,
         min_points=min_weekly_points,
         rrg_window=rrg_window,
+        freq=freq,
     )
     out: dict[str, pd.Series] = {}
     for ticker in RRG_ETF_ROW_IDS:
@@ -120,13 +121,19 @@ def _load_all_histories(
 
 
 def _load_row_history(
-    row_id: str, kind: str, period: str, min_weekly_points: int, rrg_window: int
+    row_id: str,
+    kind: str,
+    period: str,
+    min_weekly_points: int,
+    rrg_window: int,
+    freq: str = "week",
 ) -> pd.Series:
-    return load_yahoo_weekly_histories(
+    return load_yahoo_histories(
         [row_id],
         period=period,
         min_points=min_weekly_points,
         rrg_window=rrg_window,
+        freq=freq,
     ).get(row_id, pd.Series(dtype=float))
 
 

@@ -80,15 +80,16 @@ def _resolve_row_id(requested: str) -> str | None:
 
 
 def _load_all_histories(
-    period: str, min_weekly_points: int, rrg_window: int = 14
+    period: str, min_weekly_points: int, rrg_window: int = 14, freq: str = "week"
 ) -> dict[str, pd.Series]:
     out: dict[str, pd.Series] = {}
-    print("Loading NSE index EOD (ind_close_all) for RRG benchmark...")
+    print(f"Loading NSE index EOD (ind_close_all) for RRG benchmark ({freq})...")
     index_batch = load_nse_index_weekly_histories(
         RRG_LOAD_NSE_INDEX_NAMES,
         period=period,
         min_points=min_weekly_points,
         rrg_window=rrg_window,
+        freq=freq,
     )
     out[RRG_BENCHMARK_NSE] = index_batch.get(RRG_BENCHMARK_NSE, pd.Series(dtype=float))
 
@@ -98,6 +99,7 @@ def _load_all_histories(
         period=period,
         min_points=min_weekly_points,
         rrg_window=rrg_window,
+        freq=freq,
     )
     for sym in RRG_STOCK_ROW_IDS:
         out[sym] = stock_batch.get(sym, pd.Series(dtype=float))
@@ -105,7 +107,12 @@ def _load_all_histories(
 
 
 def _load_row_history(
-    row_id: str, kind: str, period: str, min_weekly_points: int, rrg_window: int = 14
+    row_id: str,
+    kind: str,
+    period: str,
+    min_weekly_points: int,
+    rrg_window: int = 14,
+    freq: str = "week",
 ) -> pd.Series:
     if kind == "index":
         return load_nse_index_weekly_histories(
@@ -113,12 +120,14 @@ def _load_row_history(
             period=period,
             min_points=min_weekly_points,
             rrg_window=rrg_window,
+            freq=freq,
         ).get(row_id, pd.Series(dtype=float))
     return load_nse_equity_weekly_histories(
         [row_id],
         period=period,
         min_points=min_weekly_points,
         rrg_window=rrg_window,
+        freq=freq,
     ).get(row_id, pd.Series(dtype=float))
 
 

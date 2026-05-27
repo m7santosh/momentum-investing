@@ -23,10 +23,14 @@ from momentum.rrg_core import (
     compute_rrg_indicators as compute,
     get_color,
     get_status,
-    rrg_nav_weeks,
+    rrg_effective_window,
+    rrg_min_history_bars,
+    rrg_nav_bars,
+    rrg_normalize_bar_unit,
     rrg_period_display,
     rrg_period_label,
-    rrg_slider_index_weeks,
+    rrg_slider_index_bars,
+    rrg_warmup_bars,
     rrg_warmup_weeks,
 )
 
@@ -63,15 +67,19 @@ class RrgAppConfig:
 def run_rrg_app(config: RrgAppConfig) -> None:
     """Build UI, load data, and run the RRG main loop."""
     period = config.analysis_period
-    nav_weeks = rrg_nav_weeks(period)
     window = config.rrg_window
+    bar_unit = "week"
+    nav_bars = rrg_nav_bars(period, bar_unit)
+    effective_window = rrg_effective_window(window, bar_unit)
+    min_history_bars = rrg_min_history_bars(window, bar_unit)
     tail = RRG_DEFAULT_TAIL
     end_date_idx = None
     start_date, end_date = None, None
     hover_points = []
     _last_hover_idx = None
-
-    min_weekly_points = window + 2
+    _history_cache: dict[str, dict[str, pd.Series]] = {}
+    indices_data = pd.DataFrame()
+    benchmark_data = pd.Series(dtype=float)
 
     requested_indices = [row.row_id for row in config.rows]
     indices = requested_indices.copy()
@@ -90,11 +98,20 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         else indices.copy()
     )
 
+    def _histories_for_unit(unit: str) -> dict[str, pd.Series]:
+        u = rrg_normalize_bar_unit(unit)
+        if u not in _history_cache:
+            min_pts = rrg_min_history_bars(window, u)
+            _history_cache[u] = config.load_all_histories(
+                period, min_pts, window, freq=u
+            )
+        return _history_cache[u]
+
     def _build_rrg_date_index():
-        """Week-ending dates for the Date slider (analysis window + tail buffer)."""
+        """Bar dates for the Date slider (analysis window + tail buffer)."""
         bench = benchmark_data.dropna().sort_index()
-        warmup = rrg_warmup_weeks(window)
-        slider_weeks = rrg_slider_index_weeks(period, tail=RRG_MAX_TAIL)
+        warmup = rrg_warmup_bars(window, bar_unit)
+        slider_bars = rrg_slider_index_bars(period, tail=RRG_MAX_TAIL, unit=bar_unit)
         if len(bench) > warmup:
             cal = bench.index[warmup:]
         elif not rsm_tickers:
@@ -102,17 +119,17 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         else:
             longest = max(rsm_tickers, key=lambda s: len(s.index))
             cal = longest.index.sort_values()
-        if len(cal) > slider_weeks:
-            cal = cal[-slider_weeks:]
+        if len(cal) > slider_bars:
+            cal = cal[-slider_bars:]
         return cal
 
     def _date_slider_max_idx() -> int:
-        """Latest week on the index (most recent EOD / today)."""
+        """Latest bar on the index (most recent EOD / today)."""
         return len(_rrg_index) - 1
 
     def _date_slider_min_idx() -> int:
-        """Earliest end date: ``nav_weeks`` back from latest (still room for tail)."""
-        return max(tail, len(_rrg_index) - nav_weeks)
+        """Earliest end date: ``nav_bars`` back from latest (still room for tail)."""
+        return max(tail, len(_rrg_index) - nav_bars)
 
     def _date_range_hint_text() -> str:
         if len(_rrg_index) < 2:
@@ -124,36 +141,41 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     print(config.universe_summary)
     print(
-        f"RRG analysis: {rrg_period_label(period)}, rolling window {window}w "
-        f"(warmup ~{rrg_warmup_weeks(window)}w before slider)."
-    )
-    weekly_by_row = config.load_all_histories(period, min_weekly_points, window)
-    benchmark_data = weekly_by_row.get(config.benchmark_nse, pd.Series(dtype=float))
-    indices_data = pd.DataFrame(
-        {row_id: weekly_by_row.get(row_id, pd.Series(dtype=float)) for row_id in indices}
+        f"RRG analysis: {rrg_period_label(period, bar_unit)}, rolling window "
+        f"{effective_window} bars ({window}w equivalent) "
+        f"(warmup ~{rrg_warmup_bars(window, bar_unit)} bars before slider)."
     )
 
-    available_indices = [
-        n
-        for n in indices
-        if n in indices_data.columns and indices_data[n].notna().sum() > window
-    ]
-    missing = set(indices) - set(available_indices)
-    if missing:
-        print(f"Skipping rows with insufficient data: {sorted(missing)}")
-    indices = available_indices
-    indices_to_show = [n for n in indices_to_show if n in indices]
-    aligned_ref = []
-    aligned_display = []
-    aligned_kind = []
-    for name in indices:
-        pos = requested_indices.index(name)
-        aligned_ref.append(index_metadata['ref_label'][pos])
-        aligned_display.append(index_metadata['display'][pos])
-        aligned_kind.append(index_metadata['kind'][pos])
-    index_metadata['ref_label'] = aligned_ref
-    index_metadata['display'] = aligned_display
-    index_metadata['kind'] = aligned_kind
+    def _apply_price_histories(histories: dict[str, pd.Series]) -> None:
+        nonlocal indices_data, benchmark_data, indices, indices_to_show
+        nonlocal effective_window, min_history_bars, nav_bars
+
+        effective_window = rrg_effective_window(window, bar_unit)
+        min_history_bars = rrg_min_history_bars(window, bar_unit)
+        nav_bars = rrg_nav_bars(period, bar_unit)
+        benchmark_data = histories.get(config.benchmark_nse, pd.Series(dtype=float))
+        indices_data = pd.DataFrame(
+            {
+                row_id: histories.get(row_id, pd.Series(dtype=float))
+                for row_id in requested_indices
+            }
+        )
+        available_indices = [
+            n
+            for n in requested_indices
+            if n in indices_data.columns
+            and indices_data[n].notna().sum() > effective_window
+        ]
+        missing = set(requested_indices) - set(available_indices)
+        if missing:
+            print(f"Skipping rows with insufficient data: {sorted(missing)}")
+        indices[:] = available_indices
+        indices_to_show[:] = [n for n in indices_to_show if n in indices]
+        index_metadata['ref_label'] = [config.row_ref_label(name) for name in indices]
+        index_metadata['display'] = [config.row_display_label(name) for name in indices]
+        index_metadata['kind'] = [config.row_kind(name) for name in indices]
+
+    _apply_price_histories(_histories_for_unit(bar_unit))
 
     rs_tickers = []
     rsr_tickers = []
@@ -162,7 +184,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     for i in range(len(indices)):
         rsr, rsr_roc, rsm = compute(
-            indices_data[indices[i]], benchmark_data, window
+            indices_data[indices[i]], benchmark_data, effective_window
         )
         if rsr is None:
             continue
@@ -171,7 +193,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         rsr_roc_tickers.append(rsr_roc)
         rsm_tickers.append(rsm)
 
-    indices = indices[: len(rsr_tickers)]
+    indices[:] = indices[: len(rsr_tickers)]
     indices_to_show = [n for n in indices_to_show if n in indices]
     index_metadata['ref_label'] = index_metadata['ref_label'][: len(indices)]
     index_metadata['display'] = index_metadata['display'][: len(indices)]
@@ -188,14 +210,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     print(
         f"RRG ready: {rrg_period_display(period)} — date ends "
         f"{pd.Timestamp(_rrg_index[_date_slider_min_idx()]).date() if len(_rrg_index) else 'n/a'}"
-        f" .. {_last_nse} ({nav_weeks} weeks, default latest), "
+        f" .. {_last_nse} ({nav_bars} {bar_unit} bars, default latest), "
         f"{config.count_summary(index_metadata['kind'])}, "
         f"benchmark {config.benchmark_nse}"
     )
-    _bench_weeks = len(benchmark_data.dropna())
+    _bench_bars = len(benchmark_data.dropna())
     print(
-        f"  Downloaded {_bench_weeks} benchmark weekly bars total "
-        f"(includes ~{rrg_warmup_weeks(window)}w warmup before slider start {_slider_first})."
+        f"  Downloaded {_bench_bars} benchmark {bar_unit} bars total "
+        f"(includes ~{rrg_warmup_bars(window, bar_unit)} bar warmup before "
+        f"slider start {_slider_first})."
     )
 
     def update_rrg():
@@ -204,7 +227,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         for i in range(len(indices)):
             name = indices[i]
             rsr, rsr_roc, rsm = compute(
-                indices_data[name], benchmark_data, window
+                indices_data[name], benchmark_data, effective_window
             )
             if rsr is None:
                 continue
@@ -219,11 +242,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     root.minsize(1280 if config.top_movers_panel else 900, 650)
     root.resizable(True, True)
     root.columnconfigure(0, weight=1)
-    root.rowconfigure(0, weight=2)
+    root.rowconfigure(0, weight=0)
     root.rowconfigure(2, weight=1)
 
     chart_frame = tk.Frame(root)
-    chart_frame.grid(row=0, column=0, sticky='nsew')
     chart_frame.rowconfigure(0, weight=1)
     chart_frame.columnconfigure(0, weight=1)
 
@@ -357,6 +379,23 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     controls_frame.grid(row=1, column=0, sticky='ew')
     controls_frame.grid_propagate(False)
 
+    show_rrg_var = tk.BooleanVar(value=False)
+    bar_unit_var = tk.StringVar(value="Week")
+
+    def _apply_rrg_chart_visibility():
+        if show_rrg_var.get():
+            chart_frame.grid(row=0, column=0, sticky='nsew')
+            root.rowconfigure(0, weight=2)
+        else:
+            _hide_hover_tooltip()
+            chart_frame.grid_remove()
+            root.rowconfigure(0, weight=0)
+
+    def on_show_rrg_toggle():
+        _apply_rrg_chart_visibility()
+        if show_rrg_var.get():
+            redraw_chart()
+
     default_indices_var = tk.BooleanVar(value=_use_default_indices_on_load)
     select_all_var = tk.BooleanVar(
         value=not _use_default_indices_on_load or len(indices_to_show) == len(indices)
@@ -418,6 +457,14 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         end_date_idx = int(float(val))
         date_value_label.config(text=format_date_label(end_date_idx))
         redraw_chart()
+
+    def _bar_unit_step_label() -> str:
+        return "Day" if bar_unit == "day" else "Week"
+
+    def update_nav_button_labels():
+        step = _bar_unit_step_label()
+        prev_week_button.config(text=f"Previous {step}")
+        next_week_button.config(text=f"Next {step}")
 
     def update_week_step_buttons():
         current_idx = int(date_scale.get())
@@ -504,13 +551,62 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     )
     default_indices_cb.pack(side=tk.LEFT, padx=(0, 12))
 
+    show_rrg_cb = ttk.Checkbutton(
+        controls_frame,
+        text='Show RRG graph',
+        variable=show_rrg_var,
+        command=on_show_rrg_toggle,
+    )
+    show_rrg_cb.pack(side=tk.LEFT, padx=(0, 12))
+
     tail_row = tk.Frame(controls_frame)
     tail_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
     tk.Label(tail_row, text='Tail', width=6, anchor='w').pack(side=tk.LEFT)
+    tk.Label(tail_row, text='Unit', width=5, anchor='w').pack(side=tk.LEFT, padx=(0, 2))
+    bar_unit_combo = ttk.Combobox(
+        tail_row,
+        textvariable=bar_unit_var,
+        values=["Week", "Day"],
+        state="readonly",
+        width=6,
+    )
+    bar_unit_combo.pack(side=tk.LEFT, padx=(0, 8))
+
+    def update_tail_step_buttons():
+        current = int(float(tail_scale.get()))
+        tail_min = int(float(tail_scale.cget('from')))
+        tail_max = int(float(tail_scale.cget('to')))
+        if current <= tail_min:
+            tail_dec_button.state(['disabled'])
+        else:
+            tail_dec_button.state(['!disabled'])
+        if current >= tail_max:
+            tail_inc_button.state(['disabled'])
+        else:
+            tail_inc_button.state(['!disabled'])
+
+    def step_decrease_tail():
+        new_tail = int(float(tail_scale.get())) - 1
+        if new_tail < int(float(tail_scale.cget('from'))):
+            return
+        tail_scale.set(new_tail)
+        on_tail_change(new_tail)
+
+    def step_increase_tail():
+        new_tail = int(float(tail_scale.get())) + 1
+        if new_tail > int(float(tail_scale.cget('to'))):
+            return
+        tail_scale.set(new_tail)
+        on_tail_change(new_tail)
+
+    tail_dec_button = ttk.Button(
+        tail_row, text='−', width=3, command=step_decrease_tail
+    )
+    tail_dec_button.pack(side=tk.LEFT, padx=(0, 4))
     tail_scale = tk.Scale(
         tail_row,
         from_=1,
-        to=10,
+        to=RRG_MAX_TAIL,
         orient=tk.HORIZONTAL,
         showvalue=True,
         resolution=1,
@@ -518,6 +614,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     )
     tail_scale.set(tail)
     tail_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    tail_inc_button = ttk.Button(
+        tail_row, text='+', width=3, command=step_increase_tail
+    )
+    tail_inc_button.pack(side=tk.LEFT, padx=(4, 0))
 
     date_row = tk.Frame(controls_frame)
     date_row.pack(side=tk.TOP, fill=tk.X)
@@ -808,7 +908,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     pass
                 chg = _tail_change_pct(j, start_ts, end_ts)
                 if chg != float('-inf'):
-                    chg_w = max(chg_w, _text_px(round(chg, 1)))
+                    chg_w = max(chg_w, _text_px(_format_change_pct(chg)))
 
         return [rank_w, rank_delta_w, ref_w, idx_w, price_w, chg_w, vis_w]
 
@@ -963,10 +1063,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 raise ValueError(f'unknown {col_name}: {requested!r}')
             kind = config.row_kind(row_id)
             series = config.load_row_history(
-                row_id, kind, period, min_weekly_points, window
+                row_id, kind, period, min_history_bars, window, freq=bar_unit
             )
-            if len(series) < min_weekly_points:
-                raise ValueError('insufficient weekly history')
+            if len(series) < min_history_bars:
+                raise ValueError(f'insufficient {bar_unit} history')
             previous = indices[row]
             if previous in indices_to_show:
                 indices_to_show.remove(previous)
@@ -1002,17 +1102,32 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         _sync_select_all_checkbox()
         redraw_chart()
 
+    def _series_at(series: pd.Series, ts) -> float:
+        """Close at ``ts``, or last available bar on or before ``ts``."""
+        try:
+            return float(series.loc[ts])
+        except KeyError:
+            pos = series.index.get_indexer([pd.Timestamp(ts)], method="ffill")
+            if pos[0] < 0:
+                raise
+            return float(series.iloc[pos[0]])
+
     def _tail_change_pct(row_idx: int, start_ts, end_ts):
         """% price change over the visible tail window (for ranking)."""
         index_name = indices[row_idx]
         try:
-            p_start = float(indices_data[index_name].loc[start_ts])
-            p_end = float(indices_data[index_name].loc[end_ts])
+            p_start = _series_at(indices_data[index_name], start_ts)
+            p_end = _series_at(indices_data[index_name], end_ts)
             if p_start == 0:
                 return float('-inf')
             return (p_end - p_start) / p_start * 100
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, IndexError):
             return float('-inf')
+
+    def _format_change_pct(chg: float) -> str:
+        if chg == float('-inf'):
+            return ''
+        return f'{round(chg, 2):.2f}'
 
     def _rank_by_row(end_date_idx_local: int) -> dict[int, int]:
         """Row index -> rank (1 = best tail-window change) at the given week index."""
@@ -1092,7 +1207,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         movers_dates_label.config(
             text=(
                 f"Was: {was_label}   Now: {now_label} — "
-                f"Was (rank) = that ETF today; Now (rank) = selected week"
+                f"Was (rank) = that line today; Now (rank) = selected {bar_unit}"
             )
         )
 
@@ -1115,8 +1230,21 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             widgets['was'].config(text=was_text)
             widgets['now'].config(text=now_text)
 
+    def _hide_stale_table_rows(visible_row_count: int):
+        for i, widgets in enumerate(table_widgets):
+            if i < visible_row_count:
+                continue
+            for key in widgets:
+                if key == 'visible_cell':
+                    continue
+                widgets[key].grid_remove()
+            widgets['visible_cell'].grid_remove()
+
     def refresh_table_ranking():
         """Reorder table rows by tail-window performance (best % change first)."""
+        if not table_widgets or not len(_rrg_index):
+            return
+
         end_date_idx_local = int(date_scale.get())
         end_ts = _rrg_index[end_date_idx_local]
         start_ts = _rrg_index[end_date_idx_local - tail]
@@ -1148,14 +1276,14 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             index_name = indices[j]
             chg = _tail_change_pct(j, start_ts, end_ts)
             try:
-                price = round(float(indices_data[index_name].loc[end_ts]), 2)
-            except (KeyError, TypeError, ValueError):
+                price = round(_series_at(indices_data[index_name], end_ts), 2)
+            except (KeyError, TypeError, ValueError, IndexError):
                 price = ''
             try:
-                bg_color = get_color(
-                    float(rsr_tickers[j].loc[end_ts]), float(rsm_tickers[j].loc[end_ts])
-                )
-            except (KeyError, TypeError, ValueError):
+                rsr_val = _series_at(rsr_tickers[j], end_ts)
+                rsm_val = _series_at(rsm_tickers[j], end_ts)
+                bg_color = get_color(rsr_val, rsm_val)
+            except (KeyError, TypeError, ValueError, IndexError):
                 bg_color = 'gray'
             fg_color = 'white' if bg_color in ('red', 'green', 'blue') else 'black'
 
@@ -1188,9 +1316,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             w['rank_delta_label'].config(
                 text=rank_delta_text, fg=rank_delta_fg if fg_color == 'black' else 'white'
             )
+            w['ref_label'].config(text=index_metadata['ref_label'][j] or '-')
+            w['index_entry'].delete(0, tk.END)
+            w['index_entry'].insert(0, index_metadata['display'][j])
             w['price_label'].config(text=price)
-            chg_text = round(chg, 1) if chg != float('-inf') else ''
-            w['chg_label'].config(text=chg_text)
+            w['chg_label'].config(text=_format_change_pct(chg))
             for key in (
                 'rank_label',
                 'rank_delta_label',
@@ -1203,6 +1333,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             w['rank_delta_label'].config(
                 fg=rank_delta_fg if fg_color == 'black' else 'white'
             )
+        _hide_stale_table_rows(len(indices))
         _update_table_column_widths(end_ts, start_ts, rank_delta_texts)
         refresh_top_movers_panel(ranked)
 
@@ -1214,15 +1345,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         display_label = index_metadata['display'][i]
         ref_label = index_metadata['ref_label'][i]
         price = round(float(indices_data[row_id].loc[end_date]), 2)
-        chg = round(
-            (
-                float(indices_data[row_id].loc[end_date])
-                - float(indices_data[row_id].loc[start_date])
-            )
-            / float(indices_data[row_id].loc[start_date])
-            * 100,
-            1,
-        )
+        chg = (
+            float(indices_data[row_id].loc[end_date])
+            - float(indices_data[row_id].loc[start_date])
+        ) / float(indices_data[row_id].loc[start_date]) * 100
         bg_color = get_color(rsr_tickers[i].iloc[-1], rsm_tickers[i].iloc[-1])
         fg_color = 'white' if bg_color in ('red', 'green', 'blue') else 'black'
         index_var = tk.StringVar(value=display_label)
@@ -1274,7 +1400,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         )
         chg_label = tk.Label(
             table_body,
-            text=chg,
+            text=_format_change_pct(chg),
             relief=tk.RIDGE,
             anchor='e',
             bg=bg_color,
@@ -1320,6 +1446,92 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     head_arrows = [None] * len(indices)
     annotations = [None] * len(indices)
 
+    def _ensure_plot_slots():
+        n = len(indices)
+        for bucket in (scatter_plots, line_plots, head_arrows, annotations):
+            while len(bucket) < n:
+                bucket.append(None)
+
+    def _resolve_end_date_idx(prev_ts, date_min: int, date_max: int) -> int:
+        """Map a calendar end timestamp onto the new Date index."""
+        if prev_ts is None or not len(_rrg_index):
+            return date_max
+        pos = _rrg_index.get_indexer([pd.Timestamp(prev_ts)], method="ffill")
+        if pos[0] < 0:
+            return date_max
+        return max(date_min, min(int(pos[0]), date_max))
+
+    def _rebuild_rrg_for_bar_unit(preserve_calendar_end: bool = True) -> None:
+        """Reload prices/RRG and refresh Date slider after week/day switch."""
+        nonlocal _rrg_index, end_date_idx, effective_window, min_history_bars, nav_bars
+
+        prev_end_ts = None
+        if preserve_calendar_end and end_date_idx is not None and len(_rrg_index):
+            prev_end_ts = _rrg_index[end_date_idx]
+
+        _apply_price_histories(_histories_for_unit(bar_unit))
+        rs_tickers.clear()
+        rsr_tickers.clear()
+        rsr_roc_tickers.clear()
+        rsm_tickers.clear()
+        for i in range(len(indices)):
+            name = indices[i]
+            rsr, rsr_roc, rsm = compute(
+                indices_data[name], benchmark_data, effective_window
+            )
+            if rsr is None:
+                continue
+            rs_tickers.append(100 * (indices_data[name] / benchmark_data))
+            rsr_tickers.append(rsr)
+            rsr_roc_tickers.append(rsr_roc)
+            rsm_tickers.append(rsm)
+        if not rsr_tickers:
+            raise SystemExit(
+                f"No RRG rows with enough {bar_unit} history. Check data downloads."
+            )
+        indices[:] = indices[: len(rsr_tickers)]
+        indices_to_show[:] = [n for n in indices_to_show if n in indices]
+        index_metadata['ref_label'] = index_metadata['ref_label'][: len(indices)]
+        index_metadata['display'] = index_metadata['display'][: len(indices)]
+        index_metadata['kind'] = index_metadata['kind'][: len(indices)]
+
+        _rrg_index = _build_rrg_date_index()
+        if not len(_rrg_index):
+            raise SystemExit("No RRG dates available for the selected bar unit.")
+
+        date_min = _date_slider_min_idx()
+        date_max = _date_slider_max_idx()
+        date_scale.config(from_=date_min, to=date_max)
+        end_date_idx = _resolve_end_date_idx(prev_end_ts, date_min, date_max)
+        date_scale.set(end_date_idx)
+        date_value_label.config(text=format_date_label(end_date_idx))
+        date_range_label.config(text=_date_range_hint_text())
+        _ensure_plot_slots()
+        print(
+            f"RRG bar unit: {bar_unit} — {len(indices)} rows, "
+            f"{len(_rrg_index)} dates on slider, end {format_date_label(end_date_idx)}"
+        )
+
+    def on_bar_unit_change(_event=None):
+        nonlocal bar_unit
+        selected = rrg_normalize_bar_unit(bar_unit_var.get())
+        if selected == bar_unit:
+            return
+        print(f"RRG: loading {selected} bar data...")
+        root.config(cursor='watch')
+        root.update_idletasks()
+        try:
+            bar_unit = selected
+            _rebuild_rrg_for_bar_unit()
+            update_nav_button_labels()
+            redraw_chart()
+            root.update_idletasks()
+        finally:
+            root.config(cursor='')
+
+    bar_unit_combo.bind('<<ComboboxSelected>>', on_bar_unit_change)
+    update_nav_button_labels()
+
     def remove_ticker_artists(j):
         for artists in (scatter_plots, line_plots, head_arrows, annotations):
             artist = artists[j]
@@ -1333,6 +1545,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     def redraw_chart():
         update_frame()
         update_week_step_buttons()
+        update_tail_step_buttons()
+        update_nav_button_labels()
         if root.winfo_exists():
             try:
                 canvas.draw_idle()
@@ -1354,6 +1568,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         start_date = _rrg_index[end_date_idx - tail]
 
         refresh_table_ranking()
+
+        if not show_rrg_var.get():
+            return
 
         for j in range(len(indices)):
             remove_ticker_artists(j)
