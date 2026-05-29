@@ -54,17 +54,36 @@ def get_status(x, y):
     return None
 
 
+# Light quadrant fills (table rows + RRG trail); readable with black text.
+RRG_COLOR_LEADING = "#C8E6C9"
+RRG_COLOR_IMPROVING = "#BBDEFB"
+RRG_COLOR_WEAKENING = "#FFF9C4"
+RRG_COLOR_LAGGING = "#FFCDD2"
+RRG_COLOR_NA = "#E8E8E8"
+
+# Slightly richer tints for the RRG chart quadrant background.
+RRG_CHART_COLOR_LEADING = "#A5D6A7"
+RRG_CHART_COLOR_IMPROVING = "#90CAF9"
+RRG_CHART_COLOR_WEAKENING = "#FFF59D"
+RRG_CHART_COLOR_LAGGING = "#EF9A9A"
+
+
 def get_color(x, y):
     status = get_status(x, y)
     if status == "lagging":
-        return "red"
+        return RRG_COLOR_LAGGING
     if status == "leading":
-        return "green"
+        return RRG_COLOR_LEADING
     if status == "improving":
-        return "blue"
+        return RRG_COLOR_IMPROVING
     if status == "weakening":
-        return "yellow"
-    return "gray"
+        return RRG_COLOR_WEAKENING
+    return RRG_COLOR_NA
+
+
+def rrg_row_fg_color(bg_color: str) -> str:
+    """Foreground text on RRG row backgrounds (light fills → dark text)."""
+    return "black"
 
 
 TAIL_MARKER_SIZE = 22

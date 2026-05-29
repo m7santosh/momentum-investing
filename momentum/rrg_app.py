@@ -23,6 +23,12 @@ from momentum.rrg_core import (
     compute_rrg_indicators as compute,
     get_color,
     get_status,
+    rrg_row_fg_color,
+    RRG_CHART_COLOR_IMPROVING,
+    RRG_CHART_COLOR_LAGGING,
+    RRG_CHART_COLOR_LEADING,
+    RRG_CHART_COLOR_WEAKENING,
+    RRG_COLOR_NA,
     rrg_effective_window,
     rrg_min_history_bars,
     rrg_nav_bars,
@@ -259,10 +265,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     ax_rrg.set_ylabel('JdK RS Momentum')
     ax_rrg.axhline(y=100, color='k', linestyle='--')
     ax_rrg.axvline(x=100, color='k', linestyle='--')
-    ax_rrg.fill_between([94, 100], [94, 94], [100, 100], color='red', alpha=0.2)
-    ax_rrg.fill_between([100, 106], [94, 94], [100, 100], color='yellow', alpha=0.2)
-    ax_rrg.fill_between([100, 106], [100, 100], [106, 106], color='green', alpha=0.2)
-    ax_rrg.fill_between([94, 100], [100, 100], [106, 106], color='blue', alpha=0.2)
+    ax_rrg.fill_between([94, 100], [94, 94], [100, 100], color=RRG_CHART_COLOR_LAGGING, alpha=0.35)
+    ax_rrg.fill_between([100, 106], [94, 94], [100, 100], color=RRG_CHART_COLOR_WEAKENING, alpha=0.35)
+    ax_rrg.fill_between([100, 106], [100, 100], [106, 106], color=RRG_CHART_COLOR_LEADING, alpha=0.35)
+    ax_rrg.fill_between([94, 100], [100, 100], [106, 106], color=RRG_CHART_COLOR_IMPROVING, alpha=0.35)
     ax_rrg.text(95, 105, 'Improving')
     ax_rrg.text(104, 105, 'Leading')
     ax_rrg.text(104, 95, 'Weakening')
@@ -1282,8 +1288,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 rsm_val = _series_at(rsm_tickers[j], end_ts)
                 bg_color = get_color(rsr_val, rsm_val)
             except (KeyError, TypeError, ValueError, IndexError):
-                bg_color = 'gray'
-            fg_color = 'white' if bg_color in ('red', 'green', 'blue') else 'black'
+                bg_color = RRG_COLOR_NA
+            fg_color = rrg_row_fg_color(bg_color)
 
             rank_num = display_row + 1
             rank_delta_text = rank_delta_texts[display_row]
@@ -1348,7 +1354,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             - float(indices_data[row_id].loc[start_date])
         ) / float(indices_data[row_id].loc[start_date]) * 100
         bg_color = get_color(rsr_tickers[i].iloc[-1], rsm_tickers[i].iloc[-1])
-        fg_color = 'white' if bg_color in ('red', 'green', 'blue') else 'black'
+        fg_color = rrg_row_fg_color(bg_color)
         index_var = tk.StringVar(value=display_label)
         rank_label = tk.Label(
             table_body,
