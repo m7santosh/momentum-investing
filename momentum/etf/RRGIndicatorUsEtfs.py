@@ -168,7 +168,7 @@ def _build_config(analysis_period: str, rrg_window: int) -> RrgAppConfig:
         count_summary=_count_summary,
         analysis_period=analysis_period,
         rrg_window=rrg_window,
-        default_tail=1,
+        default_tail=2,
         top_movers_panel=True,
         top_movers_count=10,
         top_movers_title="Top 10 — Was vs Now",

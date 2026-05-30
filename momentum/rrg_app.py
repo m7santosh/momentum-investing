@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import pandas as pd
 import tkinter as tk
 import tkinter.font as tkfont
@@ -22,6 +23,7 @@ from momentum.rrg_core import (
     TAIL_MARKER_SIZE,
     compute_rrg_indicators as compute,
     get_color,
+    get_chart_color,
     get_status,
     rrg_row_fg_color,
     RRG_CHART_COLOR_IMPROVING,
@@ -275,6 +277,29 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     ax_rrg.text(95, 95, 'Lagging')
     ax_rrg.set_xlim(94, 106)
     ax_rrg.set_ylim(94, 106)
+    ax_rrg.set_xticks(range(94, 107))
+    ax_rrg.set_yticks(range(94, 107))
+    ax_rrg.xaxis.set_minor_locator(mticker.MultipleLocator(0.5))
+    ax_rrg.yaxis.set_minor_locator(mticker.MultipleLocator(0.5))
+    ax_rrg.tick_params(labelsize=8)
+    ax_rrg.grid(
+        True,
+        which='major',
+        color='#555555',
+        linestyle='-',
+        linewidth=0.5,
+        alpha=0.45,
+        zorder=2,
+    )
+    ax_rrg.grid(
+        True,
+        which='minor',
+        color='#777777',
+        linestyle=':',
+        linewidth=0.35,
+        alpha=0.3,
+        zorder=2,
+    )
 
     canvas = FigureCanvasTkAgg(fig, master=chart_frame)
     canvas_widget = canvas.get_tk_widget()
@@ -394,11 +419,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     def _apply_rrg_chart_visibility():
         if show_rrg_var.get():
             chart_frame.grid(row=0, column=0, sticky='nsew')
-            root.rowconfigure(0, weight=2)
+            root.rowconfigure(0, weight=2, minsize=420)
         else:
             _hide_hover_tooltip()
             chart_frame.grid_remove()
-            root.rowconfigure(0, weight=0)
+            root.rowconfigure(0, weight=0, minsize=0)
 
     def on_show_rrg_toggle():
         _apply_rrg_chart_visibility()
@@ -1585,15 +1610,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 continue
 
             filtered_rsr_tickers = rsr_tickers[j].loc[
-                (rsr_tickers[j].index > start_date) & (rsr_tickers[j].index <= end_date)
+                (rsr_tickers[j].index >= start_date) & (rsr_tickers[j].index <= end_date)
             ]
             filtered_rsm_tickers = rsm_tickers[j].loc[
-                (rsm_tickers[j].index > start_date) & (rsm_tickers[j].index <= end_date)
+                (rsm_tickers[j].index >= start_date) & (rsm_tickers[j].index <= end_date)
             ]
             if filtered_rsr_tickers.empty:
                 continue
             _append_hover_points(j, filtered_rsr_tickers, filtered_rsm_tickers)
-            color = get_color(
+            plot_color = get_chart_color(
                 filtered_rsr_tickers.values[-1], filtered_rsm_tickers.values[-1]
             )
             xs = filtered_rsr_tickers.values
@@ -1602,21 +1627,25 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 scatter_plots[j] = ax_rrg.scatter(
                     xs[:-1],
                     ys[:-1],
-                    color=color,
+                    color=plot_color,
                     s=_tail_marker_sizes(len(xs) - 1),
                     zorder=4,
                 )
-                head_arrows[j] = _add_head_arrow(xs, ys, color)
+                head_arrows[j] = _add_head_arrow(xs, ys, plot_color)
             else:
                 scatter_plots[j] = ax_rrg.scatter(
-                    xs, ys, color=color, s=_tail_marker_sizes(len(xs)), zorder=4
+                    xs, ys, color=plot_color, s=_tail_marker_sizes(len(xs)), zorder=4
                 )
                 head_arrows[j] = None
-            line_plots[j] = ax_rrg.plot(xs, ys, color='black', alpha=0.2, zorder=2)[0]
+            line_plots[j] = ax_rrg.plot(
+                xs, ys, color=plot_color, alpha=0.55, linewidth=1.4, zorder=2
+            )[0]
             annotations[j] = ax_rrg.annotate(
                 index_metadata['display'][j],
                 (filtered_rsr_tickers.values[-1], filtered_rsm_tickers.values[-1]),
                 fontsize=8,
+                color=plot_color,
+                fontweight='medium',
             )
 
     def on_close():

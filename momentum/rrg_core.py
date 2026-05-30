@@ -81,6 +81,28 @@ def get_color(x, y):
     return RRG_COLOR_NA
 
 
+# Dark strokes for RRG chart trails, markers, and labels (table keeps light fills).
+RRG_PLOT_COLOR_LEADING = "#2E7D32"
+RRG_PLOT_COLOR_IMPROVING = "#1565C0"
+RRG_PLOT_COLOR_WEAKENING = "#E65100"
+RRG_PLOT_COLOR_LAGGING = "#C62828"
+RRG_PLOT_COLOR_NA = "#424242"
+
+
+def get_chart_color(x, y):
+    """Quadrant-matched dark color for RRG graph overlays."""
+    status = get_status(x, y)
+    if status == "lagging":
+        return RRG_PLOT_COLOR_LAGGING
+    if status == "leading":
+        return RRG_PLOT_COLOR_LEADING
+    if status == "improving":
+        return RRG_PLOT_COLOR_IMPROVING
+    if status == "weakening":
+        return RRG_PLOT_COLOR_WEAKENING
+    return RRG_PLOT_COLOR_NA
+
+
 def rrg_row_fg_color(bg_color: str) -> str:
     """Foreground text on RRG row backgrounds (light fills → dark text)."""
     return "black"
