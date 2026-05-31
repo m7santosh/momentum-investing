@@ -297,10 +297,17 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     root.minsize(1280 if use_right_extras else (1280 if config.top_movers_panel else 900), 650)
     root.resizable(True, True)
     root.columnconfigure(0, weight=1)
-    root.rowconfigure(0, weight=0)
-    root.rowconfigure(2, weight=1)
+    root.rowconfigure(0, weight=1)
 
-    chart_frame = tk.Frame(root)
+    main_pane = ttk.PanedWindow(root, orient=tk.VERTICAL)
+    main_pane.grid(row=0, column=0, sticky='nsew')
+
+    bottom_frame = tk.Frame(main_pane)
+    bottom_frame.columnconfigure(0, weight=1)
+    bottom_frame.rowconfigure(1, weight=1)
+    main_pane.add(bottom_frame, weight=1)
+
+    chart_frame = tk.Frame(main_pane)
     chart_frame.rowconfigure(0, weight=1)
     chart_frame.columnconfigure(0, weight=1)
 
@@ -453,21 +460,62 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     canvas.mpl_connect('motion_notify_event', on_mouse_move)
 
-    controls_frame = tk.Frame(root, height=104, padx=8, pady=6)
-    controls_frame.grid(row=1, column=0, sticky='ew')
+    controls_frame = tk.Frame(bottom_frame, height=104, padx=8, pady=6)
+    controls_frame.grid(row=0, column=0, sticky='ew')
     controls_frame.grid_propagate(False)
 
     show_rrg_var = tk.BooleanVar(value=False)
     bar_unit_var = tk.StringVar(value="Week")
 
-    def _apply_rrg_chart_visibility():
+    _rrg_chart_sash_pos = 420
+
+    def _refresh_rrg_chart_layout(_event=None):
         if show_rrg_var.get():
-            chart_frame.grid(row=0, column=0, sticky='nsew')
-            root.rowconfigure(0, weight=2, minsize=420)
+            canvas.draw_idle()
+
+    def _save_rrg_chart_sash(_event=None):
+        nonlocal _rrg_chart_sash_pos
+        if not show_rrg_var.get():
+            return
+        if str(chart_frame) not in main_pane.panes():
+            return
+        try:
+            pos = main_pane.sashpos(0)
+            if pos > 80:
+                _rrg_chart_sash_pos = pos
+        except tk.TclError:
+            pass
+        _refresh_rrg_chart_layout()
+
+    main_pane.bind('<ButtonRelease-1>', _save_rrg_chart_sash)
+    chart_frame.bind('<Configure>', _refresh_rrg_chart_layout)
+
+    def _apply_rrg_chart_visibility():
+        nonlocal _rrg_chart_sash_pos
+        if show_rrg_var.get():
+            if str(chart_frame) not in main_pane.panes():
+                main_pane.insert(0, chart_frame, weight=1)
+            main_pane.update_idletasks()
+            total_h = main_pane.winfo_height()
+            if total_h > 1:
+                sash = min(
+                    max(_rrg_chart_sash_pos, 200),
+                    max(total_h - 200, 200),
+                )
+                main_pane.sashpos(0, sash)
+            else:
+                main_pane.sashpos(0, _rrg_chart_sash_pos)
+            root.after_idle(_refresh_rrg_chart_layout)
         else:
+            if str(chart_frame) in main_pane.panes():
+                try:
+                    pos = main_pane.sashpos(0)
+                    if pos > 80:
+                        _rrg_chart_sash_pos = pos
+                except tk.TclError:
+                    pass
+                main_pane.forget(chart_frame)
             _hide_hover_tooltip()
-            chart_frame.grid_remove()
-            root.rowconfigure(0, weight=0, minsize=0)
         if _sync_side_scroll is not None:
             root.after_idle(_sync_side_scroll)
 
@@ -763,8 +811,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             )
         )
 
-    table_section = tk.Frame(root)
-    table_section.grid(row=2, column=0, sticky='nsew', padx=4, pady=(0, 4))
+    table_section = tk.Frame(bottom_frame)
+    table_section.grid(row=1, column=0, sticky='nsew', padx=4, pady=(0, 4))
     table_section.rowconfigure(0, weight=1)
     table_section.columnconfigure(0, weight=1)
 
@@ -772,6 +820,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     tables_row.grid(row=0, column=0, sticky='nsew')
     tables_row.rowconfigure(0, weight=1)
     tables_row.columnconfigure(0, weight=1)
+
+    tables_pane = None
+    _side_pane_sash_pos = 0
+    _side_pane_auto = True
 
     movers_panel = None
     movers_dates_label = None
@@ -863,10 +915,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             row.columnconfigure(2, weight=1)
 
     if use_right_extras:
-        tables_row.columnconfigure(1, weight=0, minsize=920)
-        side_panel = tk.Frame(tables_row, width=920)
-        side_panel.grid(row=0, column=1, sticky='nsew', padx=(12, 0))
-        side_panel.grid_propagate(False)
+        tables_pane = ttk.PanedWindow(tables_row, orient=tk.HORIZONTAL)
+        tables_pane.grid(row=0, column=0, sticky='nsew')
+        side_panel = tk.Frame(tables_pane)
         side_panel.rowconfigure(0, weight=1)
         side_panel.columnconfigure(0, weight=1)
 
@@ -898,9 +949,28 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             req_w = side_content.winfo_reqwidth()
             if cw > 1:
                 side_canvas.itemconfigure(_side_canvas_win, width=max(cw, req_w))
+            if movers_dates_label is not None and side_panel is not None:
+                panel_w = side_panel.winfo_width()
+                if panel_w > 1:
+                    movers_dates_label.config(wraplength=max(panel_w - 24, 200))
+
+        def _save_side_pane_sash(_event=None):
+            nonlocal _side_pane_sash_pos, _side_pane_auto
+            if tables_pane is None:
+                return
+            try:
+                pos = tables_pane.sashpos(0)
+                if pos > 80:
+                    _side_pane_sash_pos = pos
+                    _side_pane_auto = False
+            except tk.TclError:
+                pass
+            _sync_side_scroll()
 
         side_content.bind('<Configure>', _sync_side_scroll)
         side_canvas.bind('<Configure>', _sync_side_scroll)
+        tables_pane.bind('<ButtonRelease-1>', _save_side_pane_sash)
+        side_panel.bind('<Configure>', _sync_side_scroll)
 
         if config.top_movers_panel:
             _build_movers_panel(side_content)
@@ -1052,8 +1122,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             recommend_panel,
         )
 
-    scroll_wrap = tk.Frame(tables_row)
-    scroll_wrap.grid(row=0, column=0, sticky='nsew')
+    scroll_wrap = tk.Frame(tables_pane if use_right_extras else tables_row)
+    if use_right_extras and tables_pane is not None and side_panel is not None:
+        tables_pane.add(scroll_wrap, weight=0)
+        tables_pane.add(side_panel, weight=1)
+    else:
+        scroll_wrap.grid(row=0, column=0, sticky='nsew')
     scroll_wrap.columnconfigure(0, weight=1)
     scroll_wrap.rowconfigure(1, weight=1)
 
@@ -1258,6 +1332,36 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         header_canvas.configure(scrollregion=(0, 0, total_w, header_h))
         table_canvas.xview_moveto(0)
         header_canvas.xview_moveto(0)
+        if tables_pane is not None:
+            _sync_side_pane_sash()
+
+    def _sync_side_pane_sash(_event=None):
+        nonlocal _side_pane_sash_pos
+        if tables_pane is None or _sync_side_scroll is None:
+            return
+        tables_pane.update_idletasks()
+        total_w = tables_pane.winfo_width()
+        if total_w <= 1:
+            return
+        min_right = 360
+        min_left = 280
+        gutter = max(table_scroll_y.winfo_width(), 18)
+        pad = 8
+        if _table_col_widths_px:
+            left_w = sum(_table_col_widths_px) + gutter + pad
+        else:
+            left_w = max(table_header.winfo_reqwidth(), 1) + gutter + pad
+        left_w = max(left_w, min_left)
+        if _side_pane_auto:
+            sash = min(left_w, total_w - min_right)
+        else:
+            sash = min(max(_side_pane_sash_pos, min_left), total_w - min_right)
+        try:
+            if abs(tables_pane.sashpos(0) - sash) > 2:
+                tables_pane.sashpos(0, sash)
+        except tk.TclError:
+            pass
+        _sync_side_scroll()
 
     def _sync_table_scroll_region(_event=None):
         _sync_table_layout()
@@ -1276,6 +1380,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     header_canvas.bind('<Configure>', _sync_table_layout)
     table_scroll_y.bind('<Configure>', _sync_header_scroll_gutter)
     tables_row.bind('<Configure>', _sync_table_layout)
+    if tables_pane is not None:
+        tables_pane.bind('<Configure>', _sync_table_layout)
     for widget in (
         table_canvas,
         header_canvas,
