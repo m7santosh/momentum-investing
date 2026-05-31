@@ -124,7 +124,7 @@ ETF_LABELS = {
     'MAHKTECH.NS': 'Hang Seng Tech ETF',
     'HNGSNGBEES.NS': 'Hang Seng ETF',
     'LIQUIDCASE.NS': 'Liquid ETF',
-    'ICICIB22.NS': 'G-Sec ETF',
+    'ICICIB22.NS': 'Bharat 22 ETF',
     'GROWWPOWER.NS': 'Power ETF',
 }
 

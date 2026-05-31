@@ -83,74 +83,98 @@ def _score_candidate(
     vol: float,
     table_rank: int,
     prev_table_rank: int | None,
-) -> tuple[float, list[str]]:
+) -> tuple[float, str]:
     """Higher = better blend of RRG momentum and tradability."""
     score = 0.0
-    reasons: list[str] = []
 
     if status == "leading":
         score += 38.0
-        reasons.append("Leading vs SPY")
         if rsr_val > 100 and rsm_val > 100:
             score += 8.0
-            reasons.append("RS ratio & momentum both > 100")
     else:
         score += 22.0
-        reasons.append("Improving (early rotation)")
         if delta_val >= 20:
             score += 6.0
-            reasons.append("Large Rank Δ while improving")
 
-    # Momentum: rank acceleration weighted heavily
     score += min(float(delta_val), 80.0) * 1.1
-    if delta_val >= 40:
-        reasons.append(f"Rank Δ +{delta_val} (sharp rise)")
-    elif delta_val >= 15:
-        reasons.append(f"Rank Δ +{delta_val} (rising)")
-    else:
-        reasons.append(f"Rank Δ +{delta_val}")
-
-    # Tail change — keep momentum, cap so one outlier does not dominate
     if change_pct > 0:
         score += min(change_pct, 28.0) * 0.55
-        if change_pct >= 12.0:
-            reasons.append(f"Change {change_pct:.1f}% over tail")
 
-    # Reliability / tradability
     if ticker in CORE_US_TICKERS:
         score += 10.0
-        reasons.append("Core us.py universe")
-
     if vol > 0:
         if vol < LOW_VOL_PCT:
             score += 14.0
-            reasons.append(f"Low vol {vol:.0f}% (stable)")
         elif vol < SATELLITE_VOL_PCT:
             score += 7.0
-            reasons.append(f"Moderate vol {vol:.0f}%")
         elif vol >= HIGH_VOL_PCT:
             score -= 12.0
-            reasons.append(f"High vol {vol:.0f}% (size down)")
-
     if ticker in FRONTIER_TICKERS:
         score -= 18.0
-        reasons.append("Frontier/small market (lower priority)")
-
     if table_rank <= 10:
         score += 4.0
-        if prev_table_rank is None or prev_table_rank > 10:
-            reasons.append("New in top 10 vs prior week")
-        else:
-            reasons.append("Top 10 by Change %")
 
-    return score, reasons
+    tags: list[str] = []
+    if ticker in CORE_US_TICKERS:
+        tags.append("Core us.py")
+    if ticker in FRONTIER_TICKERS:
+        tags.append("Frontier — size down")
+    if vol >= HIGH_VOL_PCT:
+        tags.append("High vol")
+
+    reason = _build_concise_reason(
+        status=status,
+        rsr_val=rsr_val,
+        rsm_val=rsm_val,
+        benchmark="SPY",
+        delta_val=delta_val,
+        table_rank=table_rank,
+        prev_table_rank=prev_table_rank,
+        change_pct=change_pct,
+        tags=tags,
+    )
+    return score, reason
 
 
-def _build_reason(reasons: list[str], max_len: int = 120) -> str:
-    text = "; ".join(reasons)
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 1] + "…"
+def _build_concise_reason(
+    *,
+    status: str,
+    rsr_val: float,
+    rsm_val: float,
+    benchmark: str,
+    delta_val: int,
+    table_rank: int,
+    prev_table_rank: int | None,
+    change_pct: float,
+    tags: list[str],
+) -> str:
+    """One-line why this name made Top 7 (table already shows Vol/Rank/Chg/Quad)."""
+    q = "Leading" if status == "leading" else "Improving"
+    if rsr_val > 100 and rsm_val > 100:
+        parts = [f"{q} vs {benchmark}, RS>100"]
+    else:
+        parts = [f"{q} vs {benchmark} (RS {rsr_val:.0f}/{rsm_val:.0f})"]
+
+    if prev_table_rank is not None and prev_table_rank > table_rank:
+        parts.append(f"#{prev_table_rank}->{table_rank} on Change%")
+    elif delta_val >= 15:
+        parts.append(f"Rank rise +{delta_val}")
+
+    if change_pct >= 8.0:
+        parts.append(f"Tail +{change_pct:.1f}%")
+    elif change_pct <= 0 and delta_val > 0:
+        parts.append("RRG up despite flat tail")
+
+    if table_rank <= 10 and (prev_table_rank is None or prev_table_rank > 10):
+        parts.append("New top-10")
+
+    parts.extend(tags)
+    parts.append("Top-7 score")
+    return " · ".join(parts)
+
+
+def _build_reason(text: str) -> str:
+    return text
 
 
 def recommend_us_etfs(
@@ -172,7 +196,7 @@ def recommend_us_etfs(
     """Score all eligible rows, then pick diversified top ``limit``."""
     curr_ranks = curr_ranks or {}
     prev_ranks = prev_ranks or {}
-    candidates: list[tuple[float, int, list[str], str, float, str, str, float, str]] = []
+    candidates: list[tuple[float, int, str, str, float, str, str, float, str]] = []
 
     for table_rank, j in enumerate(ranked_row_indices, start=1):
         ticker = indices[j]
@@ -193,7 +217,7 @@ def recommend_us_etfs(
             continue
         vol = vol_by_ticker.get(ticker, 0.0)
         prev_tr = prev_ranks.get(j)
-        score, reasons = _score_candidate(
+        score, reason = _score_candidate(
             ticker=ticker,
             status=status,
             rsr_val=rsr_val,
@@ -208,7 +232,7 @@ def recommend_us_etfs(
             (
                 score,
                 j,
-                reasons,
+                reason,
                 ticker,
                 chg,
                 delta_text,
@@ -222,7 +246,7 @@ def recommend_us_etfs(
     picks: list[UsEtfRecommendation] = []
     used_buckets: set[frozenset[str]] = set()
 
-    for score, j, reasons, ticker, chg, delta_text, vol, quadrant in candidates:
+    for score, j, reason, ticker, chg, delta_text, vol, quadrant in candidates:
         if len(picks) >= limit:
             break
         bucket = _bucket_for(ticker)
@@ -241,7 +265,7 @@ def recommend_us_etfs(
                 quadrant=quadrant,
                 size_hint=size_hint,
                 score=score,
-                reason=_build_reason(reasons),
+                reason=_build_reason(reason),
             )
         )
         if bucket is not None:

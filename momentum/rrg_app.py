@@ -73,13 +73,15 @@ class RrgAppConfig:
     default_tail: int = RRG_DEFAULT_TAIL
     side_cheat_sheet_title: str = "Swing trading cheat sheet"
     side_cheat_sheet: tuple[tuple[str, tuple[str, ...]], ...] | None = None
-    us_etf_table_extras: bool = False
-    us_etf_recommend_count: int = 7
-    us_etf_recommend_title: str = "Recommended Top 7 (weekly swing)"
+    etf_table_extras: bool = False
+    etf_recommend_profile: str = "us"  # "us" | "india"
+    etf_recommend_count: int = 7
+    etf_recommend_title: str = "Recommended Top 7 (weekly swing)"
 
 
 def run_rrg_app(config: RrgAppConfig) -> None:
     """Build UI, load data, and run the RRG main loop."""
+    recommend_in_side = config.etf_table_extras and config.top_movers_panel
     period = config.analysis_period
     window = config.rrg_window
     bar_unit = "week"
@@ -235,24 +237,43 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         f"slider start {_slider_first})."
     )
 
-    us_vol_by_ticker: dict[str, float] = {}
-    if config.us_etf_table_extras and indices:
-        print("Loading 63-day Vol% for US ETF table...")
-        try:
-            from momentum.etf.us_liquid_screener import _fetch_metrics
+    etf_vol_by_row: dict[int, float] = {}
+    if config.etf_table_extras and indices:
+        if config.etf_recommend_profile == "india":
+            print("Loading 63-day Vol% for India ETF table...")
+            try:
+                from momentum.etf.india_rrg_recommendations import load_india_etf_vol_pct
 
-            vol_metrics = _fetch_metrics(
-                list(indices),
-                adv_days=20,
-                vol_days=63,
-                history_days=120,
-                quiet=True,
-            )
-            for sym in indices:
-                if sym in vol_metrics:
-                    us_vol_by_ticker[sym] = vol_metrics[sym][1]
-        except Exception as exc:
-            print(f"Vol% load skipped: {exc}")
+                vol_by_ref = load_india_etf_vol_pct(
+                    indices,
+                    index_metadata["ref_label"],
+                    vol_days=63,
+                    history_days=120,
+                )
+                for j in range(len(indices)):
+                    ref = (
+                        index_metadata["ref_label"][j] or indices[j]
+                    ).upper().replace(".NS", "")
+                    etf_vol_by_row[j] = vol_by_ref.get(ref, 0.0)
+            except Exception as exc:
+                print(f"Vol% load skipped: {exc}")
+        else:
+            print("Loading 63-day Vol% for US ETF table...")
+            try:
+                from momentum.etf.us_liquid_screener import _fetch_metrics
+
+                vol_metrics = _fetch_metrics(
+                    list(indices),
+                    adv_days=20,
+                    vol_days=63,
+                    history_days=120,
+                    quiet=True,
+                )
+                for j, sym in enumerate(indices):
+                    if sym in vol_metrics:
+                        etf_vol_by_row[j] = vol_metrics[sym][1]
+            except Exception as exc:
+                print(f"Vol% load skipped: {exc}")
 
     def update_rrg():
         """Recompute RSR/RSM for every row (same length as ``indices``)."""
@@ -271,8 +292,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     root = tk.Tk()
     root.title(config.window_title)
-    root.geometry('1400x900' if config.top_movers_panel else '1100x900')
-    root.minsize(1280 if config.top_movers_panel else 900, 650)
+    root.geometry('1600x900' if recommend_in_side else ('1400x900' if config.top_movers_panel else '1100x900'))
+    root.minsize(1480 if recommend_in_side else (1280 if config.top_movers_panel else 900), 650)
     root.resizable(True, True)
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=0)
@@ -755,6 +776,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     side_panel = None
     if config.top_movers_panel:
         side_panel = tk.Frame(tables_row)
+        _side_min_w = 900 if recommend_in_side else 0
+        if _side_min_w:
+            side_panel.config(width=_side_min_w)
+            side_panel.pack_propagate(False)
         side_panel.pack(side=tk.RIGHT, fill=tk.Y, anchor='n', padx=(16, 0))
 
         movers_panel = tk.Frame(
@@ -764,7 +789,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             relief=tk.GROOVE,
             borderwidth=1,
         )
-        movers_panel.pack(side=tk.LEFT, anchor='nw', fill=tk.Y)
+        movers_panel.pack(side=tk.TOP, anchor='nw', fill=tk.X)
         tk.Label(
             movers_panel,
             text=config.top_movers_title,
@@ -786,8 +811,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         for col, (text, width, anchor) in enumerate(
             [
                 ('#', 2, 'e'),
-                ('Was', 14, 'w'),
-                ('Now', 14, 'w'),
+                ('Was', 18, 'w'),
+                ('Now', 18, 'w'),
             ]
         ):
             tk.Label(
@@ -807,8 +832,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             movers_row_widgets.append(
                 {
                     'rank': tk.Label(row, font=('Arial', 9), width=2, anchor='e'),
-                    'was': tk.Label(row, font=('Arial', 9), width=14, anchor='w'),
-                    'now': tk.Label(row, font=('Arial', 9), width=14, anchor='w'),
+                    'was': tk.Label(row, font=('Arial', 9), width=18, anchor='w'),
+                    'now': tk.Label(row, font=('Arial', 9), width=18, anchor='w'),
                 }
             )
             movers_row_widgets[-1]['rank'].grid(row=0, column=0, sticky='e')
@@ -817,7 +842,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             row.columnconfigure(1, weight=1)
             row.columnconfigure(2, weight=1)
 
-        if config.side_cheat_sheet:
+        if config.side_cheat_sheet and not recommend_in_side:
             cheat_panel = tk.Frame(
                 side_panel,
                 padx=6,
@@ -852,106 +877,111 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                         justify=tk.LEFT,
                     ).pack(fill=tk.X, anchor='w', padx=(8, 0), pady=(1, 0))
 
-    scroll_wrap = tk.Frame(tables_row)
-    scroll_wrap.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    scroll_wrap.columnconfigure(0, weight=1)
-    scroll_wrap.rowconfigure(1, weight=1)
-
     recommend_panel = None
     recommend_dates_label = None
     recommend_row_widgets: list[dict[str, tk.Label]] = []
-    if config.us_etf_table_extras:
+
+    def _build_recommend_panel(parent: tk.Frame, *, stack_vertical: bool) -> None:
+        nonlocal recommend_panel, recommend_dates_label
         recommend_panel = tk.Frame(
-            scroll_wrap,
+            parent,
+            padx=6,
+            pady=4,
             relief=tk.GROOVE,
             borderwidth=1,
         )
-        recommend_panel.grid(
-            row=2, column=0, columnspan=2, sticky='ew', padx=4, pady=(6, 2)
-        )
+        if stack_vertical:
+            recommend_panel.pack(
+                side=tk.TOP, anchor='nw', fill=tk.X, pady=(8, 0)
+            )
+
         tk.Label(
             recommend_panel,
-            text=config.us_etf_recommend_title,
+            text=config.etf_recommend_title,
             font=('Arial', 10, 'bold'),
             anchor='w',
         ).pack(fill=tk.X)
         recommend_dates_label = tk.Label(
             recommend_panel,
-            text=(
-                "Scored: Leading/Improving · Rank Δ > 0 · momentum + reliability · "
-                "near-duplicate themes deduped"
-            ),
+            text="Leading/Improving · Rank Δ>0 · momentum+reliability score",
             font=('Arial', 9),
             anchor='w',
             fg='gray',
-            wraplength=900,
             justify=tk.LEFT,
         )
         recommend_dates_label.pack(fill=tk.X, pady=(0, 4))
-        rec_hdr = tk.Frame(recommend_panel)
-        rec_hdr.pack(fill=tk.X)
-        _rec_cols = (
-            ('#', 2, 'e'),
-            ('Ticker', 7, 'w'),
-            ('Name', 14, 'w'),
-            ('Vol%', 5, 'e'),
-            ('Rank Δ', 5, 'e'),
-            ('Chg%', 6, 'e'),
-            ('Quad', 9, 'w'),
-            ('Size', 6, 'w'),
-            ('Reason', 42, 'w'),
+
+        rec_scroll_x = tk.Scrollbar(recommend_panel, orient=tk.HORIZONTAL)
+        rec_canvas = tk.Canvas(
+            recommend_panel,
+            highlightthickness=0,
+            height=210,
+            xscrollcommand=rec_scroll_x.set,
         )
-        for col, (text, width, anchor) in enumerate(_rec_cols):
+        rec_scroll_x.config(command=rec_canvas.xview)
+        rec_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        rec_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        rec_table = tk.Frame(rec_canvas)
+        _rec_table_win = rec_canvas.create_window((0, 0), window=rec_table, anchor='nw')
+
+        def _sync_rec_table_width(_event=None):
+            rec_table.update_idletasks()
+            cw = rec_canvas.winfo_width()
+            req_w = rec_table.winfo_reqwidth()
+            if cw > 1:
+                rec_canvas.itemconfigure(_rec_table_win, width=max(cw, req_w))
+            rec_canvas.config(scrollregion=rec_canvas.bbox('all'))
+
+        rec_table.bind('<Configure>', _sync_rec_table_width)
+        rec_canvas.bind('<Configure>', _sync_rec_table_width)
+
+        _rec_col_specs: tuple[tuple[str, str, str, int], ...] = (
+            ('rank', '#', 'e', 22),
+            ('ticker', 'Ticker', 'w', 82),
+            ('name', 'Name', 'w', 110),
+            ('vol', 'Vol%', 'e', 36),
+            ('rank_delta', 'Rank Δ', 'e', 44),
+            ('change', 'Chg%', 'e', 48),
+            ('quadrant', 'Quad', 'w', 76),
+            ('size', 'Size', 'w', 58),
+            ('reason', 'Reason', 'w', 380),
+        )
+        for col, (_key, header, anchor, min_px) in enumerate(_rec_col_specs):
+            rec_table.columnconfigure(
+                col, minsize=min_px, weight=1 if _key == 'reason' else 0
+            )
             tk.Label(
-                rec_hdr,
-                text=text,
+                rec_table,
+                text=header,
                 font=('Arial', 9, 'bold'),
-                width=width,
                 anchor=anchor,
-            ).grid(row=0, column=col, sticky='ew', padx=1)
-        rec_hdr.columnconfigure(len(_rec_cols) - 1, weight=1)
-        rec_body = tk.Frame(recommend_panel)
-        rec_body.pack(fill=tk.X)
-        for _ in range(config.us_etf_recommend_count):
-            row = tk.Frame(rec_body)
-            row.pack(fill=tk.X, pady=1)
-            reason_lbl = tk.Label(
-                row,
-                font=('Arial', 9),
-                anchor='w',
-                justify=tk.LEFT,
-                wraplength=520,
-            )
-            recommend_row_widgets.append(
-                {
-                    'rank': tk.Label(row, font=('Arial', 9), width=2, anchor='e'),
-                    'ticker': tk.Label(row, font=('Arial', 9), width=7, anchor='w'),
-                    'name': tk.Label(row, font=('Arial', 9), width=14, anchor='w'),
-                    'vol': tk.Label(row, font=('Arial', 9), width=5, anchor='e'),
-                    'rank_delta': tk.Label(row, font=('Arial', 9), width=5, anchor='e'),
-                    'change': tk.Label(row, font=('Arial', 9), width=6, anchor='e'),
-                    'quadrant': tk.Label(row, font=('Arial', 9), width=9, anchor='w'),
-                    'size': tk.Label(row, font=('Arial', 9), width=6, anchor='w'),
-                    'reason': reason_lbl,
-                }
-            )
-            for c, key in enumerate(
-                (
-                    'rank',
-                    'ticker',
-                    'name',
-                    'vol',
-                    'rank_delta',
-                    'change',
-                    'quadrant',
-                    'size',
-                    'reason',
-                )
-            ):
-                recommend_row_widgets[-1][key].grid(
-                    row=0, column=c, sticky='ew', padx=1
-                )
-            row.columnconfigure(8, weight=1)
+            ).grid(row=0, column=col, sticky='ew', padx=2, pady=1)
+
+        for slot in range(config.etf_recommend_count):
+            widgets: dict[str, tk.Label] = {}
+            grid_row = slot + 1
+            for col, (key, _header, anchor, _min_px) in enumerate(_rec_col_specs):
+                font = ('Arial', 8) if key == 'reason' else ('Arial', 9)
+                lbl = tk.Label(rec_table, font=font, anchor=anchor)
+                lbl.grid(row=grid_row, column=col, sticky='ew', padx=2, pady=1)
+                widgets[key] = lbl
+            recommend_row_widgets.append(widgets)
+
+    if recommend_in_side and side_panel is not None:
+        _build_recommend_panel(side_panel, stack_vertical=True)
+
+    scroll_wrap = tk.Frame(tables_row)
+    scroll_wrap.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scroll_wrap.columnconfigure(0, weight=1)
+    scroll_wrap.rowconfigure(1, weight=1)
+
+    if config.etf_table_extras and not recommend_in_side:
+        _build_recommend_panel(scroll_wrap, stack_vertical=False)
+        recommend_panel.grid(
+            row=2, column=0, columnspan=2, sticky='ew', padx=4, pady=(4, 2)
+        )
+        scroll_wrap.rowconfigure(2, weight=0)
 
     _HEADER_ROW_PX = 40
     header_canvas = tk.Canvas(
@@ -995,8 +1025,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     _COL_INDEX = 3
     _COL_PRICE = 4
     _COL_CHANGE = 5
-    _us_extras = config.us_etf_table_extras
-    if _us_extras:
+    _etf_extras = config.etf_table_extras
+    if _etf_extras:
         _COL_VOL = 6
         _COL_VISIBLE = 7
     else:
@@ -1010,7 +1040,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         'Price',
         'Change',
     ]
-    if _us_extras:
+    if _etf_extras:
         _TABLE_HEADERS.append('Vol%')
     _TABLE_HEADERS.append('Visible')
     _TABLE_CELL_PADX = (2, 1)
@@ -1047,7 +1077,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         price_w = _text_px(_TABLE_HEADERS[_COL_PRICE], bold=True)
         chg_w = _text_px(_TABLE_HEADERS[_COL_CHANGE], bold=True)
         vol_w = 0
-        if _us_extras and _COL_VOL is not None:
+        if _etf_extras and _COL_VOL is not None:
             vol_w = _text_px(_TABLE_HEADERS[_COL_VOL], bold=True)
         vis_w = _text_px(_TABLE_HEADERS[_COL_VISIBLE], bold=True) + _TABLE_VISIBLE_EXTRA_PX
 
@@ -1067,19 +1097,19 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 chg = _tail_change_pct(j, start_ts, end_ts)
                 if chg != float('-inf'):
                     chg_w = max(chg_w, _text_px(_format_change_pct(chg)))
-                if _us_extras and _COL_VOL is not None:
+                if _etf_extras and _COL_VOL is not None:
                     from momentum.etf.us_rrg_recommendations import format_vol_pct
 
                     vol_w = max(
                         vol_w,
                         _text_px(
-                            format_vol_pct(us_vol_by_ticker.get(indices[j], 0.0))
+                            format_vol_pct(etf_vol_by_row.get(j, 0.0))
                             or "Vol%"
                         ),
                     )
 
         widths = [rank_w, rank_delta_w, ref_w, idx_w, price_w, chg_w]
-        if _us_extras and _COL_VOL is not None:
+        if _etf_extras and _COL_VOL is not None:
             widths.append(vol_w)
         widths.append(vis_w)
         return widths
@@ -1352,8 +1382,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             index_metadata['ref_label'][row_idx]
             or index_metadata['display'][row_idx]
         )
-        name = ref if len(ref) <= 11 else f"{ref[:9]}…"
-        return f"{name} ({table_rank})"
+        return f"{ref} ({table_rank})"
 
     def refresh_top_movers_panel(now_ranked: list[int] | None = None):
         """Top-N main-table rows: Was = prior week top-N, Now = current top-N."""
@@ -1413,29 +1442,61 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         curr_ranks: dict[int, int] | None = None,
         prev_ranks: dict[int, int] | None = None,
     ):
-        if not config.us_etf_table_extras or not recommend_row_widgets:
+        if not config.etf_table_extras or not recommend_row_widgets:
             return
-        from momentum.etf.us_rrg_recommendations import (
-            format_vol_pct,
-            recommend_us_etfs,
-            recommendation_row_bg,
-        )
+        if config.etf_recommend_profile == "india":
+            from momentum.etf.india_rrg_recommendations import (
+                format_vol_pct,
+                recommend_india_etfs,
+                recommendation_row_bg,
+            )
 
-        picks = recommend_us_etfs(
-            ranked_row_indices=ranked,
-            indices=indices,
-            display_labels=index_metadata['display'],
-            vol_by_ticker=us_vol_by_ticker,
-            end_ts=end_ts,
-            rsr_series_by_row=rsr_tickers,
-            rsm_series_by_row=rsm_tickers,
-            rank_delta_by_row=rank_delta_by_row,
-            change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
-            series_at_fn=_series_at,
-            curr_ranks=curr_ranks,
-            prev_ranks=prev_ranks,
-            limit=config.us_etf_recommend_count,
-        )
+            picks = recommend_india_etfs(
+                ranked_row_indices=ranked,
+                indices=indices,
+                ref_labels=index_metadata["ref_label"],
+                display_labels=index_metadata["display"],
+                vol_by_ref={
+                    (index_metadata["ref_label"][j] or indices[j])
+                    .upper()
+                    .replace(".NS", ""): etf_vol_by_row.get(j, 0.0)
+                    for j in range(len(indices))
+                },
+                end_ts=end_ts,
+                rsr_series_by_row=rsr_tickers,
+                rsm_series_by_row=rsm_tickers,
+                rank_delta_by_row=rank_delta_by_row,
+                change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
+                series_at_fn=_series_at,
+                curr_ranks=curr_ranks,
+                prev_ranks=prev_ranks,
+                limit=config.etf_recommend_count,
+            )
+        else:
+            from momentum.etf.us_rrg_recommendations import (
+                format_vol_pct,
+                recommend_us_etfs,
+                recommendation_row_bg,
+            )
+
+            vol_by_ticker = {
+                indices[j]: etf_vol_by_row.get(j, 0.0) for j in range(len(indices))
+            }
+            picks = recommend_us_etfs(
+                ranked_row_indices=ranked,
+                indices=indices,
+                display_labels=index_metadata["display"],
+                vol_by_ticker=vol_by_ticker,
+                end_ts=end_ts,
+                rsr_series_by_row=rsr_tickers,
+                rsm_series_by_row=rsm_tickers,
+                rank_delta_by_row=rank_delta_by_row,
+                change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
+                series_at_fn=_series_at,
+                curr_ranks=curr_ranks,
+                prev_ranks=prev_ranks,
+                limit=config.etf_recommend_count,
+            )
         if recommend_dates_label is not None:
             end_l = format_date_label(int(date_scale.get()))
             recommend_dates_label.config(
@@ -1545,7 +1606,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     padx=_TABLE_CELL_PADX,
                     pady=_TABLE_ROW_PADY,
                 )
-            if _us_extras and _COL_VOL is not None and 'vol_label' in w:
+            if _etf_extras and _COL_VOL is not None and 'vol_label' in w:
                 w['vol_label'].grid(
                     row=display_row,
                     column=_COL_VOL,
@@ -1569,9 +1630,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             w['index_entry'].insert(0, index_metadata['display'][j])
             w['price_label'].config(text=price)
             w['chg_label'].config(text=_format_change_pct(chg))
-            if _us_extras and 'vol_label' in w:
+            if _etf_extras and 'vol_label' in w:
                 w['vol_label'].config(
-                    text=format_vol_pct(us_vol_by_ticker.get(indices[j], 0.0))
+                    text=format_vol_pct(etf_vol_by_row.get(j, 0.0))
                 )
             style_keys = (
                 'rank_label',
@@ -1581,7 +1642,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 'price_label',
                 'chg_label',
             )
-            if _us_extras and 'vol_label' in w:
+            if _etf_extras and 'vol_label' in w:
                 style_keys = (*style_keys, 'vol_label')
             for key in style_keys:
                 w[key].config(bg=bg_color, fg=fg_color)
@@ -1666,7 +1727,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             font=_TABLE_FONT,
         )
         vol_label = None
-        if _us_extras:
+        if _etf_extras:
             vol_label = tk.Label(
                 table_body,
                 text='',

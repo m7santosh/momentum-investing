@@ -173,8 +173,9 @@ def _build_config(analysis_period: str, rrg_window: int) -> RrgAppConfig:
         top_movers_count=10,
         top_movers_title="Top 10 — Was vs Now",
         side_cheat_sheet=ETF_SWING_CHEAT_SHEET,
-        us_etf_table_extras=True,
-        us_etf_recommend_count=7,
+        etf_table_extras=True,
+        etf_recommend_profile="us",
+        etf_recommend_count=7,
     )
 
 
