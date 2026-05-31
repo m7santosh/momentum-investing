@@ -160,4 +160,12 @@ def build_liquid_rrg_config(
         etf_table_extras=True,
         etf_recommend_profile="us",
         etf_recommend_count=7,
+        backtest_enabled=True,
+        backtest_profile="us",
+        backtest_universe_mode="expanded",
+        backtest_min_adv=min_adv,
+        backtest_vol_percentile=vol_percentile,
+        backtest_categories=tuple(
+            categories if isinstance(categories, (list, tuple)) else [categories]
+        ),
     )

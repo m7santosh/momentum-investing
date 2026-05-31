@@ -14,6 +14,15 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import FancyArrowPatch
 from tkinter import ttk
 
+from momentum.rrg_ranking import (
+    format_change_pct,
+    format_rank_delta,
+    rank_by_tail_change,
+    ranked_row_indices,
+    series_at,
+    tail_change_pct,
+)
+from momentum.rrg_ui_copy import TableRegionCopy, install_copy_support
 from momentum.rrg_core import (
     HEAD_ARROW_SCALE,
     HOVER_PIXEL_RADIUS,
@@ -77,6 +86,14 @@ class RrgAppConfig:
     etf_recommend_profile: str = "us"  # "us" | "india"
     etf_recommend_count: int = 7
     etf_recommend_title: str = "Recommended Top 7 (weekly swing)"
+    pick_strategy: str = "recommend"
+    max_hold_rank: int = 20
+    backtest_enabled: bool = False
+    backtest_profile: str = "india"  # "india" | "us"
+    backtest_universe_mode: str = "expanded"  # US: "core" | "expanded"
+    backtest_min_adv: float = 10_000_000.0
+    backtest_vol_percentile: float = 100.0
+    backtest_categories: tuple[str, ...] = ("all",)
 
 
 def run_rrg_app(config: RrgAppConfig) -> None:
@@ -539,8 +556,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     def format_date_label(idx):
         return str(_rrg_index[int(idx)]).split(' ')[0]
 
-    def _tail_marker_sizes(n_points: int) -> list[int]:
-        return [TAIL_MARKER_SIZE] * n_points
+    def _tail_marker_sizes(n_points: int, *, base: int | None = None) -> list[int]:
+        size = base if base is not None else TAIL_MARKER_SIZE
+        return [size] * n_points
 
     def _add_head_arrow(x_vals, y_vals, color: str):
         """Arrow on the last tail segment (direction of movement)."""
@@ -567,6 +585,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             tail_scale.set(tail)
             return
         tail = new_tail
+        _clear_pick_cache()
         date_min = _date_slider_min_idx()
         date_max = _date_slider_max_idx()
         date_scale.config(from_=date_min, to=date_max)
@@ -686,6 +705,108 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         command=on_show_rrg_toggle,
     )
     show_rrg_cb.pack(side=tk.LEFT, padx=(0, 12))
+
+    _pick_holdings_cache: dict[int, list[str]] = {}
+    _current_pick_row_indices: set[int] = set()
+    pick_strategy_var = tk.StringVar()
+    max_hold_rank_var = tk.IntVar(value=config.max_hold_rank)
+    pick_auto_show_var = tk.BooleanVar(value=True)
+    _pick_label_to_key: dict[str, str] = {}
+
+    if config.etf_table_extras:
+        from momentum.etf.india_rrg_pick_strategies import (
+            PICK_STRATEGIES,
+            pick_strategy_subtitle,
+        )
+
+        _pick_label_to_key = {label: key for key, label in PICK_STRATEGIES.items()}
+        pick_strategy_var.set(PICK_STRATEGIES.get(config.pick_strategy, PICK_STRATEGIES["recommend"]))
+
+        def _pick_strategy_key() -> str:
+            return _pick_label_to_key.get(pick_strategy_var.get(), "recommend")
+
+        def _clear_pick_cache() -> None:
+            _pick_holdings_cache.clear()
+            _current_pick_row_indices.clear()
+
+        pick_row = tk.Frame(controls_frame)
+        pick_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        tk.Label(pick_row, text="Pick strategy", width=12, anchor="w").pack(side=tk.LEFT)
+        ttk.Combobox(
+            pick_row,
+            textvariable=pick_strategy_var,
+            values=list(PICK_STRATEGIES.values()),
+            width=42,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=(0, 12))
+        max_rank_lbl = tk.Label(pick_row, text="Max hold rank:")
+        max_rank_spin = ttk.Spinbox(
+            pick_row,
+            from_=5,
+            to=60,
+            width=4,
+            textvariable=max_hold_rank_var,
+        )
+
+        def _toggle_max_hold_rank_ui(*_) -> None:
+            if _pick_strategy_key() == "top_n_rank_exit":
+                max_rank_lbl.pack(side=tk.LEFT)
+                max_rank_spin.pack(side=tk.LEFT, padx=(4, 12))
+            else:
+                max_rank_lbl.pack_forget()
+                max_rank_spin.pack_forget()
+
+        pick_auto_show_cb = ttk.Checkbutton(
+            pick_row,
+            text="Auto-show picks on graph",
+            variable=pick_auto_show_var,
+        )
+        pick_auto_show_cb.pack(side=tk.LEFT, padx=(0, 8))
+    else:
+        def _pick_strategy_key() -> str:
+            return "recommend"
+
+        def _clear_pick_cache() -> None:
+            pass
+
+        def _toggle_max_hold_rank_ui(*_) -> None:
+            pass
+
+        max_rank_lbl = None
+        max_rank_spin = None
+        pick_auto_show_cb = None
+
+    if config.backtest_enabled:
+        def open_backtest():
+            from momentum.rrg_backtest_ui import open_rrg_backtest
+
+            open_rrg_backtest(
+                root,
+                profile=config.backtest_profile,
+                rrg_window=window,
+                tail=int(float(tail_scale.get())),
+                top_n=config.etf_recommend_count,
+                backtest_extra={
+                    **(
+                        {
+                            "universe_mode": config.backtest_universe_mode,
+                            "min_adv_usd": config.backtest_min_adv,
+                            "vol_percentile": config.backtest_vol_percentile,
+                            "screen_categories": config.backtest_categories,
+                        }
+                        if config.backtest_profile == "us"
+                        else {}
+                    ),
+                    "pick_strategy": _pick_strategy_key(),
+                    "max_hold_rank": int(max_hold_rank_var.get()),
+                }
+                if config.etf_table_extras
+                else None,
+            )
+
+        ttk.Button(
+            controls_frame, text='Backtest', command=open_backtest
+        ).pack(side=tk.LEFT, padx=(0, 12))
 
     tail_row = tk.Frame(controls_frame)
     tail_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
@@ -1020,9 +1141,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     recommend_panel = None
     recommend_dates_label = None
     recommend_row_widgets: list[dict[str, tk.Label]] = []
+    recommend_copy_grid: dict | None = None
+    main_table_copy_grid: dict | None = None
+    movers_copy_grid: dict | None = None
 
     def _build_recommend_panel(parent: tk.Frame, *, pack_mode: str | None) -> None:
-        nonlocal recommend_panel, recommend_dates_label
+        nonlocal recommend_panel, recommend_dates_label, recommend_copy_grid
         recommend_panel = tk.Frame(
             parent,
             padx=6,
@@ -1091,26 +1215,39 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             ('size', 'Size', 'w', 58),
             ('reason', 'Reason', 'w', 380),
         )
+        rec_header_cells: list[tk.Label] = []
         for col, (_key, header, anchor, min_px) in enumerate(_rec_col_specs):
             rec_table.columnconfigure(
                 col, minsize=min_px, weight=1 if _key == 'reason' else 0
             )
-            tk.Label(
+            hdr = tk.Label(
                 rec_table,
                 text=header,
                 font=('Arial', 9, 'bold'),
                 anchor=anchor,
-            ).grid(row=0, column=col, sticky='ew', padx=2, pady=1)
+                relief=tk.RIDGE,
+            )
+            hdr.grid(row=0, column=col, sticky='ew', padx=2, pady=1)
+            rec_header_cells.append(hdr)
 
+        rec_body_cells: list[list[tk.Label]] = []
         for slot in range(config.etf_recommend_count):
             widgets: dict[str, tk.Label] = {}
             grid_row = slot + 1
+            row_cells: list[tk.Label] = []
             for col, (key, _header, anchor, _min_px) in enumerate(_rec_col_specs):
                 font = ('Arial', 8) if key == 'reason' else ('Arial', 9)
-                lbl = tk.Label(rec_table, font=font, anchor=anchor)
+                lbl = tk.Label(
+                    rec_table, font=font, anchor=anchor, relief=tk.RIDGE
+                )
                 lbl.grid(row=grid_row, column=col, sticky='ew', padx=2, pady=1)
                 widgets[key] = lbl
+                row_cells.append(lbl)
             recommend_row_widgets.append(widgets)
+            rec_body_cells.append(row_cells)
+
+        tc = TableRegionCopy.for_window(root)
+        recommend_copy_grid = tc.register_grid([rec_header_cells, *rec_body_cells])
 
     if use_right_extras and side_content is not None:
         _build_recommend_panel(side_content, pack_mode='top')
@@ -1251,7 +1388,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     pass
                 chg = _tail_change_pct(j, start_ts, end_ts)
                 if chg != float('-inf'):
-                    chg_w = max(chg_w, _text_px(_format_change_pct(chg)))
+                    chg_w = max(chg_w, _text_px(format_change_pct(chg)))
                 if _etf_extras and _COL_VOL is not None:
                     from momentum.etf.us_rrg_recommendations import format_vol_pct
 
@@ -1494,32 +1631,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         _sync_select_all_checkbox()
         redraw_chart()
 
-    def _series_at(series: pd.Series, ts) -> float:
-        """Close at ``ts``, or last available bar on or before ``ts``."""
-        try:
-            return float(series.loc[ts])
-        except KeyError:
-            pos = series.index.get_indexer([pd.Timestamp(ts)], method="ffill")
-            if pos[0] < 0:
-                raise
-            return float(series.iloc[pos[0]])
-
     def _tail_change_pct(row_idx: int, start_ts, end_ts):
         """% price change over the visible tail window (for ranking)."""
         index_name = indices[row_idx]
-        try:
-            p_start = _series_at(indices_data[index_name], start_ts)
-            p_end = _series_at(indices_data[index_name], end_ts)
-            if p_start == 0:
-                return float('-inf')
-            return (p_end - p_start) / p_start * 100
-        except (KeyError, TypeError, ValueError, IndexError):
-            return float('-inf')
-
-    def _format_change_pct(chg: float) -> str:
-        if chg == float('-inf'):
-            return ''
-        return f'{round(chg, 2):.2f}'
+        return tail_change_pct(indices_data[index_name], start_ts, end_ts)
 
     def _rank_by_row(end_date_idx_local: int) -> dict[int, int]:
         """Row index -> rank (1 = best tail-window change) at the given week index."""
@@ -1527,23 +1642,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             return {}
         end_ts = _rrg_index[end_date_idx_local]
         start_ts = _rrg_index[end_date_idx_local - tail]
-        ranked = sorted(
-            range(len(indices)),
-            key=lambda j: _tail_change_pct(j, start_ts, end_ts),
-            reverse=True,
-        )
-        return {j: display_rank + 1 for display_rank, j in enumerate(ranked)}
 
-    def _format_rank_delta(curr_rank: int, prev_rank: int | None) -> str:
-        """Change vs prior week (+ = moved up in rank)."""
-        if prev_rank is None:
-            return '—'
-        delta = prev_rank - curr_rank
-        if delta == 0:
-            return '0'
-        if delta > 0:
-            return f'+{delta}'
-        return str(delta)
+        def change_pct_fn(j: int) -> float:
+            return _tail_change_pct(j, start_ts, end_ts)
+
+        return rank_by_tail_change(len(indices), change_pct_fn)
 
     def _rank_delta_fg(delta_text: str) -> str:
         if delta_text.startswith('+'):
@@ -1558,11 +1661,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             return []
         end_ts = _rrg_index[end_date_idx_local]
         start_ts = _rrg_index[end_date_idx_local - tail]
-        return sorted(
-            range(len(indices)),
-            key=lambda j: _tail_change_pct(j, start_ts, end_ts),
-            reverse=True,
-        )
+
+        def change_pct_fn(j: int) -> float:
+            return _tail_change_pct(j, start_ts, end_ts)
+
+        return ranked_row_indices(len(indices), change_pct_fn)
 
     def _movers_cell_text(row_idx: int, table_rank: int | str) -> str:
         ref = (
@@ -1620,8 +1723,148 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             widgets['rank'].config(text=str(slot + 1))
             widgets['was'].config(text=was_text)
             widgets['now'].config(text=now_text)
+        if movers_copy_grid is not None:
+            TableRegionCopy.for_window(root).sync_styles(movers_copy_grid)
         if _sync_side_scroll is not None:
             root.after_idle(_sync_side_scroll)
+
+    def _compute_picks_at_week(
+        end_date_idx_local: int,
+        ranked: list[int],
+        end_ts,
+        start_ts,
+        rank_delta_by_row: dict[int, str],
+        curr_ranks: dict[int, int],
+        prev_ranks: dict[int, int],
+        *,
+        prev_holdings: list[str] | None = None,
+    ):
+        strategy = _pick_strategy_key()
+        max_rank = int(max_hold_rank_var.get())
+        top_n = config.etf_recommend_count
+        holdings = list(prev_holdings or [])
+
+        if config.etf_recommend_profile == "india":
+            from momentum.etf.india_rrg_pick_strategies import (
+                IndiaPickContext,
+                pick_india_portfolio,
+            )
+
+            vol_by_ref = {
+                (index_metadata["ref_label"][j] or indices[j])
+                .upper()
+                .replace(".NS", ""): etf_vol_by_row.get(j, 0.0)
+                for j in range(len(indices))
+            }
+            ctx = IndiaPickContext(
+                ranked_row_indices=ranked,
+                indices=indices,
+                ref_labels=index_metadata["ref_label"],
+                display_labels=index_metadata["display"],
+                vol_by_ref=vol_by_ref,
+                end_ts=end_ts,
+                rsr_series_by_row=rsr_tickers,
+                rsm_series_by_row=rsm_tickers,
+                rank_delta_by_row=rank_delta_by_row,
+                change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
+                series_at_fn=series_at,
+                curr_ranks=curr_ranks,
+                prev_ranks=prev_ranks,
+                top_n=top_n,
+                prev_holdings=holdings,
+                max_hold_rank=max_rank,
+            )
+            return pick_india_portfolio(strategy, ctx)
+
+        from momentum.etf.us_rrg_pick_strategies import UsPickContext, pick_us_portfolio
+
+        vol_by_ticker = {
+            indices[j]: etf_vol_by_row.get(j, 0.0) for j in range(len(indices))
+        }
+        ctx = UsPickContext(
+            ranked_row_indices=ranked,
+            indices=indices,
+            display_labels=index_metadata["display"],
+            vol_by_ticker=vol_by_ticker,
+            end_ts=end_ts,
+            rsr_series_by_row=rsr_tickers,
+            rsm_series_by_row=rsm_tickers,
+            rank_delta_by_row=rank_delta_by_row,
+            change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
+            series_at_fn=series_at,
+            curr_ranks=curr_ranks,
+            prev_ranks=prev_ranks,
+            top_n=top_n,
+            prev_holdings=holdings,
+            max_hold_rank=max_rank,
+        )
+        return pick_us_portfolio(strategy, ctx)
+
+    def _warm_pick_holdings_cache(target_week_idx: int) -> None:
+        if _pick_strategy_key() != "top_n_rank_exit":
+            return
+        start_idx = max(_date_slider_min_idx(), tail)
+        for idx in range(start_idx, target_week_idx + 1):
+            if idx in _pick_holdings_cache:
+                continue
+            prev = _pick_holdings_cache.get(idx - 1, [])
+            end_ts_i = _rrg_index[idx]
+            start_ts_i = _rrg_index[idx - tail]
+            curr = _rank_by_row(idx)
+            prev_r = _rank_by_row(idx - 1) if idx > tail else {}
+            ranked_i = sorted(
+                range(len(indices)),
+                key=lambda j: _tail_change_pct(j, start_ts_i, end_ts_i),
+                reverse=True,
+            )
+            rank_delta_i: dict[int, str] = {}
+            for j in ranked_i:
+                rank_delta_i[j] = format_rank_delta(
+                    curr.get(j, len(indices)), prev_r.get(j)
+                )
+            picks_i = _compute_picks_at_week(
+                idx,
+                ranked_i,
+                end_ts_i,
+                start_ts_i,
+                rank_delta_i,
+                curr,
+                prev_r,
+                prev_holdings=prev,
+            )
+            _pick_holdings_cache[idx] = [p.ticker for p in picks_i]
+
+    def _strategy_picks_for_week(
+        end_date_idx_local: int,
+        ranked: list[int],
+        end_ts,
+        start_ts,
+        rank_delta_by_row: dict[int, str],
+        curr_ranks: dict[int, int],
+        prev_ranks: dict[int, int],
+    ):
+        strategy = _pick_strategy_key()
+        prev_holdings: list[str] = []
+        if strategy == "top_n_rank_exit" and end_date_idx_local > 0:
+            if end_date_idx_local - 1 not in _pick_holdings_cache:
+                _warm_pick_holdings_cache(end_date_idx_local - 1)
+            prev_holdings = _pick_holdings_cache.get(end_date_idx_local - 1, [])
+        picks = _compute_picks_at_week(
+            end_date_idx_local,
+            ranked,
+            end_ts,
+            start_ts,
+            rank_delta_by_row,
+            curr_ranks,
+            prev_ranks,
+            prev_holdings=prev_holdings,
+        )
+        if strategy == "top_n_rank_exit":
+            stale = [k for k in _pick_holdings_cache if k > end_date_idx_local]
+            for k in stale:
+                del _pick_holdings_cache[k]
+            _pick_holdings_cache[end_date_idx_local] = [p.ticker for p in picks]
+        return picks
 
     def refresh_recommendations_panel(
         ranked: list[int],
@@ -1630,69 +1873,42 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         rank_delta_by_row: dict[int, str],
         curr_ranks: dict[int, int] | None = None,
         prev_ranks: dict[int, int] | None = None,
+        picks=None,
     ):
         if not config.etf_table_extras or not recommend_row_widgets:
             return
+        curr_ranks = curr_ranks or {}
+        prev_ranks = prev_ranks or {}
+        if picks is None:
+            picks = _strategy_picks_for_week(
+                int(date_scale.get()),
+                ranked,
+                end_ts,
+                start_ts,
+                rank_delta_by_row,
+                curr_ranks,
+                prev_ranks,
+            )
         if config.etf_recommend_profile == "india":
             from momentum.etf.india_rrg_recommendations import (
                 format_vol_pct,
-                recommend_india_etfs,
                 recommendation_row_bg,
-            )
-
-            picks = recommend_india_etfs(
-                ranked_row_indices=ranked,
-                indices=indices,
-                ref_labels=index_metadata["ref_label"],
-                display_labels=index_metadata["display"],
-                vol_by_ref={
-                    (index_metadata["ref_label"][j] or indices[j])
-                    .upper()
-                    .replace(".NS", ""): etf_vol_by_row.get(j, 0.0)
-                    for j in range(len(indices))
-                },
-                end_ts=end_ts,
-                rsr_series_by_row=rsr_tickers,
-                rsm_series_by_row=rsm_tickers,
-                rank_delta_by_row=rank_delta_by_row,
-                change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
-                series_at_fn=_series_at,
-                curr_ranks=curr_ranks,
-                prev_ranks=prev_ranks,
-                limit=config.etf_recommend_count,
             )
         else:
             from momentum.etf.us_rrg_recommendations import (
                 format_vol_pct,
-                recommend_us_etfs,
                 recommendation_row_bg,
             )
-
-            vol_by_ticker = {
-                indices[j]: etf_vol_by_row.get(j, 0.0) for j in range(len(indices))
-            }
-            picks = recommend_us_etfs(
-                ranked_row_indices=ranked,
-                indices=indices,
-                display_labels=index_metadata["display"],
-                vol_by_ticker=vol_by_ticker,
-                end_ts=end_ts,
-                rsr_series_by_row=rsr_tickers,
-                rsm_series_by_row=rsm_tickers,
-                rank_delta_by_row=rank_delta_by_row,
-                change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
-                series_at_fn=_series_at,
-                curr_ranks=curr_ranks,
-                prev_ranks=prev_ranks,
-                limit=config.etf_recommend_count,
-            )
         if recommend_dates_label is not None:
+            from momentum.etf.india_rrg_pick_strategies import pick_strategy_subtitle
+
             end_l = format_date_label(int(date_scale.get()))
+            subtitle = pick_strategy_subtitle(
+                _pick_strategy_key(),
+                max_hold_rank=int(max_hold_rank_var.get()),
+            )
             recommend_dates_label.config(
-                text=(
-                    f"Date: {end_l}  ·  Ranked by momentum+reliability score "
-                    f"(Leading/Improving, Rank Δ>0)"
-                )
+                text=f"Date: {end_l}  ·  {subtitle}"
             )
         for slot, widgets in enumerate(recommend_row_widgets):
             if slot >= len(picks):
@@ -1711,11 +1927,13 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 text=pick.rank_delta, bg=bg, fg=rd_fg if fg == 'black' else 'white'
             )
             widgets['change'].config(
-                text=_format_change_pct(pick.change_pct), bg=bg, fg=fg
+                text=format_change_pct(pick.change_pct), bg=bg, fg=fg
             )
             widgets['quadrant'].config(text=pick.quadrant, bg=bg, fg=fg)
             widgets['size'].config(text=pick.size_hint, bg=bg, fg=fg)
             widgets['reason'].config(text=pick.reason, bg=bg, fg=fg)
+        if recommend_copy_grid is not None:
+            TableRegionCopy.for_window(root).sync_styles(recommend_copy_grid)
         if _sync_side_scroll is not None:
             root.after_idle(_sync_side_scroll)
 
@@ -1754,12 +1972,31 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         rank_delta_texts: list[str] = []
         rank_delta_by_row: dict[int, str] = {}
         for j in ranked:
-            text = _format_rank_delta(
+            text = format_rank_delta(
                 curr_ranks.get(j, len(indices)),
                 prev_ranks.get(j),
             )
             rank_delta_texts.append(text)
             rank_delta_by_row[j] = text
+
+        picks = _strategy_picks_for_week(
+            end_date_idx_local,
+            ranked,
+            end_ts,
+            start_ts,
+            rank_delta_by_row,
+            curr_ranks,
+            prev_ranks,
+        )
+        _current_pick_row_indices.clear()
+        _current_pick_row_indices.update(p.row_idx for p in picks)
+
+        if config.etf_table_extras and pick_auto_show_var.get():
+            for j in _current_pick_row_indices:
+                if not checkbox_vars[j].get():
+                    checkbox_vars[j].set(True)
+                    if indices[j] not in indices_to_show:
+                        indices_to_show.append(indices[j])
 
         from momentum.etf.us_rrg_recommendations import format_vol_pct
 
@@ -1768,12 +2005,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             index_name = indices[j]
             chg = _tail_change_pct(j, start_ts, end_ts)
             try:
-                price = round(_series_at(indices_data[index_name], end_ts), 2)
+                price = round(series_at(indices_data[index_name], end_ts), 2)
             except (KeyError, TypeError, ValueError, IndexError):
                 price = ''
             try:
-                rsr_val = _series_at(rsr_tickers[j], end_ts)
-                rsm_val = _series_at(rsm_tickers[j], end_ts)
+                rsr_val = series_at(rsr_tickers[j], end_ts)
+                rsm_val = series_at(rsm_tickers[j], end_ts)
                 bg_color = get_color(rsr_val, rsm_val)
             except (KeyError, TypeError, ValueError, IndexError):
                 bg_color = RRG_COLOR_NA
@@ -1782,6 +2019,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             rank_num = display_row + 1
             rank_delta_text = rank_delta_texts[display_row]
             rank_delta_fg = _rank_delta_fg(rank_delta_text)
+            is_pick = j in _current_pick_row_indices
+            rank_display = f"★{rank_num}" if is_pick else str(rank_num)
             for col, key in (
                 (_COL_RANK, 'rank_label'),
                 (_COL_RANK_DELTA, 'rank_delta_label'),
@@ -1812,7 +2051,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 padx=_TABLE_CELL_PADX,
                 pady=_TABLE_ROW_PADY,
             )
-            w['rank_label'].config(text=rank_num)
+            w['rank_label'].config(text=rank_display)
             w['rank_delta_label'].config(
                 text=rank_delta_text, fg=rank_delta_fg if fg_color == 'black' else 'white'
             )
@@ -1820,7 +2059,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             w['index_entry'].delete(0, tk.END)
             w['index_entry'].insert(0, index_metadata['display'][j])
             w['price_label'].config(text=price)
-            w['chg_label'].config(text=_format_change_pct(chg))
+            w['chg_label'].config(text=format_change_pct(chg))
             if _etf_extras and 'vol_label' in w:
                 w['vol_label'].config(
                     text=format_vol_pct(etf_vol_by_row.get(j, 0.0))
@@ -1837,18 +2076,50 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 style_keys = (*style_keys, 'vol_label')
             for key in style_keys:
                 w[key].config(bg=bg_color, fg=fg_color)
+            if is_pick:
+                pick_font = ('Arial', 10, 'bold')
+                w['rank_label'].config(font=pick_font)
+                w['ref_label'].config(font=pick_font)
+            else:
+                w['rank_label'].config(font=_TABLE_FONT)
+                w['ref_label'].config(font=_TABLE_FONT)
             w['rank_delta_label'].config(
                 fg=rank_delta_fg if fg_color == 'black' else 'white'
             )
+        if main_table_copy_grid is not None:
+            tc = TableRegionCopy.for_window(root)
+            for display_row, j in enumerate(ranked):
+                for c, key in enumerate(_main_copy_cols):
+                    if key in table_widgets[j]:
+                        TableRegionCopy.set_cell_pos(
+                            table_widgets[j][key], display_row, c
+                        )
+            tc.sync_styles(main_table_copy_grid)
         _hide_stale_table_rows(len(indices))
         _update_table_column_widths(end_ts, start_ts, rank_delta_texts)
         refresh_top_movers_panel(ranked)
         refresh_recommendations_panel(
-            ranked, end_ts, start_ts, rank_delta_by_row, curr_ranks, prev_ranks
+            ranked,
+            end_ts,
+            start_ts,
+            rank_delta_by_row,
+            curr_ranks,
+            prev_ranks,
+            picks=picks,
         )
 
     checkbox_vars = []
     table_widgets = []
+    _main_copy_cols = [
+        'rank_label',
+        'rank_delta_label',
+        'ref_label',
+        'index_entry',
+        'price_label',
+        'chg_label',
+    ]
+    if _etf_extras:
+        _main_copy_cols.append('vol_label')
 
     for i in range(len(indices)):
         row_id = indices[i]
@@ -1910,7 +2181,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         )
         chg_label = tk.Label(
             table_body,
-            text=_format_change_pct(chg),
+            text=format_change_pct(chg),
             relief=tk.RIDGE,
             anchor='e',
             bg=bg_color,
@@ -1954,6 +2225,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         if vol_label is not None:
             row_widgets['vol_label'] = vol_label
         table_widgets.append(row_widgets)
+
+    _tc = TableRegionCopy.for_window(root)
+    main_table_copy_grid = _tc.register_grid(
+        [[w[k] for k in _main_copy_cols] for w in table_widgets]
+    )
+    if movers_row_widgets:
+        movers_copy_grid = _tc.register_grid(
+            [[m['rank'], m['was'], m['now']] for m in movers_row_widgets]
+        )
 
     select_all_cb.config(command=on_select_all_toggle)
     refresh_table_ranking()
@@ -2045,6 +2325,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         root.update_idletasks()
         try:
             bar_unit = selected
+            _clear_pick_cache()
             _rebuild_rrg_for_bar_unit()
             update_nav_button_labels()
             redraw_chart()
@@ -2099,7 +2380,13 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         for j in range(len(indices)):
             remove_ticker_artists(j)
 
-            if indices[j] not in indices_to_show:
+            is_pick = j in _current_pick_row_indices
+            on_graph = indices[j] in indices_to_show or (
+                config.etf_table_extras
+                and pick_auto_show_var.get()
+                and is_pick
+            )
+            if not on_graph:
                 continue
 
             filtered_rsr_tickers = rsr_tickers[j].loc[
@@ -2116,29 +2403,40 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             )
             xs = filtered_rsr_tickers.values
             ys = filtered_rsm_tickers.values
+            line_w = 3.0 if is_pick else 1.4
+            line_alpha = 0.9 if is_pick else 0.55
+            marker_size = TAIL_MARKER_SIZE + 14 if is_pick else TAIL_MARKER_SIZE
             if len(xs) >= 2:
                 scatter_plots[j] = ax_rrg.scatter(
                     xs[:-1],
                     ys[:-1],
                     color=plot_color,
-                    s=_tail_marker_sizes(len(xs) - 1),
-                    zorder=4,
+                    s=_tail_marker_sizes(len(xs) - 1, base=marker_size),
+                    zorder=5 if is_pick else 4,
+                    edgecolors='#333' if is_pick else 'none',
+                    linewidths=0.8 if is_pick else 0,
                 )
                 head_arrows[j] = _add_head_arrow(xs, ys, plot_color)
             else:
                 scatter_plots[j] = ax_rrg.scatter(
-                    xs, ys, color=plot_color, s=_tail_marker_sizes(len(xs)), zorder=4
+                    xs,
+                    ys,
+                    color=plot_color,
+                    s=_tail_marker_sizes(len(xs), base=marker_size),
+                    zorder=5 if is_pick else 4,
+                    edgecolors='#333' if is_pick else 'none',
+                    linewidths=0.8 if is_pick else 0,
                 )
                 head_arrows[j] = None
             line_plots[j] = ax_rrg.plot(
-                xs, ys, color=plot_color, alpha=0.55, linewidth=1.4, zorder=2
+                xs, ys, color=plot_color, alpha=line_alpha, linewidth=line_w, zorder=3 if is_pick else 2
             )[0]
             annotations[j] = ax_rrg.annotate(
                 index_metadata['display'][j],
                 (filtered_rsr_tickers.values[-1], filtered_rsm_tickers.values[-1]),
-                fontsize=8,
+                fontsize=9 if is_pick else 8,
                 color=plot_color,
-                fontweight='medium',
+                fontweight='bold' if is_pick else 'medium',
             )
 
     def on_close():
@@ -2147,6 +2445,21 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         root.destroy()
 
     root.protocol('WM_DELETE_WINDOW', on_close)
+    install_copy_support(root)
+    if config.etf_table_extras:
+
+        def _on_pick_strategy_change(*_) -> None:
+            _clear_pick_cache()
+            _toggle_max_hold_rank_ui()
+            redraw_chart()
+
+        pick_strategy_var.trace_add("write", _on_pick_strategy_change)
+        max_hold_rank_var.trace_add(
+            "write", lambda *_: (_clear_pick_cache(), redraw_chart())
+        )
+        if pick_auto_show_cb is not None:
+            pick_auto_show_cb.config(command=redraw_chart)
+        _toggle_max_hold_rank_ui()
     if _sync_side_scroll is not None:
         root.after_idle(_sync_side_scroll)
     redraw_chart()

@@ -230,6 +230,7 @@ def _build_config(analysis_period: str, rrg_window: int) -> RrgAppConfig:
         etf_recommend_profile="india",
         etf_recommend_count=7,
         etf_recommend_title="Recommended Top 7 (India ETF weekly swing)",
+        backtest_enabled=True,
     )
 
 

@@ -560,6 +560,59 @@ def load_nse_etf_weekly_histories(
     )
 
 
+def load_nse_cm_histories_range(
+    nse_symbols: list[str],
+    start_date: date,
+    end_date: date,
+    *,
+    min_points: int = 1,
+    quiet: bool = True,
+    asset_label: str = "CM symbol",
+    freq: str = "week",
+) -> dict[str, "pd.Series"]:
+    """NSE CM bhavcopy closes between ``start_date`` and ``end_date`` (inclusive)."""
+    from momentum.rrg_core import rrg_normalize_bar_unit
+
+    bar_unit = rrg_normalize_bar_unit(freq)
+    import pandas as pd
+
+    unique = list(dict.fromkeys(s.strip().upper() for s in nse_symbols if s))
+    if not unique:
+        return {}
+    if start_date > end_date:
+        raise ValueError("start_date must be on or before end_date")
+
+    want = set(unique)
+    buckets: dict[str, list[tuple[pd.Timestamp, float]]] = {s: [] for s in unique}
+    d = start_date
+    while d <= end_date:
+        if d.weekday() < 5:
+            day_map = fetch_bhavcopy(d, symbols=want)
+            if day_map:
+                for sym in unique:
+                    if sym in day_map:
+                        buckets[sym].append((pd.Timestamp(d), day_map[sym]["close"]))
+        d += timedelta(days=1)
+
+    out: dict[str, pd.Series] = {}
+    for sym, rows in buckets.items():
+        if len(rows) < min_points:
+            out[sym] = pd.Series(dtype=float)
+            continue
+        daily = pd.Series({ts: val for ts, val in rows}).sort_index()
+        if bar_unit == "day":
+            out[sym] = daily if len(daily) >= min_points else pd.Series(dtype=float)
+        else:
+            weekly = daily.resample("W-FRI").last().dropna()
+            out[sym] = weekly if len(weekly) >= min_points else pd.Series(dtype=float)
+    if not quiet and unique:
+        print(
+            f"  [NSE Bhavcopy] {start_date:%Y-%m-%d}..{end_date:%Y-%m-%d}: "
+            f"{len(unique)} {asset_label}(s)"
+        )
+    return out
+
+
 def load_nse_equity_weekly_histories(
     nse_symbols: list[str],
     *,
