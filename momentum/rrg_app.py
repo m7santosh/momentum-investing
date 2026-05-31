@@ -82,6 +82,7 @@ class RrgAppConfig:
 def run_rrg_app(config: RrgAppConfig) -> None:
     """Build UI, load data, and run the RRG main loop."""
     recommend_in_side = config.etf_table_extras and config.top_movers_panel
+    use_right_extras = recommend_in_side
     period = config.analysis_period
     window = config.rrg_window
     bar_unit = "week"
@@ -292,8 +293,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     root = tk.Tk()
     root.title(config.window_title)
-    root.geometry('1600x900' if recommend_in_side else ('1400x900' if config.top_movers_panel else '1100x900'))
-    root.minsize(1480 if recommend_in_side else (1280 if config.top_movers_panel else 900), 650)
+    root.geometry('1600x900' if use_right_extras else ('1400x900' if config.top_movers_panel else '1100x900'))
+    root.minsize(1280 if use_right_extras else (1280 if config.top_movers_panel else 900), 650)
     root.resizable(True, True)
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=0)
@@ -467,6 +468,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             _hide_hover_tooltip()
             chart_frame.grid_remove()
             root.rowconfigure(0, weight=0, minsize=0)
+        if _sync_side_scroll is not None:
+            root.after_idle(_sync_side_scroll)
 
     def on_show_rrg_toggle():
         _apply_rrg_chart_visibility()
@@ -774,16 +777,33 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     movers_dates_label = None
     movers_row_widgets: list[dict[str, tk.Label]] = []
     side_panel = None
-    if config.top_movers_panel:
-        side_panel = tk.Frame(tables_row)
-        _side_min_w = 900 if recommend_in_side else 0
-        if _side_min_w:
-            side_panel.config(width=_side_min_w)
-            side_panel.pack_propagate(False)
-        side_panel.pack(side=tk.RIGHT, fill=tk.Y, anchor='n', padx=(16, 0))
+    side_content = None
+    side_canvas = None
+    _sync_side_scroll = None
 
+    def _on_side_mousewheel(event):
+        if side_canvas is None:
+            return 'break'
+        if event.delta:
+            side_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        elif event.num == 4:
+            side_canvas.yview_scroll(-1, 'units')
+        elif event.num == 5:
+            side_canvas.yview_scroll(1, 'units')
+        return 'break'
+
+    def _bind_side_mousewheel(*widgets):
+        for widget in widgets:
+            if widget is None:
+                continue
+            widget.bind('<MouseWheel>', _on_side_mousewheel)
+            widget.bind('<Button-4>', _on_side_mousewheel)
+            widget.bind('<Button-5>', _on_side_mousewheel)
+
+    def _build_movers_panel(parent: tk.Frame) -> None:
+        nonlocal movers_panel, movers_dates_label
         movers_panel = tk.Frame(
-            side_panel,
+            parent,
             padx=6,
             pady=4,
             relief=tk.GROOVE,
@@ -802,7 +822,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             font=('Arial', 9),
             anchor='w',
             fg='gray',
-            wraplength=320,
+            wraplength=860 if use_right_extras else 320,
             justify=tk.LEFT,
         )
         movers_dates_label.pack(fill=tk.X, pady=(0, 4))
@@ -842,7 +862,57 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             row.columnconfigure(1, weight=1)
             row.columnconfigure(2, weight=1)
 
-        if config.side_cheat_sheet and not recommend_in_side:
+    if use_right_extras:
+        tables_row.columnconfigure(1, weight=0, minsize=920)
+        side_panel = tk.Frame(tables_row, width=920)
+        side_panel.grid(row=0, column=1, sticky='nsew', padx=(12, 0))
+        side_panel.grid_propagate(False)
+        side_panel.rowconfigure(0, weight=1)
+        side_panel.columnconfigure(0, weight=1)
+
+        side_scroll_y = tk.Scrollbar(side_panel, orient=tk.VERTICAL)
+        side_scroll_x = tk.Scrollbar(side_panel, orient=tk.HORIZONTAL)
+        side_canvas = tk.Canvas(
+            side_panel,
+            highlightthickness=0,
+            xscrollcommand=side_scroll_x.set,
+            yscrollcommand=side_scroll_y.set,
+        )
+        side_scroll_x.config(command=side_canvas.xview)
+        side_scroll_y.config(command=side_canvas.yview)
+        side_scroll_x.grid(row=1, column=0, sticky='ew')
+        side_scroll_y.grid(row=0, column=1, sticky='ns')
+        side_canvas.grid(row=0, column=0, sticky='nsew')
+
+        side_content = tk.Frame(side_canvas)
+        _side_canvas_win = side_canvas.create_window(
+            (0, 0), window=side_content, anchor='nw'
+        )
+
+        def _sync_side_scroll(_event=None):
+            if side_content is None or side_canvas is None:
+                return
+            side_content.update_idletasks()
+            side_canvas.config(scrollregion=side_canvas.bbox('all'))
+            cw = side_canvas.winfo_width()
+            req_w = side_content.winfo_reqwidth()
+            if cw > 1:
+                side_canvas.itemconfigure(_side_canvas_win, width=max(cw, req_w))
+
+        side_content.bind('<Configure>', _sync_side_scroll)
+        side_canvas.bind('<Configure>', _sync_side_scroll)
+
+        if config.top_movers_panel:
+            _build_movers_panel(side_content)
+    elif config.top_movers_panel:
+        side_panel = tk.Frame(tables_row)
+        side_panel.config(width=340)
+        side_panel.pack_propagate(False)
+        side_panel.grid(row=0, column=1, sticky='ns', padx=(16, 0))
+        tables_row.columnconfigure(1, weight=0, minsize=340)
+        _build_movers_panel(side_panel)
+
+        if config.side_cheat_sheet:
             cheat_panel = tk.Frame(
                 side_panel,
                 padx=6,
@@ -850,7 +920,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 relief=tk.GROOVE,
                 borderwidth=1,
             )
-            cheat_panel.pack(side=tk.LEFT, anchor='nw', fill=tk.Y, padx=(12, 0))
+            cheat_panel.pack(side=tk.TOP, anchor='nw', fill=tk.X, pady=(8, 0))
             tk.Label(
                 cheat_panel,
                 text=config.side_cheat_sheet_title,
@@ -881,7 +951,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     recommend_dates_label = None
     recommend_row_widgets: list[dict[str, tk.Label]] = []
 
-    def _build_recommend_panel(parent: tk.Frame, *, stack_vertical: bool) -> None:
+    def _build_recommend_panel(parent: tk.Frame, *, pack_mode: str | None) -> None:
         nonlocal recommend_panel, recommend_dates_label
         recommend_panel = tk.Frame(
             parent,
@@ -890,9 +960,13 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             relief=tk.GROOVE,
             borderwidth=1,
         )
-        if stack_vertical:
+        if pack_mode == 'top':
             recommend_panel.pack(
                 side=tk.TOP, anchor='nw', fill=tk.X, pady=(8, 0)
+            )
+        elif pack_mode == 'left':
+            recommend_panel.pack(
+                side=tk.LEFT, anchor='nw', fill=tk.BOTH, expand=True
             )
 
         tk.Label(
@@ -915,7 +989,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         rec_canvas = tk.Canvas(
             recommend_panel,
             highlightthickness=0,
-            height=210,
+            height=24 * (config.etf_recommend_count + 1) + 8,
             xscrollcommand=rec_scroll_x.set,
         )
         rec_scroll_x.config(command=rec_canvas.xview)
@@ -968,16 +1042,23 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 widgets[key] = lbl
             recommend_row_widgets.append(widgets)
 
-    if recommend_in_side and side_panel is not None:
-        _build_recommend_panel(side_panel, stack_vertical=True)
+    if use_right_extras and side_content is not None:
+        _build_recommend_panel(side_content, pack_mode='top')
+        _bind_side_mousewheel(
+            side_panel,
+            side_canvas,
+            side_content,
+            movers_panel,
+            recommend_panel,
+        )
 
     scroll_wrap = tk.Frame(tables_row)
-    scroll_wrap.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scroll_wrap.grid(row=0, column=0, sticky='nsew')
     scroll_wrap.columnconfigure(0, weight=1)
     scroll_wrap.rowconfigure(1, weight=1)
 
-    if config.etf_table_extras and not recommend_in_side:
-        _build_recommend_panel(scroll_wrap, stack_vertical=False)
+    if config.etf_table_extras and not use_right_extras:
+        _build_recommend_panel(scroll_wrap, pack_mode=None)
         recommend_panel.grid(
             row=2, column=0, columnspan=2, sticky='ew', padx=4, pady=(4, 2)
         )
@@ -1433,6 +1514,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             widgets['rank'].config(text=str(slot + 1))
             widgets['was'].config(text=was_text)
             widgets['now'].config(text=now_text)
+        if _sync_side_scroll is not None:
+            root.after_idle(_sync_side_scroll)
 
     def refresh_recommendations_panel(
         ranked: list[int],
@@ -1527,6 +1610,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             widgets['quadrant'].config(text=pick.quadrant, bg=bg, fg=fg)
             widgets['size'].config(text=pick.size_hint, bg=bg, fg=fg)
             widgets['reason'].config(text=pick.reason, bg=bg, fg=fg)
+        if _sync_side_scroll is not None:
+            root.after_idle(_sync_side_scroll)
 
     def _hide_stale_table_rows(visible_row_count: int):
         for i, widgets in enumerate(table_widgets):
@@ -1956,5 +2041,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         root.destroy()
 
     root.protocol('WM_DELETE_WINDOW', on_close)
+    if _sync_side_scroll is not None:
+        root.after_idle(_sync_side_scroll)
     redraw_chart()
     root.mainloop()
