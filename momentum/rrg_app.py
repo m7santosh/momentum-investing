@@ -73,6 +73,9 @@ class RrgAppConfig:
     default_tail: int = RRG_DEFAULT_TAIL
     side_cheat_sheet_title: str = "Swing trading cheat sheet"
     side_cheat_sheet: tuple[tuple[str, tuple[str, ...]], ...] | None = None
+    us_etf_table_extras: bool = False
+    us_etf_recommend_count: int = 7
+    us_etf_recommend_title: str = "Recommended Top 7 (weekly swing)"
 
 
 def run_rrg_app(config: RrgAppConfig) -> None:
@@ -231,6 +234,25 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         f"(includes ~{rrg_warmup_bars(window, bar_unit)} bar warmup before "
         f"slider start {_slider_first})."
     )
+
+    us_vol_by_ticker: dict[str, float] = {}
+    if config.us_etf_table_extras and indices:
+        print("Loading 63-day Vol% for US ETF table...")
+        try:
+            from momentum.etf.us_liquid_screener import _fetch_metrics
+
+            vol_metrics = _fetch_metrics(
+                list(indices),
+                adv_days=20,
+                vol_days=63,
+                history_days=120,
+                quiet=True,
+            )
+            for sym in indices:
+                if sym in vol_metrics:
+                    us_vol_by_ticker[sym] = vol_metrics[sym][1]
+        except Exception as exc:
+            print(f"Vol% load skipped: {exc}")
 
     def update_rrg():
         """Recompute RSR/RSM for every row (same length as ``indices``)."""
@@ -835,6 +857,102 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     scroll_wrap.columnconfigure(0, weight=1)
     scroll_wrap.rowconfigure(1, weight=1)
 
+    recommend_panel = None
+    recommend_dates_label = None
+    recommend_row_widgets: list[dict[str, tk.Label]] = []
+    if config.us_etf_table_extras:
+        recommend_panel = tk.Frame(
+            scroll_wrap,
+            relief=tk.GROOVE,
+            borderwidth=1,
+        )
+        recommend_panel.grid(
+            row=2, column=0, columnspan=2, sticky='ew', padx=4, pady=(6, 2)
+        )
+        tk.Label(
+            recommend_panel,
+            text=config.us_etf_recommend_title,
+            font=('Arial', 10, 'bold'),
+            anchor='w',
+        ).pack(fill=tk.X)
+        recommend_dates_label = tk.Label(
+            recommend_panel,
+            text=(
+                "Scored: Leading/Improving · Rank Δ > 0 · momentum + reliability · "
+                "near-duplicate themes deduped"
+            ),
+            font=('Arial', 9),
+            anchor='w',
+            fg='gray',
+            wraplength=900,
+            justify=tk.LEFT,
+        )
+        recommend_dates_label.pack(fill=tk.X, pady=(0, 4))
+        rec_hdr = tk.Frame(recommend_panel)
+        rec_hdr.pack(fill=tk.X)
+        _rec_cols = (
+            ('#', 2, 'e'),
+            ('Ticker', 7, 'w'),
+            ('Name', 14, 'w'),
+            ('Vol%', 5, 'e'),
+            ('Rank Δ', 5, 'e'),
+            ('Chg%', 6, 'e'),
+            ('Quad', 9, 'w'),
+            ('Size', 6, 'w'),
+            ('Reason', 42, 'w'),
+        )
+        for col, (text, width, anchor) in enumerate(_rec_cols):
+            tk.Label(
+                rec_hdr,
+                text=text,
+                font=('Arial', 9, 'bold'),
+                width=width,
+                anchor=anchor,
+            ).grid(row=0, column=col, sticky='ew', padx=1)
+        rec_hdr.columnconfigure(len(_rec_cols) - 1, weight=1)
+        rec_body = tk.Frame(recommend_panel)
+        rec_body.pack(fill=tk.X)
+        for _ in range(config.us_etf_recommend_count):
+            row = tk.Frame(rec_body)
+            row.pack(fill=tk.X, pady=1)
+            reason_lbl = tk.Label(
+                row,
+                font=('Arial', 9),
+                anchor='w',
+                justify=tk.LEFT,
+                wraplength=520,
+            )
+            recommend_row_widgets.append(
+                {
+                    'rank': tk.Label(row, font=('Arial', 9), width=2, anchor='e'),
+                    'ticker': tk.Label(row, font=('Arial', 9), width=7, anchor='w'),
+                    'name': tk.Label(row, font=('Arial', 9), width=14, anchor='w'),
+                    'vol': tk.Label(row, font=('Arial', 9), width=5, anchor='e'),
+                    'rank_delta': tk.Label(row, font=('Arial', 9), width=5, anchor='e'),
+                    'change': tk.Label(row, font=('Arial', 9), width=6, anchor='e'),
+                    'quadrant': tk.Label(row, font=('Arial', 9), width=9, anchor='w'),
+                    'size': tk.Label(row, font=('Arial', 9), width=6, anchor='w'),
+                    'reason': reason_lbl,
+                }
+            )
+            for c, key in enumerate(
+                (
+                    'rank',
+                    'ticker',
+                    'name',
+                    'vol',
+                    'rank_delta',
+                    'change',
+                    'quadrant',
+                    'size',
+                    'reason',
+                )
+            ):
+                recommend_row_widgets[-1][key].grid(
+                    row=0, column=c, sticky='ew', padx=1
+                )
+            row.columnconfigure(8, weight=1)
+
     _HEADER_ROW_PX = 40
     header_canvas = tk.Canvas(
         scroll_wrap, height=_HEADER_ROW_PX, highlightthickness=0, borderwidth=0
@@ -877,7 +995,13 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     _COL_INDEX = 3
     _COL_PRICE = 4
     _COL_CHANGE = 5
-    _COL_VISIBLE = 6
+    _us_extras = config.us_etf_table_extras
+    if _us_extras:
+        _COL_VOL = 6
+        _COL_VISIBLE = 7
+    else:
+        _COL_VOL = None
+        _COL_VISIBLE = 6
     _TABLE_HEADERS = [
         'Rank',
         'Rank Δ',
@@ -885,8 +1009,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         config.name_column_header,
         'Price',
         'Change',
-        'Visible',
     ]
+    if _us_extras:
+        _TABLE_HEADERS.append('Vol%')
+    _TABLE_HEADERS.append('Visible')
     _TABLE_CELL_PADX = (2, 1)
     _TABLE_ROW_PADY = 1
     _TABLE_FONT = ('Arial', 10)
@@ -920,6 +1046,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         idx_w = _text_px(_TABLE_HEADERS[_COL_INDEX], bold=True)
         price_w = _text_px(_TABLE_HEADERS[_COL_PRICE], bold=True)
         chg_w = _text_px(_TABLE_HEADERS[_COL_CHANGE], bold=True)
+        vol_w = 0
+        if _us_extras and _COL_VOL is not None:
+            vol_w = _text_px(_TABLE_HEADERS[_COL_VOL], bold=True)
         vis_w = _text_px(_TABLE_HEADERS[_COL_VISIBLE], bold=True) + _TABLE_VISIBLE_EXTRA_PX
 
         n = len(indices)
@@ -938,8 +1067,22 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 chg = _tail_change_pct(j, start_ts, end_ts)
                 if chg != float('-inf'):
                     chg_w = max(chg_w, _text_px(_format_change_pct(chg)))
+                if _us_extras and _COL_VOL is not None:
+                    from momentum.etf.us_rrg_recommendations import format_vol_pct
 
-        return [rank_w, rank_delta_w, ref_w, idx_w, price_w, chg_w, vis_w]
+                    vol_w = max(
+                        vol_w,
+                        _text_px(
+                            format_vol_pct(us_vol_by_ticker.get(indices[j], 0.0))
+                            or "Vol%"
+                        ),
+                    )
+
+        widths = [rank_w, rank_delta_w, ref_w, idx_w, price_w, chg_w]
+        if _us_extras and _COL_VOL is not None:
+            widths.append(vol_w)
+        widths.append(vis_w)
+        return widths
 
     def _apply_table_column_widths(widths_px: list[int]):
         nonlocal _table_col_widths_px
@@ -1063,7 +1206,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             select_all_cb = ttk.Checkbutton(vis_hdr_inner, variable=select_all_var)
             select_all_cb.pack(side=tk.LEFT, padx=(4, 0))
         else:
-            anchor = 'e' if j in (_COL_RANK, _COL_RANK_DELTA, _COL_PRICE, _COL_CHANGE) else 'w'
+            right_cols = (_COL_RANK, _COL_RANK_DELTA, _COL_PRICE, _COL_CHANGE)
+            if _COL_VOL is not None:
+                right_cols = (*right_cols, _COL_VOL)
+            anchor = 'e' if j in right_cols else 'w'
             tk.Label(
                 table_header,
                 text=_TABLE_HEADERS[j],
@@ -1259,6 +1405,68 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             widgets['was'].config(text=was_text)
             widgets['now'].config(text=now_text)
 
+    def refresh_recommendations_panel(
+        ranked: list[int],
+        end_ts,
+        start_ts,
+        rank_delta_by_row: dict[int, str],
+        curr_ranks: dict[int, int] | None = None,
+        prev_ranks: dict[int, int] | None = None,
+    ):
+        if not config.us_etf_table_extras or not recommend_row_widgets:
+            return
+        from momentum.etf.us_rrg_recommendations import (
+            format_vol_pct,
+            recommend_us_etfs,
+            recommendation_row_bg,
+        )
+
+        picks = recommend_us_etfs(
+            ranked_row_indices=ranked,
+            indices=indices,
+            display_labels=index_metadata['display'],
+            vol_by_ticker=us_vol_by_ticker,
+            end_ts=end_ts,
+            rsr_series_by_row=rsr_tickers,
+            rsm_series_by_row=rsm_tickers,
+            rank_delta_by_row=rank_delta_by_row,
+            change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
+            series_at_fn=_series_at,
+            curr_ranks=curr_ranks,
+            prev_ranks=prev_ranks,
+            limit=config.us_etf_recommend_count,
+        )
+        if recommend_dates_label is not None:
+            end_l = format_date_label(int(date_scale.get()))
+            recommend_dates_label.config(
+                text=(
+                    f"Date: {end_l}  ·  Ranked by momentum+reliability score "
+                    f"(Leading/Improving, Rank Δ>0)"
+                )
+            )
+        for slot, widgets in enumerate(recommend_row_widgets):
+            if slot >= len(picks):
+                for w in widgets.values():
+                    w.config(text='', bg=root.cget('bg'), fg='black')
+                continue
+            pick = picks[slot]
+            bg = recommendation_row_bg(pick.quadrant)
+            fg = rrg_row_fg_color(bg)
+            widgets['rank'].config(text=str(pick.pick_rank), bg=bg, fg=fg)
+            widgets['ticker'].config(text=pick.ticker, bg=bg, fg=fg)
+            widgets['name'].config(text=pick.name, bg=bg, fg=fg)
+            widgets['vol'].config(text=format_vol_pct(pick.vol_pct), bg=bg, fg=fg)
+            rd_fg = _rank_delta_fg(pick.rank_delta)
+            widgets['rank_delta'].config(
+                text=pick.rank_delta, bg=bg, fg=rd_fg if fg == 'black' else 'white'
+            )
+            widgets['change'].config(
+                text=_format_change_pct(pick.change_pct), bg=bg, fg=fg
+            )
+            widgets['quadrant'].config(text=pick.quadrant, bg=bg, fg=fg)
+            widgets['size'].config(text=pick.size_hint, bg=bg, fg=fg)
+            widgets['reason'].config(text=pick.reason, bg=bg, fg=fg)
+
     def _hide_stale_table_rows(visible_row_count: int):
         for i, widgets in enumerate(table_widgets):
             if i < visible_row_count:
@@ -1292,13 +1500,16 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         )
 
         rank_delta_texts: list[str] = []
+        rank_delta_by_row: dict[int, str] = {}
         for j in ranked:
-            rank_delta_texts.append(
-                _format_rank_delta(
-                    curr_ranks.get(j, len(indices)),
-                    prev_ranks.get(j),
-                )
+            text = _format_rank_delta(
+                curr_ranks.get(j, len(indices)),
+                prev_ranks.get(j),
             )
+            rank_delta_texts.append(text)
+            rank_delta_by_row[j] = text
+
+        from momentum.etf.us_rrg_recommendations import format_vol_pct
 
         for display_row, j in enumerate(ranked):
             w = table_widgets[j]
@@ -1334,6 +1545,14 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     padx=_TABLE_CELL_PADX,
                     pady=_TABLE_ROW_PADY,
                 )
+            if _us_extras and _COL_VOL is not None and 'vol_label' in w:
+                w['vol_label'].grid(
+                    row=display_row,
+                    column=_COL_VOL,
+                    sticky=_table_col_sticky(_COL_VOL),
+                    padx=_TABLE_CELL_PADX,
+                    pady=_TABLE_ROW_PADY,
+                )
             w['visible_cell'].grid(
                 row=display_row,
                 column=_COL_VISIBLE,
@@ -1350,14 +1569,21 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             w['index_entry'].insert(0, index_metadata['display'][j])
             w['price_label'].config(text=price)
             w['chg_label'].config(text=_format_change_pct(chg))
-            for key in (
+            if _us_extras and 'vol_label' in w:
+                w['vol_label'].config(
+                    text=format_vol_pct(us_vol_by_ticker.get(indices[j], 0.0))
+                )
+            style_keys = (
                 'rank_label',
                 'rank_delta_label',
                 'ref_label',
                 'index_entry',
                 'price_label',
                 'chg_label',
-            ):
+            )
+            if _us_extras and 'vol_label' in w:
+                style_keys = (*style_keys, 'vol_label')
+            for key in style_keys:
                 w[key].config(bg=bg_color, fg=fg_color)
             w['rank_delta_label'].config(
                 fg=rank_delta_fg if fg_color == 'black' else 'white'
@@ -1365,6 +1591,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         _hide_stale_table_rows(len(indices))
         _update_table_column_widths(end_ts, start_ts, rank_delta_texts)
         refresh_top_movers_panel(ranked)
+        refresh_recommendations_panel(
+            ranked, end_ts, start_ts, rank_delta_by_row, curr_ranks, prev_ranks
+        )
 
     checkbox_vars = []
     table_widgets = []
@@ -1436,6 +1665,17 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             fg=fg_color,
             font=_TABLE_FONT,
         )
+        vol_label = None
+        if _us_extras:
+            vol_label = tk.Label(
+                table_body,
+                text='',
+                relief=tk.RIDGE,
+                anchor='e',
+                bg=bg_color,
+                fg=fg_color,
+                font=_TABLE_FONT,
+            )
         visible_cell = tk.Frame(
             table_body,
             relief=tk.RIDGE,
@@ -1450,17 +1690,18 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             command=lambda idx=i: on_visibility_toggle(idx),
         )
         checkbox.pack(anchor='center', expand=True)
-        table_widgets.append(
-            {
-                'rank_label': rank_label,
-                'rank_delta_label': rank_delta_label,
-                'ref_label': ref_label_widget,
-                'index_entry': index_entry,
-                'price_label': price_label,
-                'chg_label': chg_label,
-                'visible_cell': visible_cell,
-            }
-        )
+        row_widgets = {
+            'rank_label': rank_label,
+            'rank_delta_label': rank_delta_label,
+            'ref_label': ref_label_widget,
+            'index_entry': index_entry,
+            'price_label': price_label,
+            'chg_label': chg_label,
+            'visible_cell': visible_cell,
+        }
+        if vol_label is not None:
+            row_widgets['vol_label'] = vol_label
+        table_widgets.append(row_widgets)
 
     select_all_cb.config(command=on_select_all_toggle)
     refresh_table_ranking()
