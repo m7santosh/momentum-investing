@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from momentum.etf.india_rrg_recommendations import (
     EXCLUDE_REF_ETFS,
@@ -47,6 +47,19 @@ class IndiaPickContext:
     max_hold_rank: int = 10
 
 
+def ref_to_row_index(
+    indices: list[str],
+    ref_labels: list[str],
+) -> dict[str, int]:
+    ref_to_j: dict[str, int] = {}
+    for j in range(len(indices)):
+        ref = (ref_labels[j] if j < len(ref_labels) else indices[j]).strip().upper()
+        ref = ref.replace(".NS", "")
+        if ref and ref not in ref_to_j:
+            ref_to_j[ref] = j
+    return ref_to_j
+
+
 def _bare_ref(ctx: IndiaPickContext, row_j: int) -> str:
     ref = (ctx.ref_labels[row_j] or ctx.indices[row_j]).strip().upper().replace(
         ".NS", ""
@@ -61,6 +74,26 @@ def _quadrant_at(ctx: IndiaPickContext, row_j: int) -> str:
     except (KeyError, TypeError, ValueError, IndexError):
         return "—"
     return get_status(rsr, rsm).capitalize()
+
+
+def order_picks_by_table_rank(
+    picks: list[IndiaEtfRecommendation],
+    ranked_row_indices: list[int],
+) -> list[IndiaEtfRecommendation]:
+    """
+    Same order as main RRG Top N @ rebalance (★ / tail momentum table order),
+    not swing-score pick_rank order from recommend_india_etfs.
+    """
+    if not picks:
+        return picks
+    by_row = {p.row_idx: p for p in picks}
+    ordered: list[IndiaEtfRecommendation] = []
+    for j in ranked_row_indices:
+        if j in by_row:
+            ordered.append(by_row[j])
+    for i, p in enumerate(ordered, start=1):
+        ordered[i - 1] = replace(p, pick_rank=i)
+    return ordered
 
 
 def _row_indices_to_picks(
@@ -239,6 +272,75 @@ def apply_rank_exit_overlay(
             reason=p.reason,
         )
     return merged[: ctx.top_n]
+
+
+def count_strategy_eligible(strategy: str, ctx: IndiaPickContext) -> int:
+    """Universe rows passing this strategy's entry filters (before overlap dedupe)."""
+    key = (strategy or "recommend").strip().lower()
+    if key == "top_n_rank_exit":
+        key = "top_n"
+    n = 0
+    for j in ctx.ranked_row_indices:
+        ref = _bare_ref(ctx, j)
+        if not ref or ref in EXCLUDE_REF_ETFS:
+            continue
+        if ctx.change_pct_fn(j) == float("-inf"):
+            continue
+        if key == "top_n":
+            n += 1
+            continue
+        try:
+            rsr = float(ctx.series_at_fn(ctx.rsr_series_by_row[j], ctx.end_ts))
+            rsm = float(ctx.series_at_fn(ctx.rsm_series_by_row[j], ctx.end_ts))
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        status = get_status(rsr, rsm)
+        if key == "leading_only":
+            if status == "leading":
+                n += 1
+        elif key == "leading_improved":
+            delta_val = parse_rank_delta(ctx.rank_delta_by_row.get(j, "—"))
+            if status == "leading" and delta_val is not None and delta_val > 0:
+                n += 1
+        else:
+            delta_val = parse_rank_delta(ctx.rank_delta_by_row.get(j, "—"))
+            if (
+                delta_val is not None
+                and delta_val > 0
+                and status in ("leading", "improving")
+            ):
+                n += 1
+    return n
+
+
+def pick_shortfall_hint(
+    strategy: str, ctx: IndiaPickContext, picked_n: int
+) -> str:
+    """Why pick count can be below Portfolio N despite many ETFs in the table."""
+    if picked_n >= ctx.top_n:
+        return ""
+    eligible = count_strategy_eligible(strategy, ctx)
+    key = (strategy or "recommend").strip().lower()
+    if key == "top_n_rank_exit":
+        key = "top_n"
+    if key == "recommend" and eligible > picked_n:
+        return (
+            f"{picked_n}/{ctx.top_n} picks — {eligible} passed Leading/Improving "
+            f"+ RankΔ>0; overlap buckets skipped the rest"
+        )
+    if key == "leading_only":
+        return (
+            f"{picked_n}/{ctx.top_n} picks — only {eligible} ETFs in Leading "
+            f"quadrant this week"
+        )
+    if key == "leading_improved":
+        return (
+            f"{picked_n}/{ctx.top_n} picks — only {eligible} in Leading with "
+            f"Rank Δ>0 this week"
+        )
+    if key == "top_n":
+        return f"{picked_n}/{ctx.top_n} picks — {eligible} with valid momentum data"
+    return f"{picked_n}/{ctx.top_n} picks — {eligible} passed strategy filters"
 
 
 def pick_india_portfolio(strategy: str, ctx: IndiaPickContext) -> list[IndiaEtfRecommendation]:

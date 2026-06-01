@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from momentum.etf.india_rrg_pick_strategies import (
     BASE_PICK_STRATEGIES,
@@ -22,6 +22,8 @@ __all__ = [
     "BASE_PICK_STRATEGIES",
     "PICK_STRATEGIES",
     "UsPickContext",
+    "count_strategy_eligible",
+    "pick_shortfall_hint",
     "pick_strategy_label",
     "pick_strategy_subtitle",
     "pick_us_portfolio",
@@ -48,6 +50,23 @@ class UsPickContext:
     prev_holdings: list[str]
     hold_until_rank_exit: bool = False
     max_hold_rank: int = 10
+
+
+def order_picks_by_table_rank(
+    picks: list[UsEtfRecommendation],
+    ranked_row_indices: list[int],
+) -> list[UsEtfRecommendation]:
+    """Match main RRG table / ★ order (not swing-score pick_rank)."""
+    if not picks:
+        return picks
+    by_row = {p.row_idx: p for p in picks}
+    ordered: list[UsEtfRecommendation] = []
+    for j in ranked_row_indices:
+        if j in by_row:
+            ordered.append(by_row[j])
+    for i, p in enumerate(ordered, start=1):
+        ordered[i - 1] = replace(p, pick_rank=i)
+    return ordered
 
 
 def _ticker(ctx: UsPickContext, row_j: int) -> str:
@@ -234,6 +253,72 @@ def apply_rank_exit_overlay(
             reason=p.reason,
         )
     return merged[: ctx.top_n]
+
+
+def count_strategy_eligible(strategy: str, ctx: UsPickContext) -> int:
+    """Universe rows passing this strategy's entry filters (before overlap dedupe)."""
+    key = (strategy or "recommend").strip().lower()
+    if key == "top_n_rank_exit":
+        key = "top_n"
+    n = 0
+    for j in ctx.ranked_row_indices:
+        if not _ticker(ctx, j):
+            continue
+        if ctx.change_pct_fn(j) == float("-inf"):
+            continue
+        if key == "top_n":
+            n += 1
+            continue
+        try:
+            rsr = float(ctx.series_at_fn(ctx.rsr_series_by_row[j], ctx.end_ts))
+            rsm = float(ctx.series_at_fn(ctx.rsm_series_by_row[j], ctx.end_ts))
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        status = get_status(rsr, rsm)
+        if key == "leading_only":
+            if status == "leading":
+                n += 1
+        elif key == "leading_improved":
+            delta_val = parse_rank_delta(ctx.rank_delta_by_row.get(j, "—"))
+            if status == "leading" and delta_val is not None and delta_val > 0:
+                n += 1
+        else:
+            delta_val = parse_rank_delta(ctx.rank_delta_by_row.get(j, "—"))
+            if (
+                delta_val is not None
+                and delta_val > 0
+                and status in ("leading", "improving")
+            ):
+                n += 1
+    return n
+
+
+def pick_shortfall_hint(strategy: str, ctx: UsPickContext, picked_n: int) -> str:
+    """Why pick count can be below Portfolio N despite many ETFs in the table."""
+    if picked_n >= ctx.top_n:
+        return ""
+    eligible = count_strategy_eligible(strategy, ctx)
+    key = (strategy or "recommend").strip().lower()
+    if key == "top_n_rank_exit":
+        key = "top_n"
+    if key == "recommend" and eligible > picked_n:
+        return (
+            f"{picked_n}/{ctx.top_n} picks — {eligible} passed Leading/Improving "
+            f"+ RankΔ>0; overlap buckets skipped the rest"
+        )
+    if key == "leading_only":
+        return (
+            f"{picked_n}/{ctx.top_n} picks — only {eligible} ETFs in Leading "
+            f"quadrant this week"
+        )
+    if key == "leading_improved":
+        return (
+            f"{picked_n}/{ctx.top_n} picks — only {eligible} in Leading with "
+            f"Rank Δ>0 this week"
+        )
+    if key == "top_n":
+        return f"{picked_n}/{ctx.top_n} picks — {eligible} with valid momentum data"
+    return f"{picked_n}/{ctx.top_n} picks — {eligible} passed strategy filters"
 
 
 def pick_us_portfolio(strategy: str, ctx: UsPickContext) -> list[UsEtfRecommendation]:

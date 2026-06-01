@@ -178,7 +178,7 @@ def _build_config(analysis_period: str, rrg_window: int) -> RrgAppConfig:
         etf_recommend_count=7,
         backtest_enabled=True,
         backtest_profile="us",
-        backtest_universe_mode="expanded",
+        backtest_universe_mode="core",
     )
 
 

@@ -224,12 +224,11 @@ def _build_config(analysis_period: str, rrg_window: int) -> RrgAppConfig:
         default_tail=1,
         top_movers_panel=True,
         top_movers_count=10,
-        top_movers_title="Top 10 — Was vs Now",
+        top_movers_title="Portfolio — Was vs Now",
         side_cheat_sheet=ETF_SWING_CHEAT_SHEET,
         etf_table_extras=True,
         etf_recommend_profile="india",
         etf_recommend_count=7,
-        etf_recommend_title="Recommended Top 7 (India ETF weekly swing)",
         backtest_enabled=True,
     )
 

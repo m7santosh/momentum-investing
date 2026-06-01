@@ -14,7 +14,6 @@ import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from momentum.rrg_core import rrg_row_fg_color
 from momentum.rrg_ui_copy import (
     TableRegionCopy,
     configure_readonly_text,
@@ -160,7 +159,7 @@ def open_rrg_backtest(
 
     pick_strategy_var = tk.StringVar()
     hold_until_rank_exit_var = tk.BooleanVar(value=False)
-    exit_below_9ema_var = tk.BooleanVar(value=False)
+    exit_below_9ema_var = tk.BooleanVar(value=bool(bt_extra.get("exit_below_9ema", True)))
     max_hold_rank_var = tk.IntVar(value=10)
     _pick_label_to_key: dict[str, str] = {}
     max_rank_label: tk.Label | None = None
@@ -226,8 +225,8 @@ def open_rrg_backtest(
         hold_until_rank_exit_var.set(True)
     if bt_extra.get("max_hold_rank") is not None:
         max_hold_rank_var.set(int(bt_extra["max_hold_rank"]))
-    if bt_extra.get("exit_below_9ema"):
-        exit_below_9ema_var.set(True)
+    if "exit_below_9ema" in bt_extra:
+        exit_below_9ema_var.set(bool(bt_extra["exit_below_9ema"]))
 
     mode_var = tk.StringVar(value="step")
     mode_row = tk.Frame(params)
@@ -287,52 +286,86 @@ def open_rrg_backtest(
     week_frame = tk.LabelFrame(bottom_pane, text="Current week", padx=6, pady=4)
     bottom_pane.add(week_frame, weight=1)
 
-    week_header = tk.Label(week_frame, text="—", anchor="w", font=("Arial", 10, "bold"))
-    week_header.pack(fill=tk.X)
+    week_strategy_label = tk.Label(
+        week_frame, text="—", anchor="w", font=("Arial", 10, "bold")
+    )
+    week_strategy_label.pack(fill=tk.X)
+    week_week_label = tk.Label(week_frame, text="", anchor="w", font=("Arial", 10))
+    week_week_label.pack(fill=tk.X)
     week_return_label = tk.Label(week_frame, text="", anchor="w")
     week_return_label.pack(fill=tk.X)
+    week_dates_label = tk.Label(
+        week_frame,
+        text="",
+        font=("Arial", 9),
+        anchor="w",
+        fg="gray",
+        wraplength=520,
+        justify=tk.LEFT,
+    )
+    week_dates_label.pack(fill=tk.X, pady=(0, 4))
 
-    picks_table = tk.Frame(week_frame)
-    picks_table.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-    _pick_cols = ("Rank", "ETF", "Price", "Quadrant", "Rank Δ", "Chg%", "Vol%")
-    _pick_col_anchors = ("e", "w", "e", "w", "e", "e", "e")
-    pick_header: list[tk.Label] = []
-    for c, h in enumerate(_pick_cols):
-        lbl = tk.Label(
-            picks_table,
-            text=h,
+    from momentum.rrg_portfolio_panel import (
+        PORTFOLIO_PANEL_GRID_KEYS,
+        PORTFOLIO_PANEL_HEADERS,
+    )
+
+    portfolio_table = tk.Frame(week_frame)
+    portfolio_table.pack(fill=tk.BOTH, expand=True, pady=(4, 2))
+    portfolio_header: list[tk.Label] = []
+    for col, (_key, header, anchor, min_px) in enumerate(PORTFOLIO_PANEL_HEADERS):
+        portfolio_table.columnconfigure(
+            col,
+            minsize=min_px,
+            weight=1 if _key in ("was", "now", "rebal") else 0,
+        )
+        hdr = tk.Label(
+            portfolio_table,
+            text=header,
             font=("Arial", 9, "bold"),
+            anchor=anchor,
             relief=tk.RIDGE,
             padx=4,
-            anchor=_pick_col_anchors[c],
+            pady=1,
         )
-        lbl.grid(row=0, column=c, sticky="ew")
-        pick_header.append(lbl)
+        hdr.grid(row=0, column=col, sticky="ew", padx=2)
+        portfolio_header.append(hdr)
     _MAX_TOP_N = 15
-    pick_rows: list[list[tk.Label]] = []
-    for r in range(_MAX_TOP_N):
+    portfolio_row_widgets: list[dict[str, tk.Label]] = []
+    portfolio_body_cells: list[list[tk.Label]] = []
+    for slot in range(_MAX_TOP_N):
+        widgets: dict[str, tk.Label] = {}
         row_cells: list[tk.Label] = []
-        for c in range(len(_pick_cols)):
+        grid_row = slot + 1
+        for col, (key, _header, anchor, _min_px) in enumerate(PORTFOLIO_PANEL_HEADERS):
+            font = ("Arial", 8) if key in ("tag", "pick_tag") else ("Arial", 9)
+            fg = "#1565C0" if key in ("tag", "pick_tag") else "black"
             lbl = tk.Label(
-                picks_table,
+                portfolio_table,
                 text="",
+                font=font,
+                anchor=anchor,
                 relief=tk.RIDGE,
                 padx=4,
-                anchor=_pick_col_anchors[c],
+                pady=1,
+                fg=fg,
             )
-            lbl.grid(row=r + 1, column=c, sticky="ew")
+            lbl.grid(row=grid_row, column=col, sticky="ew", padx=2)
+            widgets[key] = lbl
             row_cells.append(lbl)
-        pick_rows.append(row_cells)
+        portfolio_row_widgets.append(widgets)
+        portfolio_body_cells.append(row_cells)
 
     def _apply_top_n_rows(n: int | None = None) -> None:
         count = max(1, min(_MAX_TOP_N, int(n if n is not None else top_n_var.get())))
         panel_bg = win.cget("bg")
-        for i, row in enumerate(pick_rows):
+        for i, widgets in enumerate(portfolio_row_widgets):
+            grid_row = i + 1
             if i < count:
-                for c, lbl in enumerate(row):
-                    lbl.grid(row=i + 1, column=c, sticky="ew")
+                for col, (key, *_rest) in enumerate(PORTFOLIO_PANEL_HEADERS):
+                    widgets[key].grid(row=grid_row, column=col, sticky="ew", padx=2)
             else:
-                for lbl in row:
+                for key, lbl in widgets.items():
                     lbl.grid_remove()
                     lbl.config(text="", bg=panel_bg, fg="black")
 
@@ -342,20 +375,47 @@ def open_rrg_backtest(
     log_frame = tk.LabelFrame(bottom_pane, text="Rebalance log", padx=4, pady=4)
     bottom_pane.add(log_frame, weight=2)
 
-    log_cols = ("Week", "Rebal", "End", "Holdings", "Port%", "Bench%", "Value")
+    log_cols = (
+        "Week",
+        "Rebal",
+        "End",
+        "Holdings",
+        "Rebal_9EMA",
+        "Mid_9EMA",
+        "Exits",
+        "Port%",
+        "Bench%",
+        "Value",
+    )
     log_tree = ttk.Treeview(
         log_frame, columns=log_cols, show="headings", height=12, selectmode="extended"
     )
+    _log_heading = {
+        "Rebal_9EMA": "9EMA @ reb",
+        "Mid_9EMA": "9EMA mid-out",
+        "Port%": "Port%",
+        "Bench%": "Bench%",
+    }
     for col in log_cols:
-        log_tree.heading(col, text=col)
-        log_tree.column(col, width=100 if col != "Holdings" else 220, stretch=True)
+        log_tree.heading(col, text=_log_heading.get(col, col))
+        if col == "Holdings":
+            w = 160
+        elif col in ("Rebal_9EMA", "Mid_9EMA"):
+            w = 110
+        elif col == "Exits":
+            w = 200
+        else:
+            w = 88
+        log_tree.column(col, width=w, stretch=True)
     log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_tree.yview)
     log_tree.configure(yscrollcommand=log_scroll.set)
     log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
     _bt_copy = TableRegionCopy.for_window(win)
-    picks_copy_grid = _bt_copy.register_grid([pick_header, *pick_rows])
+    portfolio_copy_grid = _bt_copy.register_grid(
+        [portfolio_header, *portfolio_body_cells]
+    )
 
     def _set_busy(busy: bool, cursor: str = "") -> None:
         nonlocal _busy
@@ -422,30 +482,73 @@ def open_rrg_backtest(
         fig.tight_layout()
         canvas.draw_idle()
 
+    def _panel_exits_for_record(record: dict) -> list:
+        from momentum.rrg_portfolio_exits import (
+            exits_as_of_through_date,
+            filter_exits_portfolio_panel,
+        )
+        from momentum.rrg_portfolio_panel import norm_ticker
+
+        was_portfolio = list(record.get("Was_Portfolio") or [])
+        rebal_tickers = list(record.get("Rebalance_Tickers") or [])
+        rebal_ts = pd.Timestamp(record["Rebal_Date"])
+        exit_slices: list[tuple] = []
+        prev_rebal = record.get("Prev_Rebal_Date")
+        week_num = int(record.get("Week") or 0)
+        if (
+            prev_rebal is not None
+            and engine is not None
+            and week_num > 1
+            and len(engine._records) >= week_num - 1
+        ):
+            prev_rec = engine._records[week_num - 2]
+            exit_slices.append(
+                (pd.Timestamp(prev_rebal), prev_rec.get("Exits") or [])
+            )
+        exit_slices.append((rebal_ts, record.get("Exits") or []))
+        return filter_exits_portfolio_panel(
+            exits_as_of_through_date(exit_slices, rebal_ts),
+            prev_holdings=was_portfolio,
+            rebalance_holdings=[t for t in rebal_tickers if t],
+        )
+
+    def _clear_portfolio_row(widgets: dict[str, tk.Label], panel_bg: str) -> None:
+        for key, lbl in widgets.items():
+            fg = "#1565C0" if key in ("tag", "pick_tag") else "black"
+            lbl.config(text="", bg=panel_bg, fg=fg)
+
     def _clear_week_display() -> None:
-        week_header.config(text="—")
+        week_strategy_label.config(text="—")
+        week_week_label.config(text="")
         week_return_label.config(text="")
+        week_dates_label.config(text="")
         panel_bg = win.cget("bg")
         visible_rows = max(1, min(_MAX_TOP_N, int(top_n_var.get())))
-        for slot, row in enumerate(pick_rows):
+        for slot, widgets in enumerate(portfolio_row_widgets):
             if slot >= visible_rows:
                 continue
-            for lbl in row:
-                lbl.config(text="", bg=panel_bg, fg="black")
-        TableRegionCopy.for_window(win).sync_styles(picks_copy_grid)
+            _clear_portfolio_row(widgets, panel_bg)
+        TableRegionCopy.for_window(win).sync_styles(portfolio_copy_grid)
 
     def _show_week_record(record: dict | None) -> None:
+        from momentum.rrg_portfolio_panel import (
+            build_portfolio_panel,
+            norm_ticker,
+            portfolio_panel_dates_line,
+        )
+
         if record is None:
-            week_header.config(text="Done — all weeks processed.")
+            week_strategy_label.config(text="Done — all weeks processed.")
+            week_week_label.config(text="")
             week_return_label.config(text="")
+            week_dates_label.config(text="")
             panel_bg = win.cget("bg")
             visible_rows = max(1, min(_MAX_TOP_N, int(top_n_var.get())))
-            for slot, row in enumerate(pick_rows):
+            for slot, widgets in enumerate(portfolio_row_widgets):
                 if slot >= visible_rows:
                     continue
-                for lbl in row:
-                    lbl.config(text="", bg=panel_bg, fg="black")
-            TableRegionCopy.for_window(win).sync_styles(picks_copy_grid)
+                _clear_portfolio_row(widgets, panel_bg)
+            TableRegionCopy.for_window(win).sync_styles(portfolio_copy_grid)
             return
 
         rebal = pd.Timestamp(record["Rebal_Date"]).strftime("%Y-%m-%d")
@@ -453,13 +556,58 @@ def open_rrg_backtest(
         tail_start = record.get("Tail_Start")
         if tail_start is not None:
             tail_s = pd.Timestamp(tail_start).strftime("%Y-%m-%d")
-            header = (
+            week_line = (
                 f"Week {record['Week']} — as of {rebal} "
                 f"(tail {tail_s} → {rebal}) · hold → {end}"
             )
         else:
-            header = f"Week {record['Week']} — as of {rebal} · hold → {end}"
-        week_header.config(text=header)
+            week_line = f"Week {record['Week']} — as of {rebal} · hold → {end}"
+
+        if engine is not None and hasattr(engine, "portfolio_panel_context"):
+            ctx = engine.portfolio_panel_context(record)
+            was_portfolio = ctx["was_portfolio"]
+            was_ranks = ctx["was_ranks"]
+            was_label = ctx["was_label"]
+            rebal_ts = ctx["rebal_ts"]
+            prev_rebal_ts = ctx["prev_rebal_ts"]
+            strategy_tickers = ctx["strategy_tickers"]
+            rebal_tickers = ctx["rebal_tickers"]
+            curr_ranks = ctx["curr_ranks"]
+            pick_shortfall = ctx["pick_shortfall"]
+            end_prev_week_holdings = ctx["end_prev_week_holdings"]
+            panel_exits = ctx["panel_exits"]
+            mid_week_9ema = ctx["mid_week_9ema"]
+            rebalance_header = ctx["rebalance_label"]
+            exits_through_ts = ctx["end_ts"]
+        else:
+            rebal_ts = pd.Timestamp(record["Rebal_Date"])
+            was_portfolio = list(record.get("Was_Portfolio") or [])
+            rebal_tickers = list(record.get("Rebalance_Tickers") or [])
+            strategy_tickers = list(record.get("Strategy_Tickers") or rebal_tickers)
+            was_ranks = record.get("Was_Rank_At_Rebal") or {}
+            curr_ranks = record.get("Rank_At_Rebal") or {}
+            prev_rebal = record.get("Prev_Rebal_Date")
+            was_label = (
+                pd.Timestamp(prev_rebal).strftime("%Y-%m-%d")
+                if prev_rebal is not None
+                else "—"
+            )
+            rebalance_header = rebal
+            pick_shortfall = str(record.get("Pick_Shortfall") or "")
+            end_prev_week_holdings = None
+            panel_exits = _panel_exits_for_record(record)
+            mid_week_9ema = record.get("Mid_Week_9EMA") or []
+            exits_through_ts = pd.Timestamp(record["End_Date"])
+            prev_rebal_ts = (
+                pd.Timestamp(prev_rebal) if prev_rebal is not None else None
+            )
+            if engine is not None and not engine.trades_df.empty:
+                week_num = int(record.get("Week") or 0)
+                if week_num > 1:
+                    prev_row = engine.trades_df.iloc[week_num - 2]
+                    end_prev_week_holdings = list(
+                        prev_row.get("Held_Tickers") or []
+                    )
         week_return_label.config(
             text=(
                 f"Portfolio: {record['Port_Return'] * 100:+.2f}%  |  "
@@ -467,44 +615,151 @@ def open_rrg_backtest(
                 f"Value: {record['Portfolio_Value']:,.0f}"
             )
         )
-        picks = record.get("Picks") or []
-        pick_prices: dict[str, float | None] = record.get("Pick_Prices") or {}
-        rebal_ts = pd.Timestamp(record["Rebal_Date"])
+
+        strat_key = (
+            _pick_label_to_key.get(pick_strategy_var.get(), "recommend")
+            if _pick_label_to_key
+            else "recommend"
+        )
+        if profile in ("india", "us"):
+            from momentum.etf.india_rrg_pick_strategies import (
+                pick_strategy_label,
+                pick_strategy_subtitle,
+            )
+
+            subtitle = pick_strategy_subtitle(
+                strat_key,
+                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                max_hold_rank=int(max_hold_rank_var.get()),
+                exit_below_9ema=bool(exit_below_9ema_var.get()),
+            )
+            title = pick_strategy_label(
+                strat_key,
+                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                exit_below_9ema=bool(exit_below_9ema_var.get()),
+            )
+        else:
+            subtitle = ""
+            title = "Portfolio"
+        week_strategy_label.config(text=title)
+        week_week_label.config(text=week_line)
+        rebal_n = len([t for t in rebal_tickers if t])
+        week_dates_label.config(
+            text=portfolio_panel_dates_line(
+                rebalance_label=rebalance_header,
+                was_n=len(was_portfolio),
+                was_label=was_label,
+                rebal_n=rebal_n,
+                pick_shortfall=pick_shortfall,
+                exit_below_9ema=bool(exit_below_9ema_var.get()),
+                subtitle=subtitle,
+                exits_through_label=(
+                    pd.Timestamp(exits_through_ts).strftime("%Y-%m-%d")
+                    if exit_below_9ema_var.get()
+                    else None
+                ),
+            )
+        )
+
+        def _weekly_for_pnl(sym: str) -> pd.Series:
+            if engine is None:
+                return pd.Series(dtype=float)
+            if profile == "india":
+                return engine._ref_etf_weekly.get(
+                    sym.strip().upper().replace(".NS", ""),
+                    pd.Series(dtype=float),
+                )
+            return engine._row_price_weekly.get(sym, pd.Series(dtype=float))
+
+        def _daily_for_pnl(sym: str) -> pd.Series | None:
+            if engine is None:
+                return None
+            bare = sym.strip().upper().replace(".NS", "")
+            if profile == "india":
+                daily = engine._ref_etf_daily.get(bare, pd.Series(dtype=float))
+            else:
+                daily = engine._etf_daily.get(bare, pd.Series(dtype=float))
+            return daily if daily is not None and len(daily) else None
+
+        def _was_rank(ticker: str) -> int | None:
+            rk = was_ranks.get(norm_ticker(ticker))
+            return int(rk) if rk is not None else None
+
+        def _curr_rank(ticker: str) -> int | None:
+            rk = curr_ranks.get(norm_ticker(ticker))
+            return int(rk) if rk is not None else None
+
+        panel_rows = build_portfolio_panel(
+            prev_portfolio=was_portfolio,
+            rebal_strategy=strategy_tickers,
+            rebal_tickers=rebal_tickers,
+            end_prev_week_holdings=end_prev_week_holdings,
+            panel_exits=panel_exits,
+            rebalance_ts=rebal_ts,
+            prev_rebalance_ts=prev_rebal_ts,
+            weekly_for_ticker=_weekly_for_pnl,
+            daily_for_ticker=_daily_for_pnl,
+            was_rank_for_ticker=_was_rank,
+            curr_rank_for_ticker=_curr_rank,
+            exit_below_9ema=bool(exit_below_9ema_var.get()),
+            mid_week_9ema=mid_week_9ema,
+        )
         panel_bg = win.cget("bg")
         visible_rows = max(1, min(_MAX_TOP_N, int(top_n_var.get())))
-        for slot, row in enumerate(pick_rows):
+        max_rows = max(len(panel_rows), 1)
+        for slot, widgets in enumerate(portfolio_row_widgets):
             if slot >= visible_rows:
                 continue
-            if slot >= len(picks):
-                for lbl in row:
-                    lbl.config(text="", bg=panel_bg, fg="black")
-                continue
-            p = picks[slot]
-            bg = prof.recommendation_row_bg(p.quadrant)
-            fg = rrg_row_fg_color(bg)
-            price = pick_prices.get(p.ticker)
-            if price is None and engine is not None:
-                price = engine.ref_price_at(p.ticker, rebal_ts)
-            price_text = f"{price:.2f}" if price is not None else ""
-            vals = (
-                str(p.pick_rank),
-                p.ticker,
-                price_text,
-                p.quadrant,
-                p.rank_delta,
-                f"{p.change_pct:.2f}",
-                prof.format_vol_pct(p.vol_pct),
-            )
-            for lbl, val in zip(row, vals):
-                lbl.config(text=val, bg=bg, fg=fg)
-        TableRegionCopy.for_window(win).sync_styles(picks_copy_grid)
+            grid_row = slot + 1
+            if slot < len(panel_rows):
+                row = panel_rows[slot]
+                was_text = row["was_text"]
+                now_text = row["now_text"]
+                move = row["move"]
+                rebal_text = row["rebal_text"]
+                pick_tag = row["pick"]
+                pnl_text = row["pnl"]
+                mid_9ema_text = row.get("mid_9ema", "")
+                now_fg = row.get("now_fg", "black")
+                rebal_fg = row.get("rebal_fg", "black")
+                mid_fg = row.get("mid_fg", "black")
+            else:
+                was_text = now_text = move = rebal_text = pick_tag = pnl_text = ""
+                mid_9ema_text = ""
+                now_fg = rebal_fg = mid_fg = "black"
+            if slot < max_rows:
+                widgets["rank"].config(text=str(slot + 1))
+                widgets["was"].config(text=was_text)
+                widgets["now"].config(text=now_text, fg=now_fg)
+                widgets["tag"].config(text=move)
+                widgets["rebal"].config(text=rebal_text, fg=rebal_fg)
+                widgets["pick_tag"].config(text=pick_tag)
+                widgets["pnl"].config(text=pnl_text)
+                widgets["mid_9ema"].config(text=mid_9ema_text, fg=mid_fg)
+                for col, key in enumerate(PORTFOLIO_PANEL_GRID_KEYS):
+                    widgets[key].grid(
+                        row=grid_row, column=col, sticky="ew", padx=2, pady=1
+                    )
+            else:
+                _clear_portfolio_row(widgets, panel_bg)
+                for w in widgets.values():
+                    w.grid_remove()
+        TableRegionCopy.for_window(win).sync_styles(portfolio_copy_grid)
 
     def _refresh_log_table() -> None:
+        from momentum.rrg_portfolio_exits import format_exit_summary
+
         for item in log_tree.get_children():
             log_tree.delete(item)
         if engine is None or engine.trades_df.empty:
             return
         for _, row in engine.trades_df.iterrows():
+            rebal_tickers = row.get("Rebalance_Tickers")
+            exits = row.get("Exits") or []
+            exit_text = format_exit_summary(
+                exits,
+                rebalance_tickers=list(rebal_tickers) if rebal_tickers else None,
+            )
             log_tree.insert(
                 "",
                 tk.END,
@@ -513,6 +768,9 @@ def open_rrg_backtest(
                     pd.Timestamp(row["Rebal_Date"]).strftime("%Y-%m-%d"),
                     pd.Timestamp(row["End_Date"]).strftime("%Y-%m-%d"),
                     row["Holdings"],
+                    row.get("Rebal_9EMA_Label") or "—",
+                    row.get("Mid_Week_9EMA_Label") or "—",
+                    exit_text or "—",
                     f"{row['Port_Return'] * 100:+.2f}",
                     f"{row['Bench_Return'] * 100:+.2f}",
                     f"{row['Portfolio_Value']:,.0f}",
@@ -550,6 +808,9 @@ def open_rrg_backtest(
             kw["max_hold_rank"] = int(max_hold_rank_var.get())
             kw["exit_below_9ema"] = bool(exit_below_9ema_var.get())
         if profile == "us":
+            row_ids = bt_extra.get("universe_row_ids")
+            if row_ids:
+                kw["universe_row_ids"] = tuple(row_ids)
             kw.update(
                 {
                     k: v
@@ -574,8 +835,10 @@ def open_rrg_backtest(
         )
         if profile == "us":
             base = base or (
-                getattr(stored, "universe_mode", "expanded")
-                != getattr(ui, "universe_mode", "expanded")
+                tuple(getattr(stored, "universe_row_ids", None) or ())
+                != tuple(getattr(ui, "universe_row_ids", None) or ())
+                or getattr(stored, "universe_mode", "core")
+                != getattr(ui, "universe_mode", "core")
                 or getattr(stored, "min_adv_usd", 0) != getattr(ui, "min_adv_usd", 0)
                 or getattr(stored, "vol_percentile", 100)
                 != getattr(ui, "vol_percentile", 100)

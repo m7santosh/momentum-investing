@@ -14,6 +14,14 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import FancyArrowPatch
 from tkinter import ttk
 
+from momentum.rrg_portfolio_panel import (
+    PORTFOLIO_PANEL_GRID_KEYS,
+    PORTFOLIO_PANEL_HEADERS,
+    build_portfolio_panel,
+    format_portfolio_cell,
+    norm_ticker as _norm_ticker,
+    portfolio_panel_dates_line,
+)
 from momentum.rrg_ranking import (
     format_change_pct,
     format_rank_delta,
@@ -89,7 +97,7 @@ class RrgAppConfig:
     pick_strategy: str = "recommend"
     hold_until_rank_exit: bool = False
     max_hold_rank: int = 10
-    exit_below_9ema: bool = False
+    exit_below_9ema: bool = True
     backtest_enabled: bool = False
     backtest_profile: str = "india"  # "india" | "us"
     backtest_universe_mode: str = "expanded"  # US: "core" | "expanded"
@@ -98,10 +106,12 @@ class RrgAppConfig:
     backtest_categories: tuple[str, ...] = ("all",)
 
 
+_PORTFOLIO_N_MAX = 25
+
+
 def run_rrg_app(config: RrgAppConfig) -> None:
     """Build UI, load data, and run the RRG main loop."""
-    recommend_in_side = config.etf_table_extras and config.top_movers_panel
-    use_right_extras = recommend_in_side
+    use_right_extras = config.etf_table_extras and config.top_movers_panel
     period = config.analysis_period
     window = config.rrg_window
     bar_unit = "week"
@@ -295,6 +305,67 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             except Exception as exc:
                 print(f"Vol% load skipped: {exc}")
 
+    _etf_daily_close: dict[str, pd.Series] = {}
+
+    def _load_etf_daily_close_data() -> None:
+        """CM/Yahoo daily closes for ETF rows (9 EMA, exit P&L, portfolio panel)."""
+        if _etf_daily_close:
+            return
+        from datetime import timedelta
+
+        from utils.nse_bhavcopy import today_ist
+
+        end_d = today_ist()
+        start_d = (_rrg_index[0].date() if len(_rrg_index) else end_d) - timedelta(
+            days=400
+        )
+        if config.etf_recommend_profile == "india":
+            from utils.nse_bhavcopy import load_nse_cm_histories_range
+
+            syms = {
+                (index_metadata["ref_label"][j] or indices[j])
+                .strip()
+                .upper()
+                .replace(".NS", "")
+                for j in range(len(indices))
+            }
+            syms.discard("")
+            print(
+                f"Loading NSE ETF daily CM (bhavcopy) for "
+                f"{len(syms)} symbol(s)..."
+            )
+            batch = load_nse_cm_histories_range(
+                sorted(syms),
+                start_d,
+                end_d,
+                min_points=5,
+                quiet=True,
+                asset_label="ETF symbol",
+                freq="day",
+            )
+            for sym, series in batch.items():
+                if len(series):
+                    _etf_daily_close[sym] = series.sort_index()
+        else:
+            from utils.yahoo_weekly import load_yahoo_histories_range
+
+            tickers = [t for t in indices if t != config.benchmark_nse]
+            print(f"Loading daily prices for {len(tickers)} ticker(s)...")
+            batch = load_yahoo_histories_range(
+                tickers,
+                start_d,
+                end_d,
+                min_points=5,
+                quiet=True,
+                freq="day",
+            )
+            for sym, series in batch.items():
+                if len(series):
+                    _etf_daily_close[sym] = series.sort_index()
+
+    if config.etf_table_extras or config.exit_below_9ema:
+        _load_etf_daily_close_data()
+
     def update_rrg():
         """Recompute RSR/RSM for every row (same length as ``indices``)."""
         nonlocal rs_tickers, rsr_tickers, rsr_roc_tickers, rsm_tickers
@@ -311,6 +382,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             rsm_tickers[i] = rsm
 
     root = tk.Tk()
+    root.withdraw()
     root.title(config.window_title)
     root.geometry('1600x900' if use_right_extras else ('1400x900' if config.top_movers_panel else '1100x900'))
     root.minsize(1280 if use_right_extras else (1280 if config.top_movers_panel else 900), 650)
@@ -710,14 +782,24 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     _pick_holdings_cache: dict[int, list[str]] = {}
     _active_holdings_cache: dict[int, list[str]] = {}
-    _etf_daily_close: dict[str, pd.Series] = {}
+    _week_exits_cache: dict[int, list] = {}
+    _mid_week_9ema_cache: dict[int, list] = {}
     _current_pick_row_indices: set[int] = set()
     pick_strategy_var = tk.StringVar()
     hold_until_rank_exit_var = tk.BooleanVar(value=config.hold_until_rank_exit)
     exit_below_9ema_var = tk.BooleanVar(value=config.exit_below_9ema)
     max_hold_rank_var = tk.IntVar(value=config.max_hold_rank)
+    portfolio_n_var: tk.IntVar | None = tk.IntVar(value=config.etf_recommend_count)
     pick_auto_show_var = tk.BooleanVar(value=True)
     _pick_label_to_key: dict[str, str] = {}
+
+    def _portfolio_top_n() -> int:
+        if portfolio_n_var is not None:
+            try:
+                return max(1, min(int(portfolio_n_var.get()), _PORTFOLIO_N_MAX))
+            except (tk.TclError, ValueError):
+                pass
+        return config.etf_recommend_count
 
     if config.etf_table_extras:
         from momentum.etf.india_rrg_pick_strategies import (
@@ -734,7 +816,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         def _clear_pick_cache() -> None:
             _pick_holdings_cache.clear()
             _active_holdings_cache.clear()
-            _etf_daily_close.clear()
+            _week_exits_cache.clear()
+            _mid_week_9ema_cache.clear()
             _current_pick_row_indices.clear()
 
         pick_row = tk.Frame(controls_frame)
@@ -766,6 +849,14 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             width=4,
             textvariable=max_hold_rank_var,
         )
+        tk.Label(pick_row, text="Portfolio N:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Spinbox(
+            pick_row,
+            from_=1,
+            to=_PORTFOLIO_N_MAX,
+            width=4,
+            textvariable=portfolio_n_var,
+        ).pack(side=tk.LEFT, padx=(0, 12))
 
         def _toggle_max_hold_rank_ui(*_) -> None:
             if hold_until_rank_exit_var.get():
@@ -792,11 +883,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             pass
 
         hold_until_rank_exit_var = tk.BooleanVar(value=False)
-        exit_below_9ema_var = tk.BooleanVar(value=False)
+        exit_below_9ema_var = tk.BooleanVar(value=config.exit_below_9ema)
         max_rank_lbl = None
         max_rank_spin = None
         hold_rank_cb = None
         pick_auto_show_cb = None
+        portfolio_n_var = None
 
     if config.backtest_enabled:
         def open_backtest():
@@ -807,11 +899,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 profile=config.backtest_profile,
                 rrg_window=window,
                 tail=int(float(tail_scale.get())),
-                top_n=config.etf_recommend_count,
+                top_n=_portfolio_top_n(),
                 backtest_extra={
                     **(
                         {
                             "universe_mode": config.backtest_universe_mode,
+                            "universe_row_ids": tuple(indices),
                             "min_adv_usd": config.backtest_min_adv,
                             "vol_percentile": config.backtest_vol_percentile,
                             "screen_categories": config.backtest_categories,
@@ -971,7 +1064,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     _side_pane_auto = True
 
     movers_panel = None
+    movers_title_label = None
     movers_dates_label = None
+    movers_exits_label = None
     movers_row_widgets: list[dict[str, tk.Label]] = []
     side_panel = None
     side_content = None
@@ -998,7 +1093,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             widget.bind('<Button-5>', _on_side_mousewheel)
 
     def _build_movers_panel(parent: tk.Frame) -> None:
-        nonlocal movers_panel, movers_dates_label
+        nonlocal movers_panel, movers_title_label, movers_dates_label, movers_exits_label
+        nonlocal movers_copy_grid
         movers_panel = tk.Frame(
             parent,
             padx=6,
@@ -1006,13 +1102,19 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             relief=tk.GROOVE,
             borderwidth=1,
         )
-        movers_panel.pack(side=tk.TOP, anchor='nw', fill=tk.X)
-        tk.Label(
+        movers_panel.pack(
+            side=tk.TOP,
+            anchor='nw',
+            fill=tk.BOTH if use_right_extras else tk.X,
+            expand=bool(use_right_extras),
+        )
+        movers_title_label = tk.Label(
             movers_panel,
             text=config.top_movers_title,
             font=('Arial', 10, 'bold'),
             anchor='w',
-        ).pack(fill=tk.X)
+        )
+        movers_title_label.pack(fill=tk.X)
         movers_dates_label = tk.Label(
             movers_panel,
             text='',
@@ -1023,41 +1125,54 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             justify=tk.LEFT,
         )
         movers_dates_label.pack(fill=tk.X, pady=(0, 4))
-        hdr = tk.Frame(movers_panel)
-        hdr.pack(fill=tk.X)
-        for col, (text, width, anchor) in enumerate(
-            [
-                ('#', 2, 'e'),
-                ('Was', 18, 'w'),
-                ('Now', 18, 'w'),
-            ]
-        ):
-            tk.Label(
-                hdr,
-                text=text,
-                font=('Arial', 9, 'bold'),
-                width=width,
-                anchor=anchor,
-            ).grid(row=0, column=col, sticky='ew')
-        hdr.columnconfigure(1, weight=1)
-        hdr.columnconfigure(2, weight=1)
-        body = tk.Frame(movers_panel)
-        body.pack(fill=tk.X)
-        for _ in range(config.top_movers_count):
-            row = tk.Frame(body)
-            row.pack(fill=tk.X, pady=1)
-            movers_row_widgets.append(
-                {
-                    'rank': tk.Label(row, font=('Arial', 9), width=2, anchor='e'),
-                    'was': tk.Label(row, font=('Arial', 9), width=18, anchor='w'),
-                    'now': tk.Label(row, font=('Arial', 9), width=18, anchor='w'),
-                }
+
+        slot_count = max(
+            config.top_movers_count, config.etf_recommend_count, _PORTFOLIO_N_MAX
+        )
+        movers_table = tk.Frame(movers_panel)
+        movers_table.pack(fill=tk.X)
+        movers_header_cells: list[tk.Label] = []
+        for col, (_key, header, anchor, min_px) in enumerate(PORTFOLIO_PANEL_HEADERS):
+            movers_table.columnconfigure(
+                col,
+                minsize=min_px,
+                weight=1 if _key in ("was", "now", "rebal") else 0,
             )
-            movers_row_widgets[-1]['rank'].grid(row=0, column=0, sticky='e')
-            movers_row_widgets[-1]['was'].grid(row=0, column=1, sticky='w')
-            movers_row_widgets[-1]['now'].grid(row=0, column=2, sticky='w')
-            row.columnconfigure(1, weight=1)
-            row.columnconfigure(2, weight=1)
+            hdr = tk.Label(
+                movers_table,
+                text=header,
+                font=('Arial', 9, 'bold'),
+                anchor=anchor,
+                relief=tk.RIDGE,
+            )
+            hdr.grid(row=0, column=col, sticky='ew', padx=2, pady=1)
+            movers_header_cells.append(hdr)
+
+        movers_body_cells: list[list[tk.Label]] = []
+        for slot in range(slot_count):
+            widgets: dict[str, tk.Label] = {}
+            grid_row = slot + 1
+            row_cells: list[tk.Label] = []
+            for col, (key, _header, anchor, _min_px) in enumerate(PORTFOLIO_PANEL_HEADERS):
+                font = ('Arial', 8) if key in ('tag', 'pick_tag', 'mid_9ema') else ('Arial', 9)
+                fg = '#1565C0' if key in ('tag', 'pick_tag') else 'black'
+                lbl = tk.Label(
+                    movers_table,
+                    font=font,
+                    anchor=anchor,
+                    relief=tk.RIDGE,
+                    fg=fg,
+                )
+                lbl.grid(row=grid_row, column=col, sticky='ew', padx=2, pady=1)
+                widgets[key] = lbl
+                row_cells.append(lbl)
+            movers_row_widgets.append(widgets)
+            movers_body_cells.append(row_cells)
+
+        movers_copy_grid = TableRegionCopy.for_window(root).register_grid(
+            [movers_header_cells, *movers_body_cells]
+        )
+        movers_exits_label = None
 
     if use_right_extras:
         tables_pane = ttk.PanedWindow(tables_row, orient=tk.HORIZONTAL)
@@ -1094,10 +1209,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             req_w = side_content.winfo_reqwidth()
             if cw > 1:
                 side_canvas.itemconfigure(_side_canvas_win, width=max(cw, req_w))
-            if movers_dates_label is not None and side_panel is not None:
+            if side_panel is not None:
                 panel_w = side_panel.winfo_width()
                 if panel_w > 1:
-                    movers_dates_label.config(wraplength=max(panel_w - 24, 200))
+                    wrap = max(panel_w - 24, 200)
+                    if movers_dates_label is not None:
+                        movers_dates_label.config(wraplength=wrap)
 
         def _save_side_pane_sash(_event=None):
             nonlocal _side_pane_sash_pos, _side_pane_auto
@@ -1166,11 +1283,13 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     recommend_dates_label = None
     recommend_row_widgets: list[dict[str, tk.Label]] = []
     recommend_copy_grid: dict | None = None
+    recommend_exits_label: tk.Label | None = None
     main_table_copy_grid: dict | None = None
     movers_copy_grid: dict | None = None
 
     def _build_recommend_panel(parent: tk.Frame, *, pack_mode: str | None) -> None:
         nonlocal recommend_panel, recommend_dates_label, recommend_copy_grid
+        nonlocal recommend_exits_label
         recommend_panel = tk.Frame(
             parent,
             padx=6,
@@ -1207,7 +1326,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         rec_canvas = tk.Canvas(
             recommend_panel,
             highlightthickness=0,
-            height=24 * (config.etf_recommend_count + 1) + 8,
+            height=24 * (_PORTFOLIO_N_MAX + 1) + 8,
             xscrollcommand=rec_scroll_x.set,
         )
         rec_scroll_x.config(command=rec_canvas.xview)
@@ -1255,7 +1374,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             rec_header_cells.append(hdr)
 
         rec_body_cells: list[list[tk.Label]] = []
-        for slot in range(config.etf_recommend_count):
+        for slot in range(_PORTFOLIO_N_MAX):
             widgets: dict[str, tk.Label] = {}
             grid_row = slot + 1
             row_cells: list[tk.Label] = []
@@ -1273,14 +1392,22 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         tc = TableRegionCopy.for_window(root)
         recommend_copy_grid = tc.register_grid([rec_header_cells, *rec_body_cells])
 
+        recommend_exits_label = tk.Label(
+            recommend_panel,
+            text="",
+            font=("Arial", 8),
+            anchor="nw",
+            fg="#5d4037",
+            justify=tk.LEFT,
+            wraplength=520,
+        )
+
     if use_right_extras and side_content is not None:
-        _build_recommend_panel(side_content, pack_mode='top')
         _bind_side_mousewheel(
             side_panel,
             side_canvas,
             side_content,
             movers_panel,
-            recommend_panel,
         )
 
     scroll_wrap = tk.Frame(tables_pane if use_right_extras else tables_row)
@@ -1691,62 +1818,391 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
         return ranked_row_indices(len(indices), change_pct_fn)
 
-    def _movers_cell_text(row_idx: int, table_rank: int | str) -> str:
-        ref = (
-            index_metadata['ref_label'][row_idx]
-            or index_metadata['display'][row_idx]
-        )
-        return f"{ref} ({table_rank})"
+    def _row_index_for_ticker(ticker: str) -> int | None:
+        bare = ticker.strip().upper().replace(".NS", "")
+        etf_j: int | None = None
+        other_j: int | None = None
+        for j, row_id in enumerate(indices):
+            ref = (index_metadata["ref_label"][j] or row_id).strip().upper().replace(
+                ".NS", ""
+            )
+            if bare not in (ref, row_id.upper().replace(".NS", "")):
+                continue
+            if index_metadata["kind"][j] == "etf":
+                etf_j = j
+            elif other_j is None:
+                other_j = j
+        return etf_j if etf_j is not None else other_j
 
-    def refresh_top_movers_panel(now_ranked: list[int] | None = None):
-        """Top-N main-table rows: Was = prior week top-N, Now = current top-N."""
+    def _portfolio_cell_text(ticker: str, week_idx: int) -> str:
+        if not ticker:
+            return ""
+        j = _row_index_for_ticker(ticker)
+        if j is None:
+            return ticker
+        rk = _rank_by_row(week_idx).get(j)
+        return format_portfolio_cell(ticker, rk)
+
+    def _rebal_tickers_table_order(picks, ranked: list[int]) -> list[str]:
+        """Top N tickers in main-table momentum rank order (same as ★ rows)."""
+        by_row = {p.row_idx: p.ticker for p in picks}
+        return [by_row[j] for j in ranked if j in by_row]
+
+    def _prior_week_top_n_portfolio(end_date_idx_local: int) -> list[str]:
+        """Prior week's Top N list in ★ order (must match that week's Top N column)."""
+        prev_idx = end_date_idx_local - 1
+        if prev_idx < tail or prev_idx < _date_slider_min_idx():
+            return []
+        if prev_idx in _pick_holdings_cache:
+            return list(_pick_holdings_cache[prev_idx])
+        end_ts_p = _rrg_index[prev_idx]
+        start_ts_p = _rrg_index[prev_idx - tail]
+        curr_p = _rank_by_row(prev_idx)
+        prev_r_p = _rank_by_row(prev_idx - 1) if prev_idx > tail else {}
+        ranked_p = sorted(
+            range(len(indices)),
+            key=lambda j: _tail_change_pct(j, start_ts_p, end_ts_p),
+            reverse=True,
+        )
+        rank_delta_p: dict[int, str] = {}
+        for j in ranked_p:
+            rank_delta_p[j] = format_rank_delta(
+                curr_p.get(j, len(indices)), prev_r_p.get(j)
+            )
+        picks_p = _compute_picks_at_week(
+            prev_idx,
+            ranked_p,
+            end_ts_p,
+            start_ts_p,
+            rank_delta_p,
+            curr_p,
+            prev_r_p,
+        )
+        rebal_strategy_p = _rebal_tickers_table_order(picks_p, ranked_p)
+        if exit_below_9ema_var.get():
+            rebal_slots_p, _ = _rebal_slots_after_9ema(rebal_strategy_p, end_ts_p)
+            return rebal_slots_p
+        return rebal_strategy_p
+
+    def _end_prev_week_holdings(prev_date_idx: int | None) -> list[str] | None:
+        """Week-end holdings after prior rebalance week (for Now column)."""
+        if prev_date_idx is None or prev_date_idx < tail:
+            return None
+        if prev_date_idx in _active_holdings_cache:
+            return list(_active_holdings_cache[prev_date_idx])
+        if prev_date_idx in _pick_holdings_cache:
+            return [t for t in _pick_holdings_cache[prev_date_idx] if t]
+        return None
+
+    def _panel_rebal_idx(end_date_idx_local: int) -> int:
+        """Hold-week rebalance bar for portfolio panel (matches backtest Current week)."""
+        if end_date_idx_local <= tail:
+            return end_date_idx_local
+        end_ts_local = _rrg_index[end_date_idx_local]
+        for k in range(end_date_idx_local, tail - 1, -1):
+            if k + 1 < len(_rrg_index):
+                week_start = _rrg_index[k]
+                week_end = _rrg_index[k + 1]
+                if week_start <= end_ts_local <= week_end:
+                    return k
+        return max(tail, end_date_idx_local - 1)
+
+    def _panel_week_picks(end_date_idx_local: int):
+        """Strategy picks at hold-week rebalance (same as portfolio Top N panel)."""
+        panel_rebal_idx = _panel_rebal_idx(end_date_idx_local)
+        panel_rebal_ts = _rrg_index[panel_rebal_idx]
+        panel_start_ts = _rrg_index[panel_rebal_idx - tail]
+        panel_curr_ranks = _rank_by_row(panel_rebal_idx)
+        prev_panel_idx = panel_rebal_idx - 1 if panel_rebal_idx > tail else None
+        panel_prev_ranks = (
+            _rank_by_row(prev_panel_idx) if prev_panel_idx is not None else {}
+        )
+        panel_ranked = _ranked_rows_at(panel_rebal_idx)
+        panel_rank_delta: dict[int, str] = {}
+        for j in panel_ranked:
+            panel_rank_delta[j] = format_rank_delta(
+                panel_curr_ranks.get(j, len(indices)),
+                panel_prev_ranks.get(j),
+            )
+        if _portfolio_cache_enabled():
+            _warm_pick_holdings_cache(panel_rebal_idx)
+        return _strategy_picks_for_week(
+            panel_rebal_idx,
+            panel_ranked,
+            panel_rebal_ts,
+            panel_start_ts,
+            panel_rank_delta,
+            panel_curr_ranks,
+            panel_prev_ranks,
+        )
+
+    def refresh_top_movers_panel(
+        now_ranked: list[int] | None = None,
+        *,
+        picks=None,
+        end_ts=None,
+        start_ts=None,
+        rank_delta_by_row: dict[int, str] | None = None,
+        curr_ranks: dict[int, int] | None = None,
+        prev_ranks: dict[int, int] | None = None,
+    ):
+        """Portfolio Was vs Now: prior holdings, rebalance picks, exits with P&L."""
         if not config.top_movers_panel or movers_dates_label is None:
             return
         end_date_idx_local = int(date_scale.get())
-        prev_date_idx = (
-            end_date_idx_local - 1 if end_date_idx_local > tail else None
+        panel_rebal_idx = _panel_rebal_idx(end_date_idx_local)
+        panel_end_idx = min(panel_rebal_idx + 1, len(_rrg_index) - 1)
+        panel_rebal_ts = _rrg_index[panel_rebal_idx]
+        panel_end_ts = _rrg_index[panel_end_idx]
+        prev_panel_idx = panel_rebal_idx - 1 if panel_rebal_idx > tail else None
+
+        panel_start_ts = _rrg_index[panel_rebal_idx - tail]
+        panel_curr_ranks = _rank_by_row(panel_rebal_idx)
+        panel_prev_ranks = (
+            _rank_by_row(prev_panel_idx) if prev_panel_idx is not None else {}
         )
-        curr_ranks = _rank_by_row(end_date_idx_local)
-        if now_ranked is None:
-            now_ranked = _ranked_rows_at(end_date_idx_local)
-        now_top_rows = now_ranked[: config.top_movers_count]
-        was_top_rows = (
-            _ranked_rows_at(prev_date_idx)[: config.top_movers_count]
-            if prev_date_idx is not None
-            else []
-        )
-        now_label = format_date_label(end_date_idx_local)
-        was_label = (
-            format_date_label(prev_date_idx)
-            if prev_date_idx is not None
-            else '—'
+        panel_ranked = _ranked_rows_at(panel_rebal_idx)
+        panel_rank_delta: dict[int, str] = {}
+        for j in panel_ranked:
+            panel_rank_delta[j] = format_rank_delta(
+                panel_curr_ranks.get(j, len(indices)),
+                panel_prev_ranks.get(j),
+            )
+
+        if _portfolio_cache_enabled():
+            _warm_pick_holdings_cache(panel_rebal_idx)
+        panel_picks = _panel_week_picks(end_date_idx_local)
+
+        from momentum.etf.india_rrg_pick_strategies import (
+            pick_strategy_label,
+            pick_strategy_subtitle,
         )
 
+        prev_portfolio = (
+            _prior_week_top_n_portfolio(panel_rebal_idx)
+            if panel_rebal_idx > tail
+            else []
+        )
+        rebal_strategy = _rebal_tickers_table_order(panel_picks, panel_ranked)
+        if panel_rebal_idx in _pick_holdings_cache:
+            rebal_tickers = list(_pick_holdings_cache[panel_rebal_idx])
+        elif exit_below_9ema_var.get():
+            rebal_tickers, _ = _rebal_slots_after_9ema(rebal_strategy, panel_rebal_ts)
+        else:
+            rebal_tickers = list(rebal_strategy)
+        from momentum.rrg_portfolio_exits import (
+            exits_as_of_through_date,
+            filter_exits_portfolio_panel,
+        )
+
+        exit_slices: list[tuple] = []
+        if prev_panel_idx is not None and prev_panel_idx >= tail:
+            exit_slices.append(
+                (
+                    _rrg_index[prev_panel_idx],
+                    _week_exits_cache.get(prev_panel_idx, []),
+                )
+            )
+        exit_slices.append(
+            (panel_rebal_ts, _week_exits_cache.get(panel_rebal_idx, []))
+        )
+        week_exits = filter_exits_portfolio_panel(
+            exits_as_of_through_date(exit_slices, panel_end_ts),
+            prev_holdings=prev_portfolio,
+            rebalance_holdings=[t for t in rebal_tickers if t],
+        )
+
+        was_label = (
+            format_date_label(prev_panel_idx)
+            if prev_panel_idx is not None
+            else "—"
+        )
+        rebalance_label = format_date_label(panel_rebal_idx)
+        subtitle = pick_strategy_subtitle(
+            _pick_strategy_key(),
+            hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+            max_hold_rank=int(max_hold_rank_var.get()),
+            exit_below_9ema=bool(exit_below_9ema_var.get()),
+        )
+        if movers_title_label is not None:
+            movers_title_label.config(
+                text=pick_strategy_label(
+                    _pick_strategy_key(),
+                    hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                    exit_below_9ema=bool(exit_below_9ema_var.get()),
+                )
+            )
+        n_port = _portfolio_top_n()
+        was_n = len([t for t in prev_portfolio if t])
+        rebal_n = len([t for t in rebal_tickers if t])
+        pick_shortfall = ""
+        if config.etf_table_extras and rebal_n < n_port:
+            if config.etf_recommend_profile == "india":
+                from momentum.etf.india_rrg_pick_strategies import (
+                    IndiaPickContext,
+                    pick_shortfall_hint,
+                )
+
+                vol_by_ref = {
+                    (index_metadata["ref_label"][j] or indices[j])
+                    .upper()
+                    .replace(".NS", ""): etf_vol_by_row.get(j, 0.0)
+                    for j in range(len(indices))
+                }
+                pick_shortfall = pick_shortfall_hint(
+                    _pick_strategy_key(),
+                    IndiaPickContext(
+                        ranked_row_indices=panel_ranked,
+                        indices=indices,
+                        ref_labels=index_metadata["ref_label"],
+                        display_labels=index_metadata["display"],
+                        vol_by_ref=vol_by_ref,
+                        end_ts=panel_rebal_ts,
+                        rsr_series_by_row=rsr_tickers,
+                        rsm_series_by_row=rsm_tickers,
+                        rank_delta_by_row=panel_rank_delta,
+                        change_pct_fn=lambda j: _tail_change_pct(
+                            j, panel_start_ts, panel_rebal_ts
+                        ),
+                        series_at_fn=series_at,
+                        curr_ranks=panel_curr_ranks,
+                        prev_ranks=panel_prev_ranks,
+                        top_n=n_port,
+                        prev_holdings=prev_portfolio,
+                        hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                        max_hold_rank=int(max_hold_rank_var.get()),
+                    ),
+                    rebal_n,
+                )
+            else:
+                from momentum.etf.us_rrg_pick_strategies import (
+                    UsPickContext,
+                    pick_shortfall_hint,
+                )
+
+                vol_by_ticker = {
+                    indices[j]: etf_vol_by_row.get(j, 0.0)
+                    for j in range(len(indices))
+                }
+                pick_shortfall = pick_shortfall_hint(
+                    _pick_strategy_key(),
+                    UsPickContext(
+                        ranked_row_indices=panel_ranked,
+                        indices=indices,
+                        display_labels=index_metadata["display"],
+                        vol_by_ticker=vol_by_ticker,
+                        end_ts=panel_rebal_ts,
+                        rsr_series_by_row=rsr_tickers,
+                        rsm_series_by_row=rsm_tickers,
+                        rank_delta_by_row=panel_rank_delta,
+                        change_pct_fn=lambda j: _tail_change_pct(
+                            j, panel_start_ts, panel_rebal_ts
+                        ),
+                        series_at_fn=series_at,
+                        curr_ranks=panel_curr_ranks,
+                        prev_ranks=panel_prev_ranks,
+                        top_n=n_port,
+                        prev_holdings=prev_portfolio,
+                        hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                        max_hold_rank=int(max_hold_rank_var.get()),
+                    ),
+                    rebal_n,
+                )
+        was_week = prev_panel_idx if prev_panel_idx is not None else panel_rebal_idx
+        prev_rebal_ts = (
+            _rrg_index[prev_panel_idx] if prev_panel_idx is not None else None
+        )
+
+        def _prices_for_pnl(sym: str) -> tuple[pd.Series, pd.Series | None]:
+            weekly, daily = _etf_price_series(sym)
+            return weekly, daily if len(daily) else None
+
+        def _weekly_for_pnl(sym: str) -> pd.Series:
+            return _prices_for_pnl(sym)[0]
+
+        def _daily_for_pnl(sym: str) -> pd.Series | None:
+            return _prices_for_pnl(sym)[1]
+
         movers_dates_label.config(
-            text=(
-                f"Was: {was_label}   Now: {now_label} — "
-                f"Was (rank) = that line today; Now (rank) = selected {bar_unit}"
+            text=portfolio_panel_dates_line(
+                rebalance_label=rebalance_label,
+                was_n=was_n,
+                was_label=was_label,
+                rebal_n=rebal_n,
+                pick_shortfall=pick_shortfall,
+                exit_below_9ema=bool(exit_below_9ema_var.get()),
+                subtitle=subtitle,
+                exits_through_label=format_date_label(panel_end_idx),
             )
         )
 
-        for slot, widgets in enumerate(movers_row_widgets):
-            was_text = ''
-            now_text = ''
-            if slot < len(was_top_rows):
-                j = was_top_rows[slot]
-                was_rank = curr_ranks.get(j)
-                was_text = _movers_cell_text(
-                    j, was_rank if was_rank is not None else '—'
-                )
-            if slot < len(now_top_rows):
-                j = now_top_rows[slot]
-                now_rank = curr_ranks.get(j)
-                now_text = _movers_cell_text(
-                    j, now_rank if now_rank is not None else '—'
-                )
-            widgets['rank'].config(text=str(slot + 1))
-            widgets['was'].config(text=was_text)
-            widgets['now'].config(text=now_text)
+        def _was_rank(ticker: str) -> int | None:
+            j = _row_index_for_ticker(ticker)
+            if j is None:
+                return None
+            return _rank_by_row(was_week).get(j)
+
+        def _curr_rank(ticker: str) -> int | None:
+            j = _row_index_for_ticker(ticker)
+            if j is None:
+                return None
+            return panel_curr_ranks.get(j)
+
+        panel_rows = build_portfolio_panel(
+            prev_portfolio=prev_portfolio,
+            rebal_strategy=rebal_strategy,
+            rebal_tickers=rebal_tickers,
+            end_prev_week_holdings=_end_prev_week_holdings(prev_panel_idx),
+            panel_exits=week_exits,
+            rebalance_ts=panel_rebal_ts,
+            prev_rebalance_ts=prev_rebal_ts,
+            weekly_for_ticker=_weekly_for_pnl,
+            daily_for_ticker=_daily_for_pnl,
+            was_rank_for_ticker=_was_rank,
+            curr_rank_for_ticker=_curr_rank,
+            exit_below_9ema=bool(exit_below_9ema_var.get()),
+            mid_week_9ema=_mid_week_9ema_cache.get(panel_rebal_idx, []),
+        )
+        n_slots = len(movers_row_widgets)
+        max_rows = max(len(panel_rows), 1)
+        for slot in range(n_slots):
+            widgets = movers_row_widgets[slot]
+            grid_row = slot + 1
+            if slot < len(panel_rows):
+                row = panel_rows[slot]
+                was_text = row["was_text"]
+                now_text = row["now_text"]
+                move = row["move"]
+                rebal_text = row["rebal_text"]
+                pick_tag = row["pick"]
+                pnl_text = row["pnl"]
+                mid_9ema_text = row.get("mid_9ema", "")
+                now_fg = row.get("now_fg", "black")
+                rebal_fg = row.get("rebal_fg", "black")
+                mid_fg = row.get("mid_fg", "black")
+            else:
+                was_text = now_text = move = rebal_text = pick_tag = pnl_text = ""
+                mid_9ema_text = ""
+                now_fg = rebal_fg = mid_fg = "black"
+            if slot < max_rows:
+                widgets["rank"].config(text=str(slot + 1))
+                widgets["was"].config(text=was_text)
+                widgets["now"].config(text=now_text, fg=now_fg)
+                widgets["tag"].config(text=move)
+                widgets["rebal"].config(text=rebal_text, fg=rebal_fg)
+                widgets["pick_tag"].config(text=pick_tag)
+                widgets["pnl"].config(text=pnl_text)
+                widgets["mid_9ema"].config(text=mid_9ema_text, fg=mid_fg)
+                for col, key in enumerate(PORTFOLIO_PANEL_GRID_KEYS):
+                    widgets[key].grid(
+                        row=grid_row, column=col, sticky="ew", padx=2, pady=1
+                    )
+            else:
+                for key in widgets:
+                    widgets[key].config(text="")
+                for w in widgets.values():
+                    w.grid_remove()
+
         if movers_copy_grid is not None:
             TableRegionCopy.for_window(root).sync_styles(movers_copy_grid)
         if _sync_side_scroll is not None:
@@ -1765,7 +2221,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     ):
         strategy = _pick_strategy_key()
         max_rank = int(max_hold_rank_var.get())
-        top_n = config.etf_recommend_count
+        top_n = _portfolio_top_n()
         holdings = list(prev_holdings or [])
 
         if config.etf_recommend_profile == "india":
@@ -1826,94 +2282,157 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         )
         return pick_us_portfolio(strategy, ctx)
 
+    def _portfolio_cache_enabled() -> bool:
+        """Walk-forward portfolio state for Was/Now panel (all pick strategies)."""
+        return bool(config.etf_table_extras)
+
     def _pick_state_cache_needed() -> bool:
-        return bool(hold_until_rank_exit_var.get() or exit_below_9ema_var.get())
+        return _portfolio_cache_enabled()
 
     def _ensure_etf_daily_close() -> None:
-        if _etf_daily_close or not exit_below_9ema_var.get():
-            return
-        from datetime import timedelta
+        _load_etf_daily_close_data()
 
-        from utils.nse_bhavcopy import today_ist
+    def _rebal_slots_after_9ema(
+        rebal_tickers: list[str], end_ts
+    ) -> tuple[list[str], list[str]]:
+        """Exclude below-9-EMA picks at rebalance (empty slot, not a rebalance target)."""
+        if not exit_below_9ema_var.get():
+            return list(rebal_tickers), []
+        from momentum.rrg_ema_exit import apply_9ema_rebalance_slots
 
-        end_d = today_ist()
-        start_d = (_rrg_index[0].date() if len(_rrg_index) else end_d) - timedelta(
-            days=400
+        _ensure_etf_daily_close()
+        return apply_9ema_rebalance_slots(
+            rebal_tickers,
+            _etf_daily_close,
+            end_ts,
+            enabled=True,
         )
-        if config.etf_recommend_profile == "india":
-            from utils.nse_bhavcopy import load_nse_cm_histories_range
 
-            syms = {
-                (index_metadata["ref_label"][j] or indices[j])
-                .strip()
-                .upper()
-                .replace(".NS", "")
-                for j in range(len(indices))
-            }
-            syms.discard("")
-            batch = load_nse_cm_histories_range(
-                sorted(syms),
-                start_d,
-                end_d,
-                min_points=5,
-                quiet=True,
-                asset_label="ETF symbol",
-                freq="day",
-            )
-            for sym, series in batch.items():
-                if len(series):
-                    _etf_daily_close[sym] = series.sort_index()
-        else:
-            from utils.yahoo_weekly import load_yahoo_histories_range
+    def _merge_dropped_tickers(*groups: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for group in groups:
+            for sym in group:
+                bare = _norm_ticker(sym)
+                if not bare or bare in seen:
+                    continue
+                seen.add(bare)
+                out.append(sym)
+        return out
 
-            tickers = [t for t in indices if t != config.benchmark_nse]
-            batch = load_yahoo_histories_range(
-                tickers,
-                start_d,
-                end_d,
-                min_points=5,
-                quiet=True,
-                freq="day",
-            )
-            for sym, series in batch.items():
-                if len(series):
-                    _etf_daily_close[sym] = series.sort_index()
+    def _etf_price_series(ticker: str) -> tuple[pd.Series, pd.Series]:
+        """ETF CM bhavcopy (daily + W-FRI); avoid index EOD mistaken for ETF NAV."""
+        bare = ticker.strip().upper().replace(".NS", "")
+        _ensure_etf_daily_close()
+        daily = _etf_daily_close.get(bare, pd.Series(dtype=float))
+        if len(daily):
+            weekly = daily.resample("W-FRI").last().dropna()
+            return weekly, daily.sort_index()
+        j = _row_index_for_ticker(ticker)
+        if j is not None and index_metadata["kind"][j] == "etf":
+            weekly = indices_data[indices[j]]
+            return weekly, pd.Series(dtype=float)
+        return pd.Series(dtype=float), pd.Series(dtype=float)
 
     def _weekly_price_for_ticker(ticker: str) -> pd.Series:
-        bare = ticker.strip().upper().replace(".NS", "")
-        for j, row_id in enumerate(indices):
-            ref = (index_metadata["ref_label"][j] or row_id).strip().upper().replace(
-                ".NS", ""
-            )
-            if bare in (ref, row_id.upper().replace(".NS", "")):
-                return indices_data[row_id]
-        return pd.Series(dtype=float)
+        weekly, _daily = _etf_price_series(ticker)
+        return weekly
 
-    def _advance_active_holdings(
-        idx: int, rebal_tickers: list[str], end_ts, next_ts
-    ) -> list[str]:
+    def _apply_9ema_week_path(
+        rebal_tickers: list[str],
+        end_ts,
+        next_ts,
+        *,
+        through_ts=None,
+        prev_holdings: list[str] | None = None,
+    ) -> tuple[list[str], list[str], list]:
         from momentum.rrg_ema_exit import (
-            filter_holdings_below_9ema,
+            rebalance_9ema_dropped,
             simulate_week_with_9ema_exits,
         )
 
         holdings = list(rebal_tickers)
+        dropped: list[str] = []
+        mid_week: list = []
         if not exit_below_9ema_var.get():
-            return holdings
+            return holdings, dropped, mid_week
         _ensure_etf_daily_close()
-        holdings = filter_holdings_below_9ema(holdings, _etf_daily_close, end_ts)
-        if idx + 1 >= len(_rrg_index):
-            return holdings
-        weekly = {t: _weekly_price_for_ticker(t) for t in holdings}
-        _, end_holdings, _ = simulate_week_with_9ema_exits(
+        holdings, dropped = rebalance_9ema_dropped(
+            holdings, prev_holdings, _etf_daily_close, end_ts
+        )
+        if next_ts is None or pd.Timestamp(next_ts) <= pd.Timestamp(end_ts):
+            return holdings, dropped, mid_week
+        weekly = {}
+        daily_map = {}
+        for t in holdings:
+            w, d = _etf_price_series(t)
+            weekly[t] = w
+            if len(d):
+                daily_map[t] = d
+        _, holdings, mid_week = simulate_week_with_9ema_exits(
             holdings,
             end_ts,
             next_ts,
-            _etf_daily_close,
+            daily_map if daily_map else _etf_daily_close,
             weekly,
-            config.etf_recommend_count,
+            _portfolio_top_n(),
+            through_date=through_ts,
         )
-        return end_holdings
+        return holdings, dropped, mid_week
+
+    def _ref_to_row_for_exits() -> dict[str, int]:
+        from momentum.etf.india_rrg_pick_strategies import ref_to_row_index
+
+        if config.etf_recommend_profile == "india":
+            return ref_to_row_index(indices, index_metadata["ref_label"])
+        return {indices[j].strip().upper(): j for j in range(len(indices))}
+
+    def _build_live_week_exits(
+        prev_active: list[str],
+        rebalance_holdings: list[str],
+        curr_ranks: dict[int, int],
+        end_ts,
+        dropped_9ema: list[str],
+        mid_week_9ema: list,
+    ) -> list:
+        from momentum.rrg_portfolio_exits import build_week_exits
+
+        return build_week_exits(
+            prev_holdings=prev_active,
+            rebalance_holdings=rebalance_holdings,
+            hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+            curr_ranks=curr_ranks,
+            ref_to_j=_ref_to_row_for_exits(),
+            max_hold_rank=int(max_hold_rank_var.get()),
+            exit_below_9ema=bool(exit_below_9ema_var.get()),
+            dropped_9ema_rebal=dropped_9ema,
+            mid_week_9ema=mid_week_9ema,
+            decision_date=end_ts,
+        )
+
+    def _refresh_exits_display(week_idx: int) -> None:
+        if recommend_exits_label is None:
+            return
+        from momentum.rrg_portfolio_exits import format_exits_multiline
+
+        exits = _week_exits_cache.get(week_idx, [])
+        show = bool(
+            exits
+            or hold_until_rank_exit_var.get()
+            or exit_below_9ema_var.get()
+            or week_idx > _date_slider_min_idx()
+        )
+        if not show:
+            recommend_exits_label.pack_forget()
+            return
+        title = "Exits this week (rule · when · detail):\n"
+        body = (
+            format_exits_multiline(exits, rebalance_ts=_rrg_index[week_idx])
+            if exits
+            else "No exits this week."
+        )
+        recommend_exits_label.config(text=title + body)
+        recommend_exits_label.pack(fill=tk.X, pady=(6, 0))
 
     def _warm_pick_holdings_cache(target_week_idx: int) -> None:
         if not _pick_state_cache_needed():
@@ -1947,14 +2466,36 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 prev_r,
                 prev_holdings=prev_active,
             )
-            rebal_tickers = [p.ticker for p in picks_i]
-            _pick_holdings_cache[idx] = rebal_tickers
+            rebal_strategy = _rebal_tickers_table_order(picks_i, ranked_i)
+            rebal_slots, dropped_pick = _rebal_slots_after_9ema(
+                rebal_strategy, end_ts_i
+            )
+            _pick_holdings_cache[idx] = rebal_slots
+            held_enter = [t for t in rebal_slots if t]
             next_ts = (
-                _rrg_index[idx + 1] if idx + 1 < len(_rrg_index) else end_ts_i
+                _rrg_index[idx + 1] if idx + 1 < len(_rrg_index) else None
             )
-            _active_holdings_cache[idx] = _advance_active_holdings(
-                idx, rebal_tickers, end_ts_i, next_ts
+            prev_pick = (
+                list(_pick_holdings_cache[idx - 1])
+                if idx > tail and idx - 1 in _pick_holdings_cache
+                else []
             )
+            end_active, dropped_was, mid = _apply_9ema_week_path(
+                held_enter,
+                end_ts_i,
+                next_ts,
+                prev_holdings=prev_pick or None,
+            )
+            _active_holdings_cache[idx] = end_active
+            _week_exits_cache[idx] = _build_live_week_exits(
+                prev_pick,
+                held_enter,
+                curr,
+                end_ts_i,
+                _merge_dropped_tickers(dropped_pick, dropped_was),
+                mid,
+            )
+            _mid_week_9ema_cache[idx] = list(mid)
 
     def _strategy_picks_for_week(
         end_date_idx_local: int,
@@ -1966,17 +2507,18 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         prev_ranks: dict[int, int],
     ):
         prev_holdings: list[str] = []
-        if _pick_state_cache_needed() and end_date_idx_local > 0:
+        if _portfolio_cache_enabled() and end_date_idx_local > 0:
             if end_date_idx_local - 1 not in _active_holdings_cache:
                 _warm_pick_holdings_cache(end_date_idx_local - 1)
-            if exit_below_9ema_var.get():
-                prev_holdings = _active_holdings_cache.get(
-                    end_date_idx_local - 1, []
-                )
-            else:
-                prev_holdings = _pick_holdings_cache.get(
-                    end_date_idx_local - 1, []
-                )
+            if hold_until_rank_exit_var.get():
+                if exit_below_9ema_var.get():
+                    prev_holdings = list(
+                        _active_holdings_cache.get(end_date_idx_local - 1, [])
+                    )
+                else:
+                    prev_holdings = list(
+                        _pick_holdings_cache.get(end_date_idx_local - 1, [])
+                    )
         picks = _compute_picks_at_week(
             end_date_idx_local,
             ranked,
@@ -1987,21 +2529,40 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             prev_ranks,
             prev_holdings=prev_holdings,
         )
-        if _pick_state_cache_needed():
+        prev_pick = (
+            _prior_week_top_n_portfolio(end_date_idx_local)
+            if end_date_idx_local > tail
+            else []
+        )
+        if _portfolio_cache_enabled():
             stale = [k for k in _pick_holdings_cache if k > end_date_idx_local]
             for k in stale:
                 del _pick_holdings_cache[k]
                 _active_holdings_cache.pop(k, None)
-            rebal_tickers = [p.ticker for p in picks]
-            _pick_holdings_cache[end_date_idx_local] = rebal_tickers
-            next_ts = (
-                _rrg_index[end_date_idx_local + 1]
-                if end_date_idx_local + 1 < len(_rrg_index)
-                else end_ts
-            )
-            _active_holdings_cache[end_date_idx_local] = _advance_active_holdings(
-                end_date_idx_local, rebal_tickers, end_ts, next_ts
-            )
+                _week_exits_cache.pop(k, None)
+                _mid_week_9ema_cache.pop(k, None)
+        rebal_strategy = _rebal_tickers_table_order(picks, ranked)
+        rebal_slots, dropped_pick = _rebal_slots_after_9ema(rebal_strategy, end_ts)
+        _pick_holdings_cache[end_date_idx_local] = rebal_slots
+        held_enter = [t for t in rebal_slots if t]
+        next_ts = (
+            _rrg_index[end_date_idx_local + 1]
+            if end_date_idx_local + 1 < len(_rrg_index)
+            else None
+        )
+        end_active, dropped_was, mid = _apply_9ema_week_path(
+            held_enter, end_ts, next_ts, prev_holdings=prev_pick or None
+        )
+        _active_holdings_cache[end_date_idx_local] = end_active
+        _week_exits_cache[end_date_idx_local] = _build_live_week_exits(
+            prev_pick,
+            held_enter,
+            curr_ranks,
+            end_ts,
+            _merge_dropped_tickers(dropped_pick, dropped_was),
+            mid,
+        )
+        _mid_week_9ema_cache[end_date_idx_local] = list(mid)
         return picks
 
     def refresh_recommendations_panel(
@@ -2051,7 +2612,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 text=f"Date: {end_l}  ·  {subtitle}"
             )
         for slot, widgets in enumerate(recommend_row_widgets):
-            if slot >= len(picks):
+            if slot >= _portfolio_top_n() or slot >= len(picks):
                 for w in widgets.values():
                     w.config(text='', bg=root.cget('bg'), fg='black')
                 continue
@@ -2074,6 +2635,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             widgets['reason'].config(text=pick.reason, bg=bg, fg=fg)
         if recommend_copy_grid is not None:
             TableRegionCopy.for_window(root).sync_styles(recommend_copy_grid)
+        _refresh_exits_display(int(date_scale.get()))
         if _sync_side_scroll is not None:
             root.after_idle(_sync_side_scroll)
 
@@ -2119,15 +2681,22 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             rank_delta_texts.append(text)
             rank_delta_by_row[j] = text
 
-        picks = _strategy_picks_for_week(
-            end_date_idx_local,
-            ranked,
-            end_ts,
-            start_ts,
-            rank_delta_by_row,
-            curr_ranks,
-            prev_ranks,
-        )
+        if _portfolio_cache_enabled():
+            _warm_pick_holdings_cache(end_date_idx_local)
+
+        # Table ★ marks portfolio Top N picks (rebalance week), not next slider bar.
+        if config.top_movers_panel:
+            picks = _panel_week_picks(end_date_idx_local)
+        else:
+            picks = _strategy_picks_for_week(
+                end_date_idx_local,
+                ranked,
+                end_ts,
+                start_ts,
+                rank_delta_by_row,
+                curr_ranks,
+                prev_ranks,
+            )
         _current_pick_row_indices.clear()
         _current_pick_row_indices.update(p.row_idx for p in picks)
 
@@ -2237,7 +2806,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             tc.sync_styles(main_table_copy_grid)
         _hide_stale_table_rows(len(indices))
         _update_table_column_widths(end_ts, start_ts, rank_delta_texts)
-        refresh_top_movers_panel(ranked)
+        refresh_top_movers_panel(
+            ranked,
+            picks=picks,
+            end_ts=end_ts,
+            start_ts=start_ts,
+            rank_delta_by_row=rank_delta_by_row,
+            curr_ranks=curr_ranks,
+            prev_ranks=prev_ranks,
+        )
         refresh_recommendations_panel(
             ranked,
             end_ts,
@@ -2370,10 +2947,6 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     main_table_copy_grid = _tc.register_grid(
         [[w[k] for k in _main_copy_cols] for w in table_widgets]
     )
-    if movers_row_widgets:
-        movers_copy_grid = _tc.register_grid(
-            [[m['rank'], m['was'], m['now']] for m in movers_row_widgets]
-        )
 
     select_all_cb.config(command=on_select_all_toggle)
     refresh_table_ranking()
@@ -2597,6 +3170,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         hold_until_rank_exit_var.trace_add("write", _on_pick_controls_change)
         exit_below_9ema_var.trace_add("write", _on_pick_controls_change)
         max_hold_rank_var.trace_add("write", _on_pick_controls_change)
+        if portfolio_n_var is not None:
+            portfolio_n_var.trace_add("write", _on_pick_controls_change)
         if pick_auto_show_cb is not None:
             pick_auto_show_cb.config(command=redraw_chart)
         if hold_rank_cb is not None:
@@ -2605,4 +3180,6 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     if _sync_side_scroll is not None:
         root.after_idle(_sync_side_scroll)
     redraw_chart()
+    root.update_idletasks()
+    root.deiconify()
     root.mainloop()
