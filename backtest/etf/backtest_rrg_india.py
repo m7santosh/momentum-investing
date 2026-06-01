@@ -44,6 +44,10 @@ from momentum.etf.india_rrg_recommendations import (  # noqa: E402
     load_india_etf_vol_pct,
 )
 from momentum.rrg_core import compute_rrg_indicators, rrg_effective_window, rrg_warmup_weeks  # noqa: E402
+from momentum.rrg_ema_exit import (  # noqa: E402
+    filter_holdings_below_9ema,
+    simulate_week_with_9ema_exits,
+)
 from momentum.rrg_ranking import (  # noqa: E402
     build_rank_delta_by_row,
     rank_by_tail_change,
@@ -72,7 +76,9 @@ class IndiaRrgBacktestConfig:
     initial_capital: float = 100_000.0
     vol_days: int = 63
     pick_strategy: str = "recommend"
-    max_hold_rank: int = 20
+    hold_until_rank_exit: bool = False
+    max_hold_rank: int = 10
+    exit_below_9ema: bool = False
 
 
 @dataclass
@@ -386,33 +392,12 @@ class IndiaRrgBacktestEngine:
 
         picks = self._recommend_at(decision_date)
         holdings = [p.ticker for p in picks]
+        mid_week_9ema_exits = 0
 
-        if holdings:
-            week_rets = []
-            for ref in holdings:
-                series = self._ref_etf_weekly.get(ref)
-                if series is None or series.empty:
-                    week_rets.append(0.0)
-                    continue
-                s_from = series.loc[:decision_date]
-                s_to = series.loc[:next_date]
-                if len(s_from) == 0 or len(s_to) == 0:
-                    week_rets.append(0.0)
-                    continue
-                p0 = float(s_from.iloc[-1])
-                p1 = float(s_to.iloc[-1])
-                week_rets.append((p1 / p0 - 1) if p0 > 0 else 0.0)
-            port_ret = float(np.mean(week_rets))
-        else:
-            port_ret = 0.0
-
-        b_from = self._bench_weekly.loc[:decision_date]
-        b_to = self._bench_weekly.loc[:next_date]
-        bench_ret = (
-            (float(b_to.iloc[-1]) / float(b_from.iloc[-1]) - 1)
-            if len(b_from) > 0 and len(b_to) > 0
-            else 0.0
-        )
+        if cfg.exit_below_9ema and holdings:
+            holdings = filter_holdings_below_9ema(
+                holdings, self._ref_etf_daily, decision_date
+            )
 
         turnover = 0.0
         new_entries = 0
@@ -425,6 +410,45 @@ class IndiaRrgBacktestEngine:
             )
         else:
             new_entries = len(holdings)
+
+        if holdings:
+            if cfg.exit_below_9ema:
+                week_rets, end_holdings, mid_week_9ema_exits = simulate_week_with_9ema_exits(
+                    holdings,
+                    decision_date,
+                    next_date,
+                    self._ref_etf_daily,
+                    self._ref_etf_weekly,
+                    cfg.top_n,
+                )
+                port_ret = float(np.mean(week_rets))
+                holdings = end_holdings
+            else:
+                week_rets = []
+                for ref in holdings:
+                    series = self._ref_etf_weekly.get(ref)
+                    if series is None or series.empty:
+                        week_rets.append(0.0)
+                        continue
+                    s_from = series.loc[:decision_date]
+                    s_to = series.loc[:next_date]
+                    if len(s_from) == 0 or len(s_to) == 0:
+                        week_rets.append(0.0)
+                        continue
+                    p0 = float(s_from.iloc[-1])
+                    p1 = float(s_to.iloc[-1])
+                    week_rets.append((p1 / p0 - 1) if p0 > 0 else 0.0)
+                port_ret = float(np.mean(week_rets))
+        else:
+            port_ret = 0.0
+
+        b_from = self._bench_weekly.loc[:decision_date]
+        b_to = self._bench_weekly.loc[:next_date]
+        bench_ret = (
+            (float(b_to.iloc[-1]) / float(b_from.iloc[-1]) - 1)
+            if len(b_from) > 0 and len(b_to) > 0
+            else 0.0
+        )
 
         self._portfolio_value *= 1 + port_ret
 
@@ -449,6 +473,7 @@ class IndiaRrgBacktestEngine:
             "Excess_Return": port_ret - bench_ret,
             "Turnover": turnover,
             "New_Entries": new_entries,
+            "Mid_Week_9EMA_Exits": mid_week_9ema_exits,
             "Portfolio_Value": self._portfolio_value,
             "Picks": picks,
             "Pick_Prices": pick_prices,
@@ -521,6 +546,7 @@ class IndiaRrgBacktestEngine:
             prev_ranks=prev_ranks,
             top_n=cfg.top_n,
             prev_holdings=list(self._prev_holdings),
+            hold_until_rank_exit=cfg.hold_until_rank_exit,
             max_hold_rank=cfg.max_hold_rank,
         )
         return pick_india_portfolio(cfg.pick_strategy, ctx)
@@ -596,7 +622,9 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
     return {
         "Strategy": STRATEGY_TAG,
         "Pick_Strategy": pick_strategy_label(
-            str(df.attrs.get("pick_strategy", "recommend"))
+            str(df.attrs.get("pick_strategy", "recommend")),
+            hold_until_rank_exit=bool(df.attrs.get("hold_until_rank_exit", False)),
+            exit_below_9ema=bool(df.attrs.get("exit_below_9ema", False)),
         ),
         "Max_Hold_Rank": df.attrs.get("max_hold_rank"),
         "Benchmark": RRG_BENCHMARK_NSE,
@@ -636,7 +664,9 @@ def run_backtest(
     rrg_window: int = 10,
     initial_capital: float = 100_000.0,
     pick_strategy: str = "recommend",
-    max_hold_rank: int = 20,
+    hold_until_rank_exit: bool = False,
+    max_hold_rank: int = 10,
+    exit_below_9ema: bool = False,
     progress_cb: Callable[[str], None] | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     cfg = IndiaRrgBacktestConfig(
@@ -647,7 +677,9 @@ def run_backtest(
         rrg_window=rrg_window,
         initial_capital=initial_capital,
         pick_strategy=pick_strategy,
+        hold_until_rank_exit=hold_until_rank_exit,
         max_hold_rank=max_hold_rank,
+        exit_below_9ema=exit_below_9ema,
     )
     engine = IndiaRrgBacktestEngine(config=cfg, progress_cb=progress_cb)
     engine.load_data()
@@ -655,7 +687,9 @@ def run_backtest(
     if not df.empty:
         df.attrs["top_n"] = top_n
         df.attrs["pick_strategy"] = pick_strategy
+        df.attrs["hold_until_rank_exit"] = hold_until_rank_exit
         df.attrs["max_hold_rank"] = max_hold_rank
+        df.attrs["exit_below_9ema"] = exit_below_9ema
     metrics = compute_metrics(df, initial_capital)
     return df, metrics
 
@@ -672,14 +706,24 @@ def _parse_args() -> argparse.Namespace:
         "--pick-strategy",
         choices=tuple(PICK_STRATEGIES),
         default="recommend",
-        help="Portfolio pick rule (default: recommend = swing score Top N)",
+        help="Base portfolio pick rule (default: recommend)",
+    )
+    parser.add_argument(
+        "--hold-until-rank-exit",
+        action="store_true",
+        help="Keep holdings while momentum rank <= max-hold-rank; refill from base strategy",
     )
     parser.add_argument(
         "--max-hold-rank",
         type=int,
-        default=20,
+        default=10,
         metavar="RANK",
-        help="For top_n_rank_exit: drop holding when momentum rank is worse than R (default: 20)",
+        help="With --hold-until-rank-exit: drop when rank is worse than R (default: 10)",
+    )
+    parser.add_argument(
+        "--exit-below-9ema",
+        action="store_true",
+        help="Exit any holding when close < 9 EMA (mid-week); no refill until rebalance",
     )
     return parser.parse_args()
 
@@ -688,7 +732,9 @@ def main() -> None:
     args = _parse_args()
     end = args.end or today_ist().strftime("%Y-%m-%d")
     print(f"[{STRATEGY_TAG}] Backtest {args.start} .. {end}")
-    print(f"  Pick: {pick_strategy_label(args.pick_strategy)}")
+    print(
+        f"  Pick: {pick_strategy_label(args.pick_strategy, hold_until_rank_exit=args.hold_until_rank_exit)}"
+    )
     df, metrics = run_backtest(
         args.start,
         end,
@@ -697,7 +743,9 @@ def main() -> None:
         rrg_window=args.window,
         initial_capital=args.capital,
         pick_strategy=args.pick_strategy,
+        hold_until_rank_exit=args.hold_until_rank_exit,
         max_hold_rank=args.max_hold_rank,
+        exit_below_9ema=args.exit_below_9ema,
         progress_cb=print,
     )
     if metrics:

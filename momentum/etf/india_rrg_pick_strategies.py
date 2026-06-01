@@ -1,9 +1,9 @@
-"""India RRG backtest portfolio pick rules (alternatives to swing recommend)."""
+"""India RRG portfolio pick rules (base strategies + optional rank-hold overlay)."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from momentum.etf.india_rrg_recommendations import (
     EXCLUDE_REF_ETFS,
@@ -13,12 +13,15 @@ from momentum.etf.india_rrg_recommendations import (
 from momentum.etf.us_rrg_recommendations import parse_rank_delta
 from momentum.rrg_core import get_status
 
-PICK_STRATEGIES: dict[str, str] = {
+# Base strategies only — rank-hold is a separate overlay (checkbox), not a 5th mode.
+BASE_PICK_STRATEGIES: dict[str, str] = {
     "recommend": "Recommended Top N (RRG swing score)",
-    "leading_improved": "Top N — Leading quadrant, rank improved",
+    "leading_only": "Top N — Leading quadrant only",
+    "leading_improved": "Top N — Leading quadrant + momentum rank ↑",
     "top_n": "Top N — momentum rank only (no filter)",
-    "top_n_rank_exit": "Top N — hold until rank worse than threshold",
 }
+
+PICK_STRATEGIES = BASE_PICK_STRATEGIES
 
 
 @dataclass(frozen=True)
@@ -40,7 +43,8 @@ class IndiaPickContext:
     prev_ranks: dict[int, int]
     top_n: int
     prev_holdings: list[str]
-    max_hold_rank: int = 20
+    hold_until_rank_exit: bool = False
+    max_hold_rank: int = 10
 
 
 def _bare_ref(ctx: IndiaPickContext, row_j: int) -> str:
@@ -100,6 +104,28 @@ def _eligible_by_momentum(ctx: IndiaPickContext) -> list[int]:
     return out
 
 
+def pick_leading_only(ctx: IndiaPickContext) -> list[IndiaEtfRecommendation]:
+    """Top N in Leading quadrant by momentum rank (no rank-Δ filter)."""
+    eligible: list[int] = []
+    for j in ctx.ranked_row_indices:
+        ref = _bare_ref(ctx, j)
+        if not ref or ref in EXCLUDE_REF_ETFS:
+            continue
+        try:
+            rsr = float(ctx.series_at_fn(ctx.rsr_series_by_row[j], ctx.end_ts))
+            rsm = float(ctx.series_at_fn(ctx.rsm_series_by_row[j], ctx.end_ts))
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        if get_status(rsr, rsm) != "leading":
+            continue
+        if ctx.change_pct_fn(j) == float("-inf"):
+            continue
+        eligible.append(j)
+        if len(eligible) >= ctx.top_n:
+            break
+    return _row_indices_to_picks(ctx, eligible)
+
+
 def pick_leading_improved(ctx: IndiaPickContext) -> list[IndiaEtfRecommendation]:
     """Top N in Leading quadrant with positive rank delta, best momentum first."""
     eligible: list[int] = []
@@ -131,41 +157,7 @@ def pick_top_n_plain(ctx: IndiaPickContext) -> list[IndiaEtfRecommendation]:
     return _row_indices_to_picks(ctx, eligible)
 
 
-def pick_top_n_rank_exit(ctx: IndiaPickContext) -> list[IndiaEtfRecommendation]:
-    """Keep holdings while rank <= threshold; refill to N from momentum rank."""
-    n = len(ctx.indices)
-    ref_to_j: dict[str, int] = {}
-    for j in range(n):
-        ref = _bare_ref(ctx, j)
-        if ref and ref not in ref_to_j:
-            ref_to_j[ref] = j
-
-    held_refs: list[str] = []
-    for ref in ctx.prev_holdings:
-        bare = ref.strip().upper().replace(".NS", "")
-        j = ref_to_j.get(bare)
-        if j is None:
-            continue
-        rank = ctx.curr_ranks.get(j, n + 1)
-        if rank <= ctx.max_hold_rank:
-            held_refs.append(bare)
-
-    held_set = set(held_refs)
-    for j in _eligible_by_momentum(ctx):
-        if len(held_refs) >= ctx.top_n:
-            break
-        ref = _bare_ref(ctx, j)
-        if ref in held_set:
-            continue
-        held_refs.append(ref)
-        held_set.add(ref)
-
-    row_indices = [ref_to_j[r] for r in held_refs if r in ref_to_j]
-    return _row_indices_to_picks(ctx, row_indices[: ctx.top_n])
-
-
-def pick_india_portfolio(strategy: str, ctx: IndiaPickContext) -> list[IndiaEtfRecommendation]:
-    """Dispatch to the configured India backtest pick strategy."""
+def _pick_base(strategy: str, ctx: IndiaPickContext) -> list[IndiaEtfRecommendation]:
     key = (strategy or "recommend").strip().lower()
     if key == "recommend":
         return recommend_india_etfs(
@@ -184,30 +176,125 @@ def pick_india_portfolio(strategy: str, ctx: IndiaPickContext) -> list[IndiaEtfR
             prev_ranks=ctx.prev_ranks,
             limit=ctx.top_n,
         )
+    if key == "leading_only":
+        return pick_leading_only(ctx)
     if key == "leading_improved":
         return pick_leading_improved(ctx)
     if key == "top_n":
         return pick_top_n_plain(ctx)
     if key == "top_n_rank_exit":
-        return pick_top_n_rank_exit(ctx)
+        return pick_top_n_plain(ctx)
     raise ValueError(
-        f"Unknown pick strategy {strategy!r}. "
-        f"Choose from: {', '.join(PICK_STRATEGIES)}"
+        f"Unknown base pick strategy {strategy!r}. "
+        f"Choose from: {', '.join(BASE_PICK_STRATEGIES)}"
     )
 
 
-def pick_strategy_label(strategy: str) -> str:
-    return PICK_STRATEGIES.get((strategy or "recommend").strip().lower(), strategy)
+def apply_rank_exit_overlay(
+    ctx: IndiaPickContext,
+    base_picks: list[IndiaEtfRecommendation],
+) -> list[IndiaEtfRecommendation]:
+    """Keep prior holdings while rank ≤ threshold; refill gaps from ``base_picks``."""
+    n = len(ctx.indices)
+    ref_to_j: dict[str, int] = {}
+    for j in range(n):
+        ref = _bare_ref(ctx, j)
+        if ref and ref not in ref_to_j:
+            ref_to_j[ref] = j
 
+    pick_by_ticker = {p.ticker: p for p in base_picks}
 
-def pick_strategy_subtitle(strategy: str, *, max_hold_rank: int = 20) -> str:
-    key = (strategy or "recommend").strip().lower()
-    if key == "leading_improved":
-        return "Leading quadrant · rank improved · best momentum first"
-    if key == "top_n":
-        return "Top N by tail momentum rank (no quadrant filter)"
-    if key == "top_n_rank_exit":
-        return (
-            f"Top N · keep while rank ≤ {max_hold_rank} · refill on rebalance week"
+    held: list[IndiaEtfRecommendation] = []
+    for ref in ctx.prev_holdings:
+        bare = ref.strip().upper().replace(".NS", "")
+        j = ref_to_j.get(bare)
+        if j is None:
+            continue
+        rank = ctx.curr_ranks.get(j, n + 1)
+        if rank <= ctx.max_hold_rank:
+            held.append(pick_by_ticker.get(bare) or _row_indices_to_picks(ctx, [j])[0])
+
+    held_tickers = {p.ticker for p in held}
+    merged: list[IndiaEtfRecommendation] = list(held)
+    for p in base_picks:
+        if len(merged) >= ctx.top_n:
+            break
+        if p.ticker in held_tickers:
+            continue
+        merged.append(p)
+        held_tickers.add(p.ticker)
+
+    for i, p in enumerate(merged[: ctx.top_n], start=1):
+        merged[i - 1] = IndiaEtfRecommendation(
+            pick_rank=i,
+            row_idx=p.row_idx,
+            ticker=p.ticker,
+            name=p.name,
+            change_pct=p.change_pct,
+            rank_delta=p.rank_delta,
+            vol_pct=p.vol_pct,
+            quadrant=p.quadrant,
+            size_hint=p.size_hint,
+            score=p.score,
+            reason=p.reason,
         )
-    return "Leading/Improving · Rank Δ>0 · momentum+reliability score"
+    return merged[: ctx.top_n]
+
+
+def pick_india_portfolio(strategy: str, ctx: IndiaPickContext) -> list[IndiaEtfRecommendation]:
+    """Base strategy picks, optionally with hold-until-rank-worse overlay."""
+    key = (strategy or "recommend").strip().lower()
+    hold = ctx.hold_until_rank_exit or key == "top_n_rank_exit"
+    base_key = "top_n" if key == "top_n_rank_exit" else key
+    base = _pick_base(base_key, ctx)
+    if not hold:
+        return base
+    return apply_rank_exit_overlay(ctx, base)
+
+
+def pick_strategy_label(
+    strategy: str,
+    *,
+    hold_until_rank_exit: bool = False,
+    exit_below_9ema: bool = False,
+) -> str:
+    key = (strategy or "recommend").strip().lower()
+    if key == "top_n_rank_exit":
+        key = "top_n"
+        hold_until_rank_exit = True
+    base = BASE_PICK_STRATEGIES.get(key, strategy)
+    suffixes: list[str] = []
+    if hold_until_rank_exit:
+        suffixes.append("hold until rank worse")
+    if exit_below_9ema:
+        suffixes.append("exit below 9 EMA")
+    if suffixes:
+        return f"{base} + {' + '.join(suffixes)}"
+    return base
+
+
+def pick_strategy_subtitle(
+    strategy: str,
+    *,
+    hold_until_rank_exit: bool = False,
+    max_hold_rank: int = 10,
+    exit_below_9ema: bool = False,
+) -> str:
+    key = (strategy or "recommend").strip().lower()
+    if key == "top_n_rank_exit":
+        key = "top_n"
+        hold_until_rank_exit = True
+    if key == "leading_only":
+        base = "Leading RRG quadrant only · best tail momentum first"
+    elif key == "leading_improved":
+        base = "Leading RRG quadrant · positive Rank Δ · best momentum first"
+    elif key == "top_n":
+        base = "Top N by tail momentum rank (no quadrant filter)"
+    else:
+        base = "Leading/Improving · Rank Δ>0 · momentum+reliability score"
+    parts = [base]
+    if hold_until_rank_exit:
+        parts.append(f"keep holdings while rank ≤ {max_hold_rank}")
+    if exit_below_9ema:
+        parts.append("exit when close < 9 EMA · no refill until rebalance")
+    return " · ".join(parts)

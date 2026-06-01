@@ -87,7 +87,9 @@ class RrgAppConfig:
     etf_recommend_count: int = 7
     etf_recommend_title: str = "Recommended Top 7 (weekly swing)"
     pick_strategy: str = "recommend"
-    max_hold_rank: int = 20
+    hold_until_rank_exit: bool = False
+    max_hold_rank: int = 10
+    exit_below_9ema: bool = False
     backtest_enabled: bool = False
     backtest_profile: str = "india"  # "india" | "us"
     backtest_universe_mode: str = "expanded"  # US: "core" | "expanded"
@@ -707,8 +709,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     show_rrg_cb.pack(side=tk.LEFT, padx=(0, 12))
 
     _pick_holdings_cache: dict[int, list[str]] = {}
+    _active_holdings_cache: dict[int, list[str]] = {}
+    _etf_daily_close: dict[str, pd.Series] = {}
     _current_pick_row_indices: set[int] = set()
     pick_strategy_var = tk.StringVar()
+    hold_until_rank_exit_var = tk.BooleanVar(value=config.hold_until_rank_exit)
+    exit_below_9ema_var = tk.BooleanVar(value=config.exit_below_9ema)
     max_hold_rank_var = tk.IntVar(value=config.max_hold_rank)
     pick_auto_show_var = tk.BooleanVar(value=True)
     _pick_label_to_key: dict[str, str] = {}
@@ -727,6 +733,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
         def _clear_pick_cache() -> None:
             _pick_holdings_cache.clear()
+            _active_holdings_cache.clear()
+            _etf_daily_close.clear()
             _current_pick_row_indices.clear()
 
         pick_row = tk.Frame(controls_frame)
@@ -739,6 +747,17 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             width=42,
             state="readonly",
         ).pack(side=tk.LEFT, padx=(0, 12))
+        hold_rank_cb = ttk.Checkbutton(
+            pick_row,
+            text="Hold until rank worse",
+            variable=hold_until_rank_exit_var,
+        )
+        hold_rank_cb.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(
+            pick_row,
+            text="Exit below 9 EMA",
+            variable=exit_below_9ema_var,
+        ).pack(side=tk.LEFT, padx=(0, 8))
         max_rank_lbl = tk.Label(pick_row, text="Max hold rank:")
         max_rank_spin = ttk.Spinbox(
             pick_row,
@@ -749,7 +768,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         )
 
         def _toggle_max_hold_rank_ui(*_) -> None:
-            if _pick_strategy_key() == "top_n_rank_exit":
+            if hold_until_rank_exit_var.get():
                 max_rank_lbl.pack(side=tk.LEFT)
                 max_rank_spin.pack(side=tk.LEFT, padx=(4, 12))
             else:
@@ -772,8 +791,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         def _toggle_max_hold_rank_ui(*_) -> None:
             pass
 
+        hold_until_rank_exit_var = tk.BooleanVar(value=False)
+        exit_below_9ema_var = tk.BooleanVar(value=False)
         max_rank_lbl = None
         max_rank_spin = None
+        hold_rank_cb = None
         pick_auto_show_cb = None
 
     if config.backtest_enabled:
@@ -798,7 +820,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                         else {}
                     ),
                     "pick_strategy": _pick_strategy_key(),
+                    "hold_until_rank_exit": bool(hold_until_rank_exit_var.get()),
                     "max_hold_rank": int(max_hold_rank_var.get()),
+                    "exit_below_9ema": bool(exit_below_9ema_var.get()),
                 }
                 if config.etf_table_extras
                 else None,
@@ -1772,6 +1796,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 prev_ranks=prev_ranks,
                 top_n=top_n,
                 prev_holdings=holdings,
+                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
                 max_hold_rank=max_rank,
             )
             return pick_india_portfolio(strategy, ctx)
@@ -1796,18 +1821,108 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             prev_ranks=prev_ranks,
             top_n=top_n,
             prev_holdings=holdings,
+            hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
             max_hold_rank=max_rank,
         )
         return pick_us_portfolio(strategy, ctx)
 
+    def _pick_state_cache_needed() -> bool:
+        return bool(hold_until_rank_exit_var.get() or exit_below_9ema_var.get())
+
+    def _ensure_etf_daily_close() -> None:
+        if _etf_daily_close or not exit_below_9ema_var.get():
+            return
+        from datetime import timedelta
+
+        from utils.nse_bhavcopy import today_ist
+
+        end_d = today_ist()
+        start_d = (_rrg_index[0].date() if len(_rrg_index) else end_d) - timedelta(
+            days=400
+        )
+        if config.etf_recommend_profile == "india":
+            from utils.nse_bhavcopy import load_nse_cm_histories_range
+
+            syms = {
+                (index_metadata["ref_label"][j] or indices[j])
+                .strip()
+                .upper()
+                .replace(".NS", "")
+                for j in range(len(indices))
+            }
+            syms.discard("")
+            batch = load_nse_cm_histories_range(
+                sorted(syms),
+                start_d,
+                end_d,
+                min_points=5,
+                quiet=True,
+                asset_label="ETF symbol",
+                freq="day",
+            )
+            for sym, series in batch.items():
+                if len(series):
+                    _etf_daily_close[sym] = series.sort_index()
+        else:
+            from utils.yahoo_weekly import load_yahoo_histories_range
+
+            tickers = [t for t in indices if t != config.benchmark_nse]
+            batch = load_yahoo_histories_range(
+                tickers,
+                start_d,
+                end_d,
+                min_points=5,
+                quiet=True,
+                freq="day",
+            )
+            for sym, series in batch.items():
+                if len(series):
+                    _etf_daily_close[sym] = series.sort_index()
+
+    def _weekly_price_for_ticker(ticker: str) -> pd.Series:
+        bare = ticker.strip().upper().replace(".NS", "")
+        for j, row_id in enumerate(indices):
+            ref = (index_metadata["ref_label"][j] or row_id).strip().upper().replace(
+                ".NS", ""
+            )
+            if bare in (ref, row_id.upper().replace(".NS", "")):
+                return indices_data[row_id]
+        return pd.Series(dtype=float)
+
+    def _advance_active_holdings(
+        idx: int, rebal_tickers: list[str], end_ts, next_ts
+    ) -> list[str]:
+        from momentum.rrg_ema_exit import (
+            filter_holdings_below_9ema,
+            simulate_week_with_9ema_exits,
+        )
+
+        holdings = list(rebal_tickers)
+        if not exit_below_9ema_var.get():
+            return holdings
+        _ensure_etf_daily_close()
+        holdings = filter_holdings_below_9ema(holdings, _etf_daily_close, end_ts)
+        if idx + 1 >= len(_rrg_index):
+            return holdings
+        weekly = {t: _weekly_price_for_ticker(t) for t in holdings}
+        _, end_holdings, _ = simulate_week_with_9ema_exits(
+            holdings,
+            end_ts,
+            next_ts,
+            _etf_daily_close,
+            weekly,
+            config.etf_recommend_count,
+        )
+        return end_holdings
+
     def _warm_pick_holdings_cache(target_week_idx: int) -> None:
-        if _pick_strategy_key() != "top_n_rank_exit":
+        if not _pick_state_cache_needed():
             return
         start_idx = max(_date_slider_min_idx(), tail)
         for idx in range(start_idx, target_week_idx + 1):
             if idx in _pick_holdings_cache:
                 continue
-            prev = _pick_holdings_cache.get(idx - 1, [])
+            prev_active = _active_holdings_cache.get(idx - 1, [])
             end_ts_i = _rrg_index[idx]
             start_ts_i = _rrg_index[idx - tail]
             curr = _rank_by_row(idx)
@@ -1830,9 +1945,16 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 rank_delta_i,
                 curr,
                 prev_r,
-                prev_holdings=prev,
+                prev_holdings=prev_active,
             )
-            _pick_holdings_cache[idx] = [p.ticker for p in picks_i]
+            rebal_tickers = [p.ticker for p in picks_i]
+            _pick_holdings_cache[idx] = rebal_tickers
+            next_ts = (
+                _rrg_index[idx + 1] if idx + 1 < len(_rrg_index) else end_ts_i
+            )
+            _active_holdings_cache[idx] = _advance_active_holdings(
+                idx, rebal_tickers, end_ts_i, next_ts
+            )
 
     def _strategy_picks_for_week(
         end_date_idx_local: int,
@@ -1843,12 +1965,18 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         curr_ranks: dict[int, int],
         prev_ranks: dict[int, int],
     ):
-        strategy = _pick_strategy_key()
         prev_holdings: list[str] = []
-        if strategy == "top_n_rank_exit" and end_date_idx_local > 0:
-            if end_date_idx_local - 1 not in _pick_holdings_cache:
+        if _pick_state_cache_needed() and end_date_idx_local > 0:
+            if end_date_idx_local - 1 not in _active_holdings_cache:
                 _warm_pick_holdings_cache(end_date_idx_local - 1)
-            prev_holdings = _pick_holdings_cache.get(end_date_idx_local - 1, [])
+            if exit_below_9ema_var.get():
+                prev_holdings = _active_holdings_cache.get(
+                    end_date_idx_local - 1, []
+                )
+            else:
+                prev_holdings = _pick_holdings_cache.get(
+                    end_date_idx_local - 1, []
+                )
         picks = _compute_picks_at_week(
             end_date_idx_local,
             ranked,
@@ -1859,11 +1987,21 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             prev_ranks,
             prev_holdings=prev_holdings,
         )
-        if strategy == "top_n_rank_exit":
+        if _pick_state_cache_needed():
             stale = [k for k in _pick_holdings_cache if k > end_date_idx_local]
             for k in stale:
                 del _pick_holdings_cache[k]
-            _pick_holdings_cache[end_date_idx_local] = [p.ticker for p in picks]
+                _active_holdings_cache.pop(k, None)
+            rebal_tickers = [p.ticker for p in picks]
+            _pick_holdings_cache[end_date_idx_local] = rebal_tickers
+            next_ts = (
+                _rrg_index[end_date_idx_local + 1]
+                if end_date_idx_local + 1 < len(_rrg_index)
+                else end_ts
+            )
+            _active_holdings_cache[end_date_idx_local] = _advance_active_holdings(
+                end_date_idx_local, rebal_tickers, end_ts, next_ts
+            )
         return picks
 
     def refresh_recommendations_panel(
@@ -1905,7 +2043,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             end_l = format_date_label(int(date_scale.get()))
             subtitle = pick_strategy_subtitle(
                 _pick_strategy_key(),
+                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
                 max_hold_rank=int(max_hold_rank_var.get()),
+                exit_below_9ema=bool(exit_below_9ema_var.get()),
             )
             recommend_dates_label.config(
                 text=f"Date: {end_l}  ·  {subtitle}"
@@ -2448,17 +2588,19 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     install_copy_support(root)
     if config.etf_table_extras:
 
-        def _on_pick_strategy_change(*_) -> None:
+        def _on_pick_controls_change(*_) -> None:
             _clear_pick_cache()
             _toggle_max_hold_rank_ui()
             redraw_chart()
 
-        pick_strategy_var.trace_add("write", _on_pick_strategy_change)
-        max_hold_rank_var.trace_add(
-            "write", lambda *_: (_clear_pick_cache(), redraw_chart())
-        )
+        pick_strategy_var.trace_add("write", _on_pick_controls_change)
+        hold_until_rank_exit_var.trace_add("write", _on_pick_controls_change)
+        exit_below_9ema_var.trace_add("write", _on_pick_controls_change)
+        max_hold_rank_var.trace_add("write", _on_pick_controls_change)
         if pick_auto_show_cb is not None:
             pick_auto_show_cb.config(command=redraw_chart)
+        if hold_rank_cb is not None:
+            hold_rank_cb.config(command=_on_pick_controls_change)
         _toggle_max_hold_rank_ui()
     if _sync_side_scroll is not None:
         root.after_idle(_sync_side_scroll)

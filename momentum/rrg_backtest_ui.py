@@ -82,7 +82,7 @@ def _backtest_profile(name: str) -> _BacktestUiProfile:
     )
 
 
-def     open_rrg_backtest(
+def open_rrg_backtest(
     parent: tk.Misc,
     *,
     profile: str = "india",
@@ -91,15 +91,21 @@ def     open_rrg_backtest(
     top_n: int = 7,
     backtest_extra: dict[str, Any] | None = None,
     pick_strategy: str | None = None,
+    hold_until_rank_exit: bool | None = None,
     max_hold_rank: int | None = None,
+    exit_below_9ema: bool | None = None,
 ) -> tk.Toplevel:
     """Open RRG backtest as a normal secondary window (not modal)."""
     prof = _backtest_profile(profile)
     bt_extra = dict(backtest_extra or {})
     if pick_strategy is not None:
         bt_extra.setdefault("pick_strategy", pick_strategy)
+    if hold_until_rank_exit is not None:
+        bt_extra.setdefault("hold_until_rank_exit", hold_until_rank_exit)
     if max_hold_rank is not None:
         bt_extra.setdefault("max_hold_rank", max_hold_rank)
+    if exit_below_9ema is not None:
+        bt_extra.setdefault("exit_below_9ema", exit_below_9ema)
     win = tk.Toplevel(parent)
     win.title(prof.title)
     win.geometry("1280x820")
@@ -153,7 +159,9 @@ def     open_rrg_backtest(
     tk.Entry(params, textvariable=capital_var, width=10).grid(row=0, column=11, padx=4)
 
     pick_strategy_var = tk.StringVar()
-    max_hold_rank_var = tk.IntVar(value=20)
+    hold_until_rank_exit_var = tk.BooleanVar(value=False)
+    exit_below_9ema_var = tk.BooleanVar(value=False)
+    max_hold_rank_var = tk.IntVar(value=10)
     _pick_label_to_key: dict[str, str] = {}
     max_rank_label: tk.Label | None = None
     max_rank_spin: ttk.Spinbox | None = None
@@ -165,14 +173,24 @@ def     open_rrg_backtest(
         pick_strategy_var.set(PICK_STRATEGIES["recommend"])
         strat_row = tk.Frame(params)
         strat_row.grid(row=1, column=0, columnspan=12, sticky="w", pady=(6, 0))
-        tk.Label(strat_row, text="Pick strategy:").pack(side=tk.LEFT)
+        tk.Label(strat_row, text="Base strategy:").pack(side=tk.LEFT)
         ttk.Combobox(
             strat_row,
             textvariable=pick_strategy_var,
             values=list(PICK_STRATEGIES.values()),
-            width=44,
+            width=40,
             state="readonly",
         ).pack(side=tk.LEFT, padx=(4, 12))
+        ttk.Checkbutton(
+            strat_row,
+            text="Hold until rank worse",
+            variable=hold_until_rank_exit_var,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Checkbutton(
+            strat_row,
+            text="Exit below 9 EMA",
+            variable=exit_below_9ema_var,
+        ).pack(side=tk.LEFT, padx=(0, 8))
         max_rank_label = tk.Label(strat_row, text="Max hold rank:")
         max_rank_spin = ttk.Spinbox(
             strat_row,
@@ -185,26 +203,31 @@ def     open_rrg_backtest(
         def _toggle_max_hold_rank(*_) -> None:
             if max_rank_label is None or max_rank_spin is None:
                 return
-            label = pick_strategy_var.get()
-            key = _pick_label_to_key.get(label, "recommend")
-            if key == "top_n_rank_exit":
+            if hold_until_rank_exit_var.get():
                 max_rank_label.pack(side=tk.LEFT)
                 max_rank_spin.pack(side=tk.LEFT, padx=(4, 0))
             else:
                 max_rank_label.pack_forget()
                 max_rank_spin.pack_forget()
 
-        pick_strategy_var.trace_add("write", _toggle_max_hold_rank)
+        hold_until_rank_exit_var.trace_add("write", _toggle_max_hold_rank)
         _toggle_max_hold_rank()
 
     if profile in ("india", "us") and bt_extra.get("pick_strategy"):
         from momentum.etf.india_rrg_pick_strategies import PICK_STRATEGIES as _PS
 
         ps_key = str(bt_extra["pick_strategy"])
+        if ps_key == "top_n_rank_exit":
+            ps_key = "top_n"
+            hold_until_rank_exit_var.set(True)
         if ps_key in _PS:
             pick_strategy_var.set(_PS[ps_key])
+    if bt_extra.get("hold_until_rank_exit"):
+        hold_until_rank_exit_var.set(True)
     if bt_extra.get("max_hold_rank") is not None:
         max_hold_rank_var.set(int(bt_extra["max_hold_rank"]))
+    if bt_extra.get("exit_below_9ema"):
+        exit_below_9ema_var.set(True)
 
     mode_var = tk.StringVar(value="step")
     mode_row = tk.Frame(params)
@@ -366,7 +389,9 @@ def     open_rrg_backtest(
             df.attrs["pick_strategy"] = _pick_label_to_key.get(
                 pick_strategy_var.get(), "recommend"
             )
+            df.attrs["hold_until_rank_exit"] = bool(hold_until_rank_exit_var.get())
             df.attrs["max_hold_rank"] = int(max_hold_rank_var.get())
+            df.attrs["exit_below_9ema"] = bool(exit_below_9ema_var.get())
         cap = float(capital_var.get())
         if profile == "us" and hasattr(engine, "_benchmark"):
             m = prof.compute_metrics(df, cap, benchmark=engine._benchmark)
@@ -517,15 +542,20 @@ def     open_rrg_backtest(
             rrg_window=int(window_combo.get()),
             initial_capital=float(capital_var.get()),
         )
-        if profile in ("india", "us"):
+        if profile in ("india", "us") and _pick_label_to_key:
+            kw["pick_strategy"] = _pick_label_to_key.get(
+                pick_strategy_var.get(), "recommend"
+            )
+            kw["hold_until_rank_exit"] = bool(hold_until_rank_exit_var.get())
+            kw["max_hold_rank"] = int(max_hold_rank_var.get())
+            kw["exit_below_9ema"] = bool(exit_below_9ema_var.get())
+        if profile == "us":
             kw.update(
                 {
                     k: v
                     for k, v in bt_extra.items()
                     if k
                     in (
-                        "pick_strategy",
-                        "max_hold_rank",
                         "universe_mode",
                         "min_adv_usd",
                         "vol_percentile",

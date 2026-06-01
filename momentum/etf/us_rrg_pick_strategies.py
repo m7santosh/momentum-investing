@@ -1,11 +1,16 @@
-"""US RRG backtest portfolio pick rules (alternatives to swing recommend)."""
+"""US RRG portfolio pick rules (base strategies + optional rank-hold overlay)."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
-from momentum.etf.india_rrg_pick_strategies import PICK_STRATEGIES, pick_strategy_label
+from momentum.etf.india_rrg_pick_strategies import (
+    BASE_PICK_STRATEGIES,
+    PICK_STRATEGIES,
+    pick_strategy_label,
+    pick_strategy_subtitle,
+)
 from momentum.etf.us_rrg_recommendations import (
     UsEtfRecommendation,
     parse_rank_delta,
@@ -14,9 +19,11 @@ from momentum.etf.us_rrg_recommendations import (
 from momentum.rrg_core import get_status
 
 __all__ = [
+    "BASE_PICK_STRATEGIES",
     "PICK_STRATEGIES",
     "UsPickContext",
     "pick_strategy_label",
+    "pick_strategy_subtitle",
     "pick_us_portfolio",
 ]
 
@@ -39,7 +46,8 @@ class UsPickContext:
     prev_ranks: dict[int, int]
     top_n: int
     prev_holdings: list[str]
-    max_hold_rank: int = 20
+    hold_until_rank_exit: bool = False
+    max_hold_rank: int = 10
 
 
 def _ticker(ctx: UsPickContext, row_j: int) -> str:
@@ -96,8 +104,28 @@ def _eligible_by_momentum(ctx: UsPickContext) -> list[int]:
     return out
 
 
+def pick_leading_only(ctx: UsPickContext) -> list[UsEtfRecommendation]:
+    eligible: list[int] = []
+    for j in ctx.ranked_row_indices:
+        ticker = _ticker(ctx, j)
+        if not ticker:
+            continue
+        try:
+            rsr = float(ctx.series_at_fn(ctx.rsr_series_by_row[j], ctx.end_ts))
+            rsm = float(ctx.series_at_fn(ctx.rsm_series_by_row[j], ctx.end_ts))
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        if get_status(rsr, rsm) != "leading":
+            continue
+        if ctx.change_pct_fn(j) == float("-inf"):
+            continue
+        eligible.append(j)
+        if len(eligible) >= ctx.top_n:
+            break
+    return _row_indices_to_picks(ctx, eligible)
+
+
 def pick_leading_improved(ctx: UsPickContext) -> list[UsEtfRecommendation]:
-    """Top N in Leading quadrant with positive rank delta, best momentum first."""
     eligible: list[int] = []
     for j in ctx.ranked_row_indices:
         ticker = _ticker(ctx, j)
@@ -122,46 +150,11 @@ def pick_leading_improved(ctx: UsPickContext) -> list[UsEtfRecommendation]:
 
 
 def pick_top_n_plain(ctx: UsPickContext) -> list[UsEtfRecommendation]:
-    """Top N by tail-window momentum rank — no quadrant or rank-delta filter."""
     eligible = _eligible_by_momentum(ctx)[: ctx.top_n]
     return _row_indices_to_picks(ctx, eligible)
 
 
-def pick_top_n_rank_exit(ctx: UsPickContext) -> list[UsEtfRecommendation]:
-    """Keep holdings while rank <= threshold; refill to N from momentum rank."""
-    n = len(ctx.indices)
-    ticker_to_j: dict[str, int] = {}
-    for j in range(n):
-        ticker = _ticker(ctx, j)
-        if ticker and ticker not in ticker_to_j:
-            ticker_to_j[ticker] = j
-
-    held: list[str] = []
-    for ticker in ctx.prev_holdings:
-        bare = ticker.strip().upper()
-        j = ticker_to_j.get(bare)
-        if j is None:
-            continue
-        rank = ctx.curr_ranks.get(j, n + 1)
-        if rank <= ctx.max_hold_rank:
-            held.append(bare)
-
-    held_set = set(held)
-    for j in _eligible_by_momentum(ctx):
-        if len(held) >= ctx.top_n:
-            break
-        ticker = _ticker(ctx, j)
-        if ticker in held_set:
-            continue
-        held.append(ticker)
-        held_set.add(ticker)
-
-    row_indices = [ticker_to_j[t] for t in held if t in ticker_to_j]
-    return _row_indices_to_picks(ctx, row_indices[: ctx.top_n])
-
-
-def pick_us_portfolio(strategy: str, ctx: UsPickContext) -> list[UsEtfRecommendation]:
-    """Dispatch to the configured US backtest pick strategy."""
+def _pick_base(strategy: str, ctx: UsPickContext) -> list[UsEtfRecommendation]:
     key = (strategy or "recommend").strip().lower()
     if key == "recommend":
         return recommend_us_etfs(
@@ -179,13 +172,75 @@ def pick_us_portfolio(strategy: str, ctx: UsPickContext) -> list[UsEtfRecommenda
             prev_ranks=ctx.prev_ranks,
             limit=ctx.top_n,
         )
+    if key == "leading_only":
+        return pick_leading_only(ctx)
     if key == "leading_improved":
         return pick_leading_improved(ctx)
     if key == "top_n":
         return pick_top_n_plain(ctx)
     if key == "top_n_rank_exit":
-        return pick_top_n_rank_exit(ctx)
+        return pick_top_n_plain(ctx)
     raise ValueError(
-        f"Unknown pick strategy {strategy!r}. "
-        f"Choose from: {', '.join(PICK_STRATEGIES)}"
+        f"Unknown base pick strategy {strategy!r}. "
+        f"Choose from: {', '.join(BASE_PICK_STRATEGIES)}"
     )
+
+
+def apply_rank_exit_overlay(
+    ctx: UsPickContext,
+    base_picks: list[UsEtfRecommendation],
+) -> list[UsEtfRecommendation]:
+    n = len(ctx.indices)
+    ticker_to_j: dict[str, int] = {}
+    for j in range(n):
+        ticker = _ticker(ctx, j)
+        if ticker and ticker not in ticker_to_j:
+            ticker_to_j[ticker] = j
+
+    pick_by_ticker = {p.ticker: p for p in base_picks}
+
+    held: list[UsEtfRecommendation] = []
+    for ticker in ctx.prev_holdings:
+        bare = ticker.strip().upper()
+        j = ticker_to_j.get(bare)
+        if j is None:
+            continue
+        rank = ctx.curr_ranks.get(j, n + 1)
+        if rank <= ctx.max_hold_rank:
+            held.append(pick_by_ticker.get(bare) or _row_indices_to_picks(ctx, [j])[0])
+
+    held_tickers = {p.ticker for p in held}
+    merged: list[UsEtfRecommendation] = list(held)
+    for p in base_picks:
+        if len(merged) >= ctx.top_n:
+            break
+        if p.ticker in held_tickers:
+            continue
+        merged.append(p)
+        held_tickers.add(p.ticker)
+
+    for i, p in enumerate(merged[: ctx.top_n], start=1):
+        merged[i - 1] = UsEtfRecommendation(
+            pick_rank=i,
+            row_idx=p.row_idx,
+            ticker=p.ticker,
+            name=p.name,
+            change_pct=p.change_pct,
+            rank_delta=p.rank_delta,
+            vol_pct=p.vol_pct,
+            quadrant=p.quadrant,
+            size_hint=p.size_hint,
+            score=p.score,
+            reason=p.reason,
+        )
+    return merged[: ctx.top_n]
+
+
+def pick_us_portfolio(strategy: str, ctx: UsPickContext) -> list[UsEtfRecommendation]:
+    key = (strategy or "recommend").strip().lower()
+    hold = ctx.hold_until_rank_exit or key == "top_n_rank_exit"
+    base_key = "top_n" if key == "top_n_rank_exit" else key
+    base = _pick_base(base_key, ctx)
+    if not hold:
+        return base
+    return apply_rank_exit_overlay(ctx, base)
