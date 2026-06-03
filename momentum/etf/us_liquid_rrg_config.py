@@ -152,7 +152,7 @@ def build_liquid_rrg_config(
         count_summary=count_summary,
         analysis_period=period,
         rrg_window=rrg_window,
-        default_tail=2,
+        default_tail=1,
         top_movers_panel=True,
         top_movers_count=10,
         top_movers_title="Top 10 — Was vs Now",

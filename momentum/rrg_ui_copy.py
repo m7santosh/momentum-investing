@@ -77,6 +77,8 @@ class TableRegionCopy:
         self._grids.append(grid)
         for r, row in enumerate(cells):
             for c, widget in enumerate(row):
+                if widget is None:
+                    continue
                 cell_set.add(widget)
                 widget._copy_grid_idx = idx  # noqa: SLF001
                 self.set_cell_pos(widget, r, c)
@@ -98,6 +100,8 @@ class TableRegionCopy:
     def sync_styles(self, grid: dict) -> None:
         for row in grid["cells"]:
             for widget in row:
+                if widget is None:
+                    continue
                 self._remember_style(grid, widget)
 
     def _remember_style(self, grid: dict, widget: tk.Misc) -> None:
@@ -180,6 +184,8 @@ class TableRegionCopy:
         cmin, cmax = min(c0, c1), max(c0, c1)
         for row in grid["cells"]:
             for widget in row:
+                if widget is None:
+                    continue
                 pos = self._pos(widget)
                 if pos is None:
                     continue

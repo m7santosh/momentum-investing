@@ -15,12 +15,24 @@ from matplotlib.patches import FancyArrowPatch
 from tkinter import ttk
 
 from momentum.rrg_portfolio_panel import (
-    PORTFOLIO_PANEL_GRID_KEYS,
-    PORTFOLIO_PANEL_HEADERS,
+    PORTFOLIO_PANEL_NUM_COLS,
+    PORTFOLIO_PANEL_PICK_GRID_ROW,
+    PORTFOLIO_PANEL_PICK_ROW,
+    PORTFOLIO_PANEL_REBAL_COL,
+    PORTFOLIO_PANEL_SMALL_KEYS,
+    PORTFOLIO_PANEL_TAG_KEYS,
+    PORTFOLIO_PANEL_WAS_COL,
+    PORTFOLIO_PANEL_WAS_ROW,
+    configure_portfolio_panel_table_columns,
     build_portfolio_panel,
     format_portfolio_cell,
+    live_close_for_panel,
     norm_ticker as _norm_ticker,
+    pad_rebal_slots,
     portfolio_panel_dates_line,
+    portfolio_panel_pick_header,
+    portfolio_panel_totals_line,
+    portfolio_panel_was_header,
 )
 from momentum.rrg_ranking import (
     format_change_pct,
@@ -52,6 +64,7 @@ from momentum.rrg_core import (
     rrg_min_history_bars,
     rrg_nav_bars,
     rrg_normalize_bar_unit,
+    rrg_format_date,
     rrg_period_display,
     rrg_period_label,
     rrg_slider_index_bars,
@@ -155,19 +168,21 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     def _build_rrg_date_index():
         """Bar dates for the Date slider (analysis window + tail buffer)."""
-        bench = benchmark_data.dropna().sort_index()
-        warmup = rrg_warmup_bars(window, bar_unit)
-        slider_bars = rrg_slider_index_bars(period, tail=RRG_MAX_TAIL, unit=bar_unit)
-        if len(bench) > warmup:
-            cal = bench.index[warmup:]
-        elif not rsm_tickers:
-            return pd.Index([])
-        else:
-            longest = max(rsm_tickers, key=lambda s: len(s.index))
-            cal = longest.index.sort_values()
-        if len(cal) > slider_bars:
-            cal = cal[-slider_bars:]
-        return cal
+        from momentum.rrg_core import rrg_build_slider_date_index
+
+        daily_sources = None
+        if bar_unit == "day":
+            daily_sources = [
+                _etf_daily_close.get(sym, pd.Series(dtype=float))
+                for sym in indices
+            ]
+        return rrg_build_slider_date_index(
+            benchmark_data,
+            analysis_period=period,
+            window=window,
+            unit=bar_unit,
+            daily_sources=daily_sources,
+        )
 
     def _date_slider_max_idx() -> int:
         """Latest bar on the index (most recent EOD / today)."""
@@ -505,7 +520,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     'y': rsm_val,
                     'index': display,
                     'ref_label': ref_label,
-                    'date': str(date).split(' ')[0],
+                    'date': rrg_format_date(date),
                     'rsr': rsr_val,
                     'rsm': rsm_val,
                     'status': status.capitalize() if status else '',
@@ -628,7 +643,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     end_date = _rrg_index[end_date_idx]
 
     def format_date_label(idx):
-        return str(_rrg_index[int(idx)]).split(' ')[0]
+        return rrg_format_date(_rrg_index[int(idx)])
 
     def _tail_marker_sizes(n_points: int, *, base: int | None = None) -> list[int]:
         size = base if base is not None else TAIL_MARKER_SIZE
@@ -802,10 +817,16 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         return config.etf_recommend_count
 
     if config.etf_table_extras:
-        from momentum.etf.india_rrg_pick_strategies import (
-            PICK_STRATEGIES,
-            pick_strategy_subtitle,
-        )
+        if config.etf_recommend_profile == "us":
+            from momentum.etf.us_rrg_pick_strategies import (
+                PICK_STRATEGIES,
+                pick_strategy_subtitle,
+            )
+        else:
+            from momentum.etf.india_rrg_pick_strategies import (
+                PICK_STRATEGIES,
+                pick_strategy_subtitle,
+            )
 
         _pick_label_to_key = {label: key for key, label in PICK_STRATEGIES.items()}
         pick_strategy_var.set(PICK_STRATEGIES.get(config.pick_strategy, PICK_STRATEGIES["recommend"]))
@@ -899,6 +920,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 profile=config.backtest_profile,
                 rrg_window=window,
                 tail=int(float(tail_scale.get())),
+                analysis_period=period,
                 top_n=_portfolio_top_n(),
                 backtest_extra={
                     **(
@@ -1066,7 +1088,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     movers_panel = None
     movers_title_label = None
     movers_dates_label = None
+    movers_totals_label = None
     movers_exits_label = None
+    movers_was_header_cells: list[tk.Label] = []
+    movers_pick_header_cells: list[tk.Label] = []
     movers_row_widgets: list[dict[str, tk.Label]] = []
     side_panel = None
     side_content = None
@@ -1093,8 +1118,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             widget.bind('<Button-5>', _on_side_mousewheel)
 
     def _build_movers_panel(parent: tk.Frame) -> None:
-        nonlocal movers_panel, movers_title_label, movers_dates_label, movers_exits_label
-        nonlocal movers_copy_grid
+        nonlocal movers_panel, movers_title_label, movers_dates_label, movers_totals_label
+        nonlocal movers_exits_label, movers_was_header_cells, movers_pick_header_cells
+        nonlocal movers_was_copy_grid, movers_pick_copy_grid
         movers_panel = tk.Frame(
             parent,
             padx=6,
@@ -1124,53 +1150,113 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             wraplength=860 if use_right_extras else 320,
             justify=tk.LEFT,
         )
-        movers_dates_label.pack(fill=tk.X, pady=(0, 4))
+        movers_dates_label.pack(fill=tk.X, pady=(0, 2))
+        movers_totals_label = tk.Label(
+            movers_panel,
+            text="",
+            font=("Arial", 9, "bold"),
+            anchor="w",
+            wraplength=860 if use_right_extras else 320,
+            justify=tk.LEFT,
+        )
+        movers_totals_label.pack(fill=tk.X, pady=(0, 4))
 
         slot_count = max(
             config.top_movers_count, config.etf_recommend_count, _PORTFOLIO_N_MAX
         )
-        movers_table = tk.Frame(movers_panel)
-        movers_table.pack(fill=tk.X)
-        movers_header_cells: list[tk.Label] = []
-        for col, (_key, header, anchor, min_px) in enumerate(PORTFOLIO_PANEL_HEADERS):
-            movers_table.columnconfigure(
-                col,
-                minsize=min_px,
-                weight=1 if _key in ("was", "now", "rebal") else 0,
-            )
-            hdr = tk.Label(
-                movers_table,
-                text=header,
-                font=('Arial', 9, 'bold'),
-                anchor=anchor,
-                relief=tk.RIDGE,
-            )
-            hdr.grid(row=0, column=col, sticky='ew', padx=2, pady=1)
-            movers_header_cells.append(hdr)
+        grids_wrap = tk.Frame(movers_panel)
+        grids_wrap.pack(fill=tk.X)
 
-        movers_body_cells: list[list[tk.Label]] = []
-        for slot in range(slot_count):
-            widgets: dict[str, tk.Label] = {}
-            grid_row = slot + 1
+        was_table = tk.Frame(grids_wrap)
+        was_table.pack(fill=tk.X)
+        configure_portfolio_panel_table_columns(was_table)
+
+        pick_table = tk.Frame(grids_wrap)
+        pick_table.pack(fill=tk.X, pady=(6, 0))
+        configure_portfolio_panel_table_columns(pick_table)
+
+        movers_was_header_cells.clear()
+        movers_pick_header_cells.clear()
+
+        def _panel_cell_font(key: str) -> tuple[str, int]:
+            return ('Arial', 8) if key in PORTFOLIO_PANEL_SMALL_KEYS else ('Arial', 9)
+
+        def _panel_cell_fg(key: str) -> str:
+            return '#1565C0' if key in PORTFOLIO_PANEL_TAG_KEYS else 'black'
+
+        def _build_header_row(
+            table: tk.Frame,
+            specs: tuple[tuple[str, str, str, int], ...],
+            *,
+            out: list[tk.Label],
+        ) -> list[tk.Label]:
             row_cells: list[tk.Label] = []
-            for col, (key, _header, anchor, _min_px) in enumerate(PORTFOLIO_PANEL_HEADERS):
-                font = ('Arial', 8) if key in ('tag', 'pick_tag', 'mid_9ema') else ('Arial', 9)
-                fg = '#1565C0' if key in ('tag', 'pick_tag') else 'black'
-                lbl = tk.Label(
-                    movers_table,
-                    font=font,
+            for col, (_key, header, anchor, _min_px) in enumerate(specs):
+                hdr = tk.Label(
+                    table,
+                    text=header,
+                    font=('Arial', 9, 'bold'),
                     anchor=anchor,
                     relief=tk.RIDGE,
-                    fg=fg,
                 )
-                lbl.grid(row=grid_row, column=col, sticky='ew', padx=2, pady=1)
-                widgets[key] = lbl
-                row_cells.append(lbl)
-            movers_row_widgets.append(widgets)
-            movers_body_cells.append(row_cells)
+                hdr.grid(row=0, column=col, sticky='ew', padx=2, pady=1)
+                out.append(hdr)
+                row_cells.append(hdr)
+            return row_cells
 
-        movers_copy_grid = TableRegionCopy.for_window(root).register_grid(
-            [movers_header_cells, *movers_body_cells]
+        was_header_row = _build_header_row(
+            was_table, PORTFOLIO_PANEL_WAS_ROW, out=movers_was_header_cells
+        )
+        pick_header_row = _build_header_row(
+            pick_table, PORTFOLIO_PANEL_PICK_GRID_ROW, out=movers_pick_header_cells
+        )
+
+        movers_body_was_cells: list[list[tk.Label]] = []
+        movers_body_pick_cells: list[list[tk.Label]] = []
+        for slot in range(slot_count):
+            widgets: dict[str, tk.Label] = {}
+            was_grid_row = slot + 1
+            pick_grid_row = slot + 1
+            was_row_cells: list[tk.Label] = []
+            pick_row_cells: list[tk.Label] = []
+
+            for col, (key, _header, anchor, _min_px) in enumerate(
+                PORTFOLIO_PANEL_WAS_ROW
+            ):
+                lbl = tk.Label(
+                    was_table,
+                    font=_panel_cell_font(key),
+                    anchor=anchor,
+                    relief=tk.RIDGE,
+                    fg=_panel_cell_fg(key),
+                )
+                lbl.grid(row=was_grid_row, column=col, sticky='ew', padx=2, pady=1)
+                widgets[key] = lbl
+                was_row_cells.append(lbl)
+
+            for col, (key, _header, anchor, _min_px) in enumerate(
+                PORTFOLIO_PANEL_PICK_GRID_ROW
+            ):
+                widget_key = "pick_rank" if key == "rank" else key
+                lbl = tk.Label(
+                    pick_table,
+                    font=_panel_cell_font(key),
+                    anchor=anchor,
+                    relief=tk.RIDGE,
+                    fg=_panel_cell_fg(key),
+                )
+                lbl.grid(row=pick_grid_row, column=col, sticky='ew', padx=2, pady=1)
+                widgets[widget_key] = lbl
+                pick_row_cells.append(lbl)
+
+            movers_row_widgets.append(widgets)
+            movers_body_was_cells.append(was_row_cells)
+            movers_body_pick_cells.append(pick_row_cells)
+
+        tc = TableRegionCopy.for_window(root)
+        movers_was_copy_grid = tc.register_grid([was_header_row, *movers_body_was_cells])
+        movers_pick_copy_grid = tc.register_grid(
+            [pick_header_row, *movers_body_pick_cells]
         )
         movers_exits_label = None
 
@@ -1215,6 +1301,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     wrap = max(panel_w - 24, 200)
                     if movers_dates_label is not None:
                         movers_dates_label.config(wraplength=wrap)
+                    if movers_totals_label is not None:
+                        movers_totals_label.config(wraplength=wrap)
 
         def _save_side_pane_sash(_event=None):
             nonlocal _side_pane_sash_pos, _side_pane_auto
@@ -1285,7 +1373,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     recommend_copy_grid: dict | None = None
     recommend_exits_label: tk.Label | None = None
     main_table_copy_grid: dict | None = None
-    movers_copy_grid: dict | None = None
+    movers_was_copy_grid: dict | None = None
+    movers_pick_copy_grid: dict | None = None
 
     def _build_recommend_panel(parent: tk.Frame, *, pack_mode: str | None) -> None:
         nonlocal recommend_panel, recommend_dates_label, recommend_copy_grid
@@ -1896,16 +1985,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     def _panel_rebal_idx(end_date_idx_local: int) -> int:
         """Hold-week rebalance bar for portfolio panel (matches backtest Current week)."""
-        if end_date_idx_local <= tail:
-            return end_date_idx_local
-        end_ts_local = _rrg_index[end_date_idx_local]
-        for k in range(end_date_idx_local, tail - 1, -1):
-            if k + 1 < len(_rrg_index):
-                week_start = _rrg_index[k]
-                week_end = _rrg_index[k + 1]
-                if week_start <= end_ts_local <= week_end:
-                    return k
-        return max(tail, end_date_idx_local - 1)
+        from momentum.rrg_core import panel_rebal_bar_index
+
+        if end_date_idx_local < 0 or end_date_idx_local >= len(_rrg_index):
+            return max(0, end_date_idx_local)
+        return panel_rebal_bar_index(
+            _rrg_index,
+            pd.Timestamp(_rrg_index[end_date_idx_local]),
+            tail,
+        )
 
     def _panel_week_picks(end_date_idx_local: int):
         """Strategy picks at hold-week rebalance (same as portfolio Top N panel)."""
@@ -1973,10 +2061,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             _warm_pick_holdings_cache(panel_rebal_idx)
         panel_picks = _panel_week_picks(end_date_idx_local)
 
-        from momentum.etf.india_rrg_pick_strategies import (
-            pick_strategy_label,
-            pick_strategy_subtitle,
-        )
+        if config.etf_recommend_profile == "us":
+            from momentum.etf.us_rrg_pick_strategies import pick_strategy_label
+        else:
+            from momentum.etf.india_rrg_pick_strategies import pick_strategy_label
 
         prev_portfolio = (
             _prior_week_top_n_portfolio(panel_rebal_idx)
@@ -1991,8 +2079,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         else:
             rebal_tickers = list(rebal_strategy)
         from momentum.rrg_portfolio_exits import (
-            exits_as_of_through_date,
-            filter_exits_portfolio_panel,
+            panel_was_out_exits,
         )
 
         exit_slices: list[tuple] = []
@@ -2006,10 +2093,24 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         exit_slices.append(
             (panel_rebal_ts, _week_exits_cache.get(panel_rebal_idx, []))
         )
-        week_exits = filter_exits_portfolio_panel(
-            exits_as_of_through_date(exit_slices, panel_end_ts),
+        prev_rebal_ts = (
+            _rrg_index[prev_panel_idx] if prev_panel_idx is not None else None
+        )
+
+        def _daily_for_panel(sym: str) -> pd.Series | None:
+            _ensure_etf_daily_close()
+            _weekly, daily = _etf_price_series(sym)
+            return daily if len(daily) else None
+
+        week_exits = panel_was_out_exits(
+            exit_slices,
+            panel_end_ts,
+            prev_rebal_ts=prev_rebal_ts,
+            panel_rebal_ts=panel_rebal_ts,
             prev_holdings=prev_portfolio,
             rebalance_holdings=[t for t in rebal_tickers if t],
+            exit_below_9ema=bool(exit_below_9ema_var.get()),
+            daily_for_ticker=_daily_for_panel,
         )
 
         was_label = (
@@ -2017,7 +2118,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             if prev_panel_idx is not None
             else "—"
         )
+        if movers_was_header_cells:
+            movers_was_header_cells[PORTFOLIO_PANEL_WAS_COL].config(
+                text=portfolio_panel_was_header(was_label)
+            )
         rebalance_label = format_date_label(panel_rebal_idx)
+        if movers_pick_header_cells:
+            movers_pick_header_cells[PORTFOLIO_PANEL_REBAL_COL].config(
+                text=portfolio_panel_pick_header(rebalance_label)
+            )
         subtitle = pick_strategy_subtitle(
             _pick_strategy_key(),
             hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
@@ -2109,9 +2218,6 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     rebal_n,
                 )
         was_week = prev_panel_idx if prev_panel_idx is not None else panel_rebal_idx
-        prev_rebal_ts = (
-            _rrg_index[prev_panel_idx] if prev_panel_idx is not None else None
-        )
 
         def _prices_for_pnl(sym: str) -> tuple[pd.Series, pd.Series | None]:
             weekly, daily = _etf_price_series(sym)
@@ -2122,19 +2228,6 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
         def _daily_for_pnl(sym: str) -> pd.Series | None:
             return _prices_for_pnl(sym)[1]
-
-        movers_dates_label.config(
-            text=portfolio_panel_dates_line(
-                rebalance_label=rebalance_label,
-                was_n=was_n,
-                was_label=was_label,
-                rebal_n=rebal_n,
-                pick_shortfall=pick_shortfall,
-                exit_below_9ema=bool(exit_below_9ema_var.get()),
-                subtitle=subtitle,
-                exits_through_label=format_date_label(panel_end_idx),
-            )
-        )
 
         def _was_rank(ticker: str) -> int | None:
             j = _row_index_for_ticker(ticker)
@@ -2148,26 +2241,57 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 return None
             return panel_curr_ranks.get(j)
 
-        panel_rows = build_portfolio_panel(
+        as_of_ts = _rrg_index[end_date_idx_local]
+        live_close = live_close_for_panel(
+            config.etf_recommend_profile,
+            etf_daily_close=_etf_daily_close,
+            at_latest_bar=end_date_idx_local >= _date_slider_max_idx(),
+        )
+        rebal_slots = pad_rebal_slots(rebal_tickers, n_port)
+
+        panel_rows, panel_totals = build_portfolio_panel(
             prev_portfolio=prev_portfolio,
             rebal_strategy=rebal_strategy,
-            rebal_tickers=rebal_tickers,
+            rebal_tickers=rebal_slots,
             end_prev_week_holdings=_end_prev_week_holdings(prev_panel_idx),
             panel_exits=week_exits,
             rebalance_ts=panel_rebal_ts,
             prev_rebalance_ts=prev_rebal_ts,
+            as_of_ts=as_of_ts,
             weekly_for_ticker=_weekly_for_pnl,
             daily_for_ticker=_daily_for_pnl,
             was_rank_for_ticker=_was_rank,
             curr_rank_for_ticker=_curr_rank,
             exit_below_9ema=bool(exit_below_9ema_var.get()),
             mid_week_9ema=_mid_week_9ema_cache.get(panel_rebal_idx, []),
+            live_close_by_ticker=live_close,
+            portfolio_slots=n_port,
         )
+        movers_dates_label.config(
+            text=portfolio_panel_dates_line(
+                rebalance_label=rebalance_label,
+                was_n=was_n,
+                was_label=was_label,
+                rebal_n=rebal_n,
+                pick_shortfall=pick_shortfall,
+                exit_below_9ema=bool(exit_below_9ema_var.get()),
+                subtitle=subtitle,
+                exits_through_label=format_date_label(panel_end_idx),
+            )
+        )
+        if movers_totals_label is not None:
+            movers_totals_label.config(
+                text=portfolio_panel_totals_line(
+                    panel_totals,
+                    live_pick=bool(live_close),
+                )
+            )
         n_slots = len(movers_row_widgets)
         max_rows = max(len(panel_rows), 1)
         for slot in range(n_slots):
             widgets = movers_row_widgets[slot]
-            grid_row = slot + 1
+            was_grid_row = slot + 1
+            pick_grid_row = slot + 1
             if slot < len(panel_rows):
                 row = panel_rows[slot]
                 was_text = row["was_text"]
@@ -2175,27 +2299,53 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 move = row["move"]
                 rebal_text = row["rebal_text"]
                 pick_tag = row["pick"]
-                pnl_text = row["pnl"]
+                was_pnl_text = row.get("was_pnl", "")
+                was_entry_text = row.get("was_entry", "")
+                was_close_text = row.get("was_close", "")
+                pick_pnl_text = row.get("pick_pnl", "")
+                pick_entry_text = row.get("pick_entry", "")
+                pick_close_text = row.get("pick_close", "")
                 mid_9ema_text = row.get("mid_9ema", "")
                 now_fg = row.get("now_fg", "black")
                 rebal_fg = row.get("rebal_fg", "black")
                 mid_fg = row.get("mid_fg", "black")
             else:
-                was_text = now_text = move = rebal_text = pick_tag = pnl_text = ""
+                was_text = now_text = move = rebal_text = pick_tag = ""
+                was_pnl_text = was_entry_text = was_close_text = ""
+                pick_pnl_text = pick_entry_text = pick_close_text = ""
                 mid_9ema_text = ""
                 now_fg = rebal_fg = mid_fg = "black"
             if slot < max_rows:
-                widgets["rank"].config(text=str(slot + 1))
+                rank_text = str(slot + 1)
+                widgets["rank"].config(text=rank_text)
+                widgets["pick_rank"].config(text=rank_text)
                 widgets["was"].config(text=was_text)
                 widgets["now"].config(text=now_text, fg=now_fg)
                 widgets["tag"].config(text=move)
                 widgets["rebal"].config(text=rebal_text, fg=rebal_fg)
                 widgets["pick_tag"].config(text=pick_tag)
-                widgets["pnl"].config(text=pnl_text)
+                widgets["was_pnl"].config(text=was_pnl_text)
+                widgets["was_entry"].config(text=was_entry_text)
+                widgets["was_close"].config(text=was_close_text)
+                widgets["pick_pnl"].config(text=pick_pnl_text)
+                widgets["pick_entry"].config(text=pick_entry_text)
+                widgets["pick_close"].config(text=pick_close_text)
                 widgets["mid_9ema"].config(text=mid_9ema_text, fg=mid_fg)
-                for col, key in enumerate(PORTFOLIO_PANEL_GRID_KEYS):
+                widgets["rank"].grid(
+                    row=was_grid_row, column=0, sticky='ew', padx=2, pady=1
+                )
+                for col in range(1, PORTFOLIO_PANEL_NUM_COLS):
+                    key = PORTFOLIO_PANEL_WAS_ROW[col][0]
                     widgets[key].grid(
-                        row=grid_row, column=col, sticky="ew", padx=2, pady=1
+                        row=was_grid_row, column=col, sticky='ew', padx=2, pady=1
+                    )
+                widgets["pick_rank"].grid(
+                    row=pick_grid_row, column=0, sticky='ew', padx=2, pady=1
+                )
+                for col in range(1, PORTFOLIO_PANEL_NUM_COLS):
+                    key = PORTFOLIO_PANEL_PICK_ROW[col - 1][0]
+                    widgets[key].grid(
+                        row=pick_grid_row, column=col, sticky='ew', padx=2, pady=1
                     )
             else:
                 for key in widgets:
@@ -2203,8 +2353,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 for w in widgets.values():
                     w.grid_remove()
 
-        if movers_copy_grid is not None:
-            TableRegionCopy.for_window(root).sync_styles(movers_copy_grid)
+        tc = TableRegionCopy.for_window(root)
+        if movers_was_copy_grid is not None:
+            tc.sync_styles(movers_was_copy_grid)
+        if movers_pick_copy_grid is not None:
+            tc.sync_styles(movers_pick_copy_grid)
         if _sync_side_scroll is not None:
             root.after_idle(_sync_side_scroll)
 

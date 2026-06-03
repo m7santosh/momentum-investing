@@ -43,10 +43,16 @@ from momentum.etf.us_liquid_rrg_config import (  # noqa: E402
 from momentum.etf.us_liquid_rrg_universe import build_universe  # noqa: E402
 from momentum.etf.us_liquid_screener import screen_us_etfs  # noqa: E402
 from momentum.etf.us_rrg_universe import (  # noqa: E402
+    RRG_ROW_BY_ID,
     RRG_ROWS,
     row_display_label,
 )
-from momentum.rrg_core import compute_rrg_indicators, rrg_effective_window, rrg_warmup_weeks  # noqa: E402
+from momentum.rrg_core import (  # noqa: E402
+    compute_rrg_indicators,
+    rrg_effective_window,
+    rrg_min_history_bars,
+    rrg_warmup_weeks,
+)
 from momentum.rrg_ema_exit import (  # noqa: E402
     midweek_9ema_exit_count,
     simulate_week_with_9ema_exits,
@@ -66,7 +72,7 @@ from momentum.rrg_ranking import (  # noqa: E402
 )
 from utils.nse_bhavcopy import today_ist  # noqa: E402
 from utils.output_paths import FINAL_RESULT_ETF_DIR  # noqa: E402
-from utils.yahoo_weekly import load_yahoo_histories_range  # noqa: E402
+from utils.yahoo_weekly import load_yahoo_histories, load_yahoo_histories_range  # noqa: E402
 
 BACKTEST_OUT_DIR = FINAL_RESULT_ETF_DIR / "backtest_rrg_us"
 STRATEGY_TAG = "us_rrg_swing"
@@ -77,11 +83,11 @@ class UsRrgBacktestConfig:
     backtest_start: str
     backtest_end: str
     top_n: int = 7
-    tail: int = 2
+    tail: int = 1
     rrg_window: int = 10
     initial_capital: float = 100_000.0
     vol_days: int = 63
-    universe_mode: str = "core"  # "core" (us.py only) | "expanded" (core + liquid)
+    universe_mode: str = "expanded"  # "core" (us.py only) | "expanded" | "main_table"
     universe_row_ids: tuple[str, ...] | None = None  # exact main-app table tickers
     min_adv_usd: float = DEFAULT_MIN_ADV
     vol_percentile: float = DEFAULT_VOL_PERCENTILE
@@ -91,6 +97,7 @@ class UsRrgBacktestConfig:
     hold_until_rank_exit: bool = False
     max_hold_rank: int = 10
     exit_below_9ema: bool = True
+    analysis_period: str = "3m"
 
 
 @dataclass
@@ -127,8 +134,6 @@ class UsRrgBacktestEngine:
         """Build row list: main-app tickers, core us.py, or expanded liquid screen."""
         cfg = self.config
         if cfg.universe_row_ids:
-            from momentum.etf.us_rrg_universe import RRG_ROW_BY_ID, row_display_label
-
             self._row_ids = list(dict.fromkeys(cfg.universe_row_ids))
             self._display_labels = [
                 row_display_label(rid) if rid in RRG_ROW_BY_ID else rid
@@ -182,6 +187,42 @@ class UsRrgBacktestEngine:
             f"Universe: {len(self._row_ids)} ETFs "
             f"({n_core} core us.py + {n_disc} liquid discoveries)"
         )
+
+    def _load_rrg_weekly_histories(self) -> dict[str, pd.Series]:
+        """Same period-based Yahoo load as live US RRG (not extended backtest range)."""
+        cfg = self.config
+        min_weekly_points = rrg_min_history_bars(cfg.rrg_window, "week")
+        period = cfg.analysis_period
+        if cfg.universe_row_ids:
+            batch = load_yahoo_histories(
+                self._load_tickers,
+                period=period,
+                min_points=min_weekly_points,
+                rrg_window=cfg.rrg_window,
+                freq="week",
+                quiet=True,
+            )
+            return {sym: batch.get(sym, pd.Series(dtype=float)) for sym in self._load_tickers}
+        mode = (cfg.universe_mode or "core").strip().lower()
+        if mode == "core":
+            from momentum.etf.RRGIndicatorUsEtfs import _load_all_histories
+
+            return _load_all_histories(
+                period, min_weekly_points, cfg.rrg_window, freq="week"
+            )
+        batch = load_yahoo_histories(
+            self._load_tickers,
+            period=period,
+            min_points=min_weekly_points,
+            rrg_window=cfg.rrg_window,
+            freq="week",
+            quiet=True,
+        )
+        out: dict[str, pd.Series] = {}
+        for row_id in self._row_ids:
+            out[row_id] = batch.get(row_id, pd.Series(dtype=float))
+        out[self._benchmark] = batch.get(self._benchmark, pd.Series(dtype=float))
+        return out
 
     def _log(self, msg: str) -> None:
         if self.progress_cb:
@@ -241,25 +282,23 @@ class UsRrgBacktestEngine:
         vol_start = dl_start - timedelta(days=cfg.vol_days + 30)
 
         tickers = list(self._load_tickers)
-        self._log(
-            f"Loading Yahoo weekly EOD {dl_start} .. {dl_end} "
-            f"({len(tickers)} tickers)..."
-        )
-        weekly_batch = load_yahoo_histories_range(
-            tickers, dl_start, dl_end, min_points=5, quiet=True, freq="week"
-        )
-        for sym in tickers:
-            series = weekly_batch.get(sym, pd.Series(dtype=float))
-            if len(series):
-                self._row_price_weekly[sym] = series
+        min_history = rrg_effective_window(cfg.rrg_window, "week")
 
-        self._bench_weekly = self._row_price_weekly.get(
+        self._log(
+            f"Loading RRG weekly histories ({cfg.analysis_period}, same as live RRG)..."
+        )
+        histories = self._load_rrg_weekly_histories()
+        for row_id in self._row_ids:
+            self._row_price_weekly[row_id] = histories.get(
+                row_id, pd.Series(dtype=float)
+            )
+        self._bench_weekly = histories.get(
             self._benchmark, pd.Series(dtype=float)
         )
         if self._bench_weekly.empty:
             raise RuntimeError(f"Could not load benchmark {self._benchmark}")
 
-        self._log(f"Loading daily history {vol_start} .. {dl_end} for Vol% fallback...")
+        self._log(f"Loading daily history {vol_start} .. {dl_end} for Vol% / 9 EMA...")
         daily_batch = load_yahoo_histories_range(
             tickers, vol_start, dl_end, min_points=5, quiet=True, freq="day"
         )
@@ -267,38 +306,44 @@ class UsRrgBacktestEngine:
             if len(daily):
                 self._etf_daily[sym] = daily.sort_index()
 
-        min_history = rrg_effective_window(cfg.rrg_window, "week")
         active_row_ids: list[str] = []
         active_display_labels: list[str] = []
+        self._rsr_series = []
+        self._rsm_series = []
+        bench = self._bench_weekly
+        skipped_history = 0
+        skipped_rrg = 0
         for j, row_id in enumerate(self._row_ids):
             if row_id == self._benchmark:
                 continue
             prices = self._row_price_weekly.get(row_id, pd.Series(dtype=float))
-            if prices.notna().sum() > min_history:
-                active_row_ids.append(row_id)
-                active_display_labels.append(self._display_labels[j])
-        skipped = len(self._row_ids) - len(active_row_ids)
-        if skipped:
-            self._log(f"Skipping {skipped} rows with insufficient weekly history.")
+            if prices.notna().sum() <= min_history:
+                skipped_history += 1
+                continue
+            rsr, _, rsm = compute_rrg_indicators(prices, bench, cfg.rrg_window)
+            if rsr is None:
+                skipped_rrg += 1
+                continue
+            active_row_ids.append(row_id)
+            active_display_labels.append(self._display_labels[j])
+            self._rsr_series.append(rsr)
+            self._rsm_series.append(rsm)
+        if skipped_history:
+            self._log(
+                f"Skipping {skipped_history} row(s) with insufficient weekly history "
+                f"(same rule as live RRG)."
+            )
+        if skipped_rrg:
+            self._log(
+                f"Skipping {skipped_rrg} row(s) with no valid RRG series "
+                f"(same rule as live RRG)."
+            )
         if not active_row_ids:
             raise RuntimeError("No US ETF rows with enough history for backtest.")
         self._row_ids = active_row_ids
         self._display_labels = active_display_labels
 
         self._weekly_index = self._bench_weekly.index.sort_values()
-
-        self._rsr_series = []
-        self._rsm_series = []
-        bench = self._bench_weekly
-        for row_id in self._row_ids:
-            prices = self._row_price_weekly.get(row_id, pd.Series(dtype=float))
-            if prices.empty:
-                self._rsr_series.append(None)
-                self._rsm_series.append(None)
-                continue
-            rsr, _, rsm = compute_rrg_indicators(prices, bench, cfg.rrg_window)
-            self._rsr_series.append(rsr)
-            self._rsm_series.append(rsm)
 
         self._log("Loading Vol% for recommendations (same source as live RRG)...")
         try:
@@ -338,11 +383,13 @@ class UsRrgBacktestEngine:
             )
         self.reset_run()
         self._loaded = True
-        first = self._rebal_dates[0].strftime("%Y-%m-%d")
-        last = self._rebal_dates[-1].strftime("%Y-%m-%d")
+        from momentum.rrg_core import rrg_format_date
+
+        first = rrg_format_date(self._rebal_dates[0])
+        last = rrg_format_date(self._rebal_dates[-1])
         self._log(
-            f"Ready: {len(self._rebal_dates)} as-of week(s) "
-            f"({first} .. {last}). Match main RRG Date slider to as-of date."
+            f"Ready: {len(self._rebal_dates)} weekly rebalance(s) "
+            f"({first} .. {last}). Click Run All or Next Week."
         )
 
     def step_week(self) -> dict | None:
@@ -726,6 +773,17 @@ class UsRrgBacktestEngine:
             )
         return picks, rebalance_holdings, rebal_slots, rank_at_rebal, pick_shortfall
 
+    def _prior_panel_was_slots(
+        self, prev_bar_ts: pd.Timestamp
+    ) -> tuple[list[str], dict[str, int]]:
+        saved = list(self._prev_holdings)
+        self._prev_holdings = []
+        try:
+            _, _, slots, ranks, _ = self._rebalance_picks_at(prev_bar_ts)
+            return list(slots), dict(ranks)
+        finally:
+            self._prev_holdings = saved
+
     def portfolio_panel_context(self, record: dict) -> dict:
         """Portfolio panel at record Rebal_Date (backtest Current week)."""
         from momentum.rrg_portfolio_exits import (
@@ -760,10 +818,10 @@ class UsRrgBacktestEngine:
             prev_holdings=was_portfolio,
             rebalance_holdings=[t for t in rebal_tickers if t],
         )
+        from momentum.rrg_core import rrg_format_date
+
         was_label = (
-            pd.Timestamp(prev_rebal).strftime("%Y-%m-%d")
-            if prev_rebal is not None
-            else "—"
+            rrg_format_date(prev_rebal) if prev_rebal is not None else "—"
         )
         return {
             "rebal_ts": rebal_ts,
@@ -774,7 +832,7 @@ class UsRrgBacktestEngine:
             "was_portfolio": was_portfolio,
             "was_ranks": was_ranks,
             "was_label": was_label,
-            "rebalance_label": rebal_ts.strftime("%Y-%m-%d"),
+            "rebalance_label": rrg_format_date(rebal_ts),
             "strategy_tickers": strategy_tickers,
             "rebal_tickers": rebal_tickers,
             "curr_ranks": curr_ranks,
@@ -782,6 +840,136 @@ class UsRrgBacktestEngine:
             "end_prev_week_holdings": end_prev_week_holdings,
             "panel_exits": panel_exits,
             "mid_week_9ema": list(record.get("Mid_Week_9EMA") or []),
+        }
+
+    def _record_by_rebal(self, rebal_ts: pd.Timestamp | None) -> dict | None:
+        if rebal_ts is None:
+            return None
+        target = pd.Timestamp(rebal_ts).normalize()
+        for rec in self._records:
+            if pd.Timestamp(rec["Rebal_Date"]).normalize() == target:
+                return rec
+        return None
+
+    def _exit_slices_for_panel(
+        self,
+        prev_rebal_ts: pd.Timestamp | None,
+        panel_rebal_ts: pd.Timestamp,
+    ) -> list[tuple]:
+        slices: list[tuple] = []
+        if prev_rebal_ts is not None:
+            prev_rec = self._record_by_rebal(prev_rebal_ts)
+            if prev_rec is not None:
+                slices.append(
+                    (pd.Timestamp(prev_rebal_ts), prev_rec.get("Exits") or [])
+                )
+        cur_rec = self._record_by_rebal(panel_rebal_ts)
+        slices.append(
+            (
+                pd.Timestamp(panel_rebal_ts),
+                (cur_rec.get("Exits") or []) if cur_rec is not None else [],
+            )
+        )
+        return slices
+
+    def portfolio_panel_at_asof(
+        self,
+        as_of_ts: pd.Timestamp,
+        *,
+        tail_bars: int | None = None,
+        weekly_index: pd.DatetimeIndex | None = None,
+    ) -> dict:
+        from momentum.rrg_core import panel_rebal_bar_index, rrg_format_date
+        from momentum.rrg_portfolio_exits import panel_was_out_exits
+
+        as_of = pd.Timestamp(as_of_ts)
+        cfg = self.config
+        tail_n = max(1, int(tail_bars if tail_bars is not None else cfg.tail))
+        wi = (
+            pd.DatetimeIndex(weekly_index).sort_values()
+            if weekly_index is not None and len(weekly_index)
+            else self._weekly_index
+        )
+        panel_i = panel_rebal_bar_index(wi, as_of, tail_n)
+        panel_rebal_ts = pd.Timestamp(wi[panel_i])
+        panel_end_i = min(panel_i + 1, len(wi) - 1)
+        panel_end_ts = pd.Timestamp(wi[panel_end_i])
+        prev_i = panel_i - 1 if panel_i > tail_n else None
+        prev_rebal_ts = (
+            pd.Timestamp(wi[prev_i]) if prev_i is not None else None
+        )
+
+        was_portfolio: list[str] = []
+        was_ranks: dict = {}
+        if prev_i is not None and prev_i >= tail_n:
+            prev_bar_ts = pd.Timestamp(wi[prev_i])
+            was_portfolio, was_ranks = self._prior_panel_was_slots(prev_bar_ts)
+
+        prev_holdings_for_picks: list[str] = []
+        if prev_rebal_ts is not None:
+            prev_rec = self._record_by_rebal(prev_rebal_ts)
+            if prev_rec is not None and (
+                cfg.hold_until_rank_exit or cfg.exit_below_9ema
+            ):
+                prev_holdings_for_picks = list(
+                    prev_rec.get("Held_Tickers") or []
+                )
+            else:
+                prev_holdings_for_picks = [t for t in was_portfolio if t]
+
+        saved_holdings = list(self._prev_holdings)
+        self._prev_holdings = prev_holdings_for_picks
+        try:
+            _, strategy_tickers, rebal_tickers, curr_ranks, pick_shortfall = (
+                self._rebalance_picks_at(panel_rebal_ts)
+            )
+        finally:
+            self._prev_holdings = saved_holdings
+
+        end_prev_week_holdings: list[str] | None = None
+        if prev_rebal_ts is not None:
+            prev_rec = self._record_by_rebal(prev_rebal_ts)
+            if prev_rec is not None:
+                end_prev_week_holdings = list(prev_rec.get("Held_Tickers") or [])
+        if end_prev_week_holdings is None:
+            end_prev_week_holdings = [t for t in was_portfolio if t] or None
+
+        panel_exits = panel_was_out_exits(
+            self._exit_slices_for_panel(prev_rebal_ts, panel_rebal_ts),
+            panel_end_ts,
+            prev_rebal_ts=prev_rebal_ts,
+            panel_rebal_ts=panel_rebal_ts,
+            prev_holdings=[t for t in was_portfolio if t],
+            rebalance_holdings=[t for t in rebal_tickers if t],
+            exit_below_9ema=cfg.exit_below_9ema,
+            daily_for_ticker=lambda t: self._etf_daily.get(t),
+        )
+
+        mid_week_9ema: list[str] = []
+        cur_rec = self._record_by_rebal(panel_rebal_ts)
+        if cur_rec is not None:
+            mid_week_9ema = list(cur_rec.get("Mid_Week_9EMA") or [])
+
+        was_label = (
+            rrg_format_date(prev_rebal_ts) if prev_rebal_ts is not None else "—"
+        )
+        return {
+            "rebal_ts": panel_rebal_ts,
+            "panel_end_ts": panel_end_ts,
+            "end_ts": as_of,
+            "prev_rebal_ts": prev_rebal_ts,
+            "was_portfolio": was_portfolio,
+            "was_ranks": was_ranks,
+            "was_label": was_label,
+            "rebalance_label": rrg_format_date(panel_rebal_ts),
+            "exits_through_label": rrg_format_date(panel_end_ts),
+            "strategy_tickers": list(strategy_tickers),
+            "rebal_tickers": list(rebal_tickers),
+            "curr_ranks": dict(curr_ranks),
+            "pick_shortfall": pick_shortfall,
+            "end_prev_week_holdings": end_prev_week_holdings,
+            "panel_exits": panel_exits,
+            "mid_week_9ema": mid_week_9ema,
         }
 
     def _vol_by_ticker_at(self, as_of: pd.Timestamp) -> dict[str, float]:
@@ -811,6 +999,8 @@ class UsRrgBacktestEngine:
 def compute_metrics(
     df: pd.DataFrame, capital: float, *, benchmark: str = RRG_BENCHMARK_YAHOO
 ) -> dict:
+    from momentum.rrg_core import rrg_format_date
+
     if df.empty:
         return {}
     port_rets = df["Port_Return"].values
@@ -862,8 +1052,8 @@ def compute_metrics(
         "Universe": df.attrs.get("universe_mode", "expanded"),
         "Universe_Size": df.attrs.get("universe_size"),
         "Period": (
-            f"{df['Rebal_Date'].iloc[0].strftime('%Y-%m-%d')} to "
-            f"{df['End_Date'].iloc[-1].strftime('%Y-%m-%d')}"
+            f"{rrg_format_date(df['Rebal_Date'].iloc[0])} to "
+            f"{rrg_format_date(df['End_Date'].iloc[-1])}"
         ),
         "Weeks": n_weeks,
         "Top_N": int(df.attrs.get("top_n", 7)),
@@ -893,7 +1083,7 @@ def run_backtest(
     backtest_end: str,
     *,
     top_n: int = 7,
-    tail: int = 2,
+    tail: int = 1,
     rrg_window: int = 10,
     initial_capital: float = 100_000.0,
     universe_mode: str = "expanded",
@@ -904,6 +1094,7 @@ def run_backtest(
     hold_until_rank_exit: bool = False,
     max_hold_rank: int = 10,
     exit_below_9ema: bool = True,
+    analysis_period: str = "3m",
     progress_cb: Callable[[str], None] | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     cfg = UsRrgBacktestConfig(
@@ -921,6 +1112,7 @@ def run_backtest(
         hold_until_rank_exit=hold_until_rank_exit,
         max_hold_rank=max_hold_rank,
         exit_below_9ema=exit_below_9ema,
+        analysis_period=analysis_period,
     )
     engine = UsRrgBacktestEngine(config=cfg, progress_cb=progress_cb)
     engine.load_data()
@@ -941,10 +1133,10 @@ def run_backtest(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="US RRG swing backtest")
-    parser.add_argument("--start", default="2024-01-01")
-    parser.add_argument("--end", default=None)
+    parser.add_argument("--start", default=None, help="Backtest start (default: 1 Jan this year)")
+    parser.add_argument("--end", default=None, help="Backtest end (default: today)")
     parser.add_argument("--top-n", type=int, default=7)
-    parser.add_argument("--tail", type=int, default=2)
+    parser.add_argument("--tail", type=int, default=1)
     parser.add_argument("--window", type=int, default=10, choices=(10, 14))
     parser.add_argument("--capital", type=float, default=100_000.0)
     parser.add_argument(
@@ -995,13 +1187,14 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    start = args.start or f"{today_ist().year}-01-01"
     end = args.end or today_ist().strftime("%Y-%m-%d")
-    print(f"[{STRATEGY_TAG}] Backtest {args.start} .. {end}")
+    print(f"[{STRATEGY_TAG}] Backtest {start} .. {end}")
     print(
         f"  Pick: {pick_strategy_label(args.pick_strategy, hold_until_rank_exit=args.hold_until_rank_exit)}"
     )
     df, metrics = run_backtest(
-        args.start,
+        start,
         end,
         top_n=args.top_n,
         tail=args.tail,
@@ -1021,7 +1214,7 @@ def main() -> None:
         for k, v in metrics.items():
             print(f"  {k}: {v}")
         BACKTEST_OUT_DIR.mkdir(parents=True, exist_ok=True)
-        out = BACKTEST_OUT_DIR / f"backtest_rrg_us_{args.start}_{end}.csv"
+        out = BACKTEST_OUT_DIR / f"backtest_rrg_us_{start}_{end}.csv"
         export = df.drop(columns=["Picks"], errors="ignore")
         export.to_csv(out, index=False)
         print(f"\nSaved: {out}")

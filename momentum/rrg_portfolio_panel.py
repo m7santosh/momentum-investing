@@ -6,22 +6,186 @@ from collections.abc import Callable
 
 import pandas as pd
 
-PORTFOLIO_PANEL_HEADERS: tuple[tuple[str, str, str, int], ...] = (
+from momentum.rrg_core import rrg_format_date
+from momentum.rrg_portfolio_exits import PortfolioPanelTotals
+
+PORTFOLIO_PANEL_WAS_ROW: tuple[tuple[str, str, str, int], ...] = (
     ("rank", "#", "e", 28),
-    ("was", "Was (held)", "w", 110),
-    ("now", "Now (held)", "w", 168),
+    ("was", "Was", "w", 140),
+    ("now", "Now (held)", "w", 200),
     ("tag", "Move", "w", 44),
-    ("pnl", "P/L", "e", 56),
-    ("rebal", "Top N pick", "w", 118),
+    ("was_pnl", "P/L Was", "e", 56),
+    ("was_entry", "Was entry", "e", 68),
+    ("was_close", "Was close", "e", 72),
+)
+
+PORTFOLIO_PANEL_PICK_ROW: tuple[tuple[str, str, str, int], ...] = (
+    ("rebal", "Top N", "w", 118),
     ("pick_tag", "Pick", "w", 40),
+    ("pick_pnl", "P/L pick", "e", 56),
+    ("pick_entry", "Pick entry", "e", 68),
+    ("pick_close", "Pick close", "e", 72),
     ("mid_9ema", "9EMA mid", "w", 72),
 )
 
-PORTFOLIO_PANEL_GRID_KEYS: tuple[str, ...] = tuple(k for k, *_ in PORTFOLIO_PANEL_HEADERS)
+PORTFOLIO_PANEL_PICK_GRID_ROW: tuple[tuple[str, str, str, int], ...] = (
+    PORTFOLIO_PANEL_WAS_ROW[0],
+    *PORTFOLIO_PANEL_PICK_ROW,
+)
+
+PORTFOLIO_PANEL_NUM_COLS = len(PORTFOLIO_PANEL_WAS_ROW)
+
+# Backward-compatible flat header list (Was row + Pick row keys).
+PORTFOLIO_PANEL_HEADERS: tuple[tuple[str, str, str, int], ...] = (
+    *PORTFOLIO_PANEL_WAS_ROW,
+    *PORTFOLIO_PANEL_PICK_ROW,
+)
+
+PORTFOLIO_PANEL_GRID_KEYS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        k for k, *_ in (*PORTFOLIO_PANEL_WAS_ROW, *PORTFOLIO_PANEL_PICK_ROW)
+    )
+)
+
+PORTFOLIO_PANEL_WAS_COL = 1
+PORTFOLIO_PANEL_REBAL_COL = 1
+
+PORTFOLIO_PANEL_SMALL_KEYS = frozenset(
+    {
+        "tag",
+        "pick_tag",
+        "was_pnl",
+        "was_entry",
+        "was_close",
+        "pick_pnl",
+        "pick_entry",
+        "pick_close",
+        "mid_9ema",
+    }
+)
+
+PORTFOLIO_PANEL_TAG_KEYS = frozenset({"tag", "pick_tag"})
+
+
+def portfolio_panel_col_minsize(col: int) -> int:
+    if col <= 0 or col >= PORTFOLIO_PANEL_NUM_COLS:
+        return PORTFOLIO_PANEL_WAS_ROW[0][3]
+    return max(
+        PORTFOLIO_PANEL_WAS_ROW[col][3],
+        PORTFOLIO_PANEL_PICK_ROW[col - 1][3],
+    )
+
+
+def portfolio_panel_col_weight(col: int) -> int:
+    if col <= 0:
+        return 0
+    keys = (PORTFOLIO_PANEL_WAS_ROW[col][0], PORTFOLIO_PANEL_PICK_ROW[col - 1][0])
+    return 1 if any(k in ("was", "now", "rebal") for k in keys) else 0
+
+
+def configure_portfolio_panel_table_columns(table: tk.Misc) -> None:
+    """Shared column widths so Was and Top N grids align vertically."""
+    for col in range(PORTFOLIO_PANEL_NUM_COLS):
+        table.columnconfigure(
+            col,
+            minsize=portfolio_panel_col_minsize(col),
+            weight=portfolio_panel_col_weight(col),
+        )
+
+
+def portfolio_panel_was_header(was_label: str | None = None) -> str:
+    """Column title for prior-week holdings (includes rebalance date when known)."""
+    label = (was_label or "").strip()
+    if label and label != "—":
+        return f"Was - {label}"
+    return "Was"
+
+
+def portfolio_panel_pick_header(pick_label: str | None = None) -> str:
+    """Column title for this week's Top N picks (includes rebalance date when known)."""
+    label = (pick_label or "").strip()
+    if label and label != "—":
+        return f"Top N - {label}"
+    return "Top N"
 
 
 def norm_ticker(sym: str) -> str:
     return (sym or "").strip().upper().replace(".NS", "")
+
+
+def live_close_for_panel(
+    profile: str,
+    *,
+    etf_daily_close: dict[str, pd.Series] | None = None,
+    at_latest_bar: bool = False,
+) -> dict[str, float] | None:
+    """
+    Latest marks for panel P/L when the Date slider is on the last bar.
+
+    India: NSE live LTP. US: last loaded Yahoo daily close per ticker.
+    """
+    if not at_latest_bar:
+        return None
+    if profile == "india":
+        from utils.nse_bhavcopy import fetch_nse_live_quotes
+
+        quotes = fetch_nse_live_quotes()
+        if not quotes:
+            return None
+        return {
+            sym: float(q["close"])
+            for sym, q in quotes.items()
+            if q.get("close")
+        }
+    if profile == "us" and etf_daily_close:
+        out: dict[str, float] = {}
+        for sym, series in etf_daily_close.items():
+            if series is not None and len(series):
+                px = float(series.iloc[-1])
+                if px > 0:
+                    out[sym] = px
+        return out or None
+    return None
+
+
+def pad_rebal_slots(tickers: list[str], portfolio_slots: int) -> list[str]:
+    """Top N slot list with empty strings for skipped 9 EMA slots."""
+    slots = list(tickers)
+    n = max(int(portfolio_slots), len(slots))
+    while len(slots) < n:
+        slots.append("")
+    return slots
+
+
+def trading_days_for_asof(
+    tickers: list[str],
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    daily_for_ticker: Callable[[str], pd.Series | None],
+) -> list[pd.Timestamp]:
+    """Trading days between rebalance and week-end (for backtest as-of slider)."""
+    start = pd.Timestamp(start_ts)
+    end = pd.Timestamp(end_ts)
+    if end <= start:
+        return [start]
+    best: pd.DatetimeIndex | None = None
+    for sym in tickers:
+        if not sym:
+            continue
+        daily = daily_for_ticker(sym)
+        if daily is None or not len(daily):
+            continue
+        sub = daily.loc[start:end].index
+        if len(sub) and (best is None or len(sub) > len(best)):
+            best = sub
+    if best is None or not len(best):
+        return [start, end]
+    days = sorted(pd.Timestamp(t) for t in best.unique())
+    if days[0] != start and start not in days:
+        days = [start, *days]
+    if days[-1] != end:
+        days.append(end)
+    return days
 
 
 def compact_tickers(tickers: list[str]) -> list[str]:
@@ -55,7 +219,7 @@ def format_rebal_skip_cell(
     reason: str = "9 EMA",
 ) -> str:
     """Strategy pick skipped at rebalance (e.g. below 9 EMA)."""
-    reb_d = pd.Timestamp(rebalance_ts).strftime("%Y-%m-%d")
+    reb_d = rrg_format_date(rebalance_ts)
     name = format_portfolio_cell(ticker, rank)
     return f"{name} · {reason} @{reb_d}"
 
@@ -133,8 +297,11 @@ def portfolio_panel_rows(
                 rebal_note = val
 
         if was_t:
-            now_t = was_t if norm_ticker(was_t) in end_set else ""
             move = "HOLD" if norm_ticker(was_t) in rebal_set else "OUT"
+            if move == "HOLD" and norm_ticker(was_t) in end_set:
+                now_t = was_t
+            else:
+                now_t = ""
         else:
             now_t = ""
             move = ""
@@ -152,7 +319,12 @@ def portfolio_panel_rows(
                 "rebal": rebal_t,
                 "rebal_note": rebal_note,
                 "pick": pick,
-                "pnl": "",
+                "was_pnl": "",
+                "was_entry": "",
+                "was_close": "",
+                "pick_pnl": "",
+                "pick_entry": "",
+                "pick_close": "",
                 "mid_9ema": "",
             }
         )
@@ -174,7 +346,7 @@ def mid_week_9ema_cell_map(
         bare = norm_ticker(ticker)
         if not bare or (pick_set is not None and bare not in pick_set):
             continue
-        out[bare] = f"@{pd.Timestamp(day).strftime('%Y-%m-%d')}"
+        out[bare] = f"@{rrg_format_date(day)}"
     return out
 
 
@@ -183,36 +355,62 @@ def enrich_portfolio_panel_rows(
     *,
     pnl_by_ticker: dict[str, str],
     hold_pnl_by_ticker: dict[str, str] | None = None,
+    pick_pnl_by_ticker: dict[str, str] | None = None,
+    was_close_by_ticker: dict[str, str] | None = None,
+    was_entry_by_ticker: dict[str, str] | None = None,
+    pick_close_by_ticker: dict[str, str] | None = None,
+    pick_entry_by_ticker: dict[str, str] | None = None,
     mid_9ema_by_ticker: dict[str, str] | None = None,
     exit_detail_by_ticker: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
     """
-    P/L on Was (held): OUT through exit; HOLD through rebalance bar.
-    Now (held): exit reason for OUT (9 EMA mid-week or strategy @ rebalance).
+    P/L Was: prior-week OUT at exit; HOLD carried forward through as-of.
+    P/L pick: Top N NEW/KEEP through as-of, or through 9 EMA mid-week exit.
+    Now (held): exit reason text only (no P/L).
     """
     hold_pnl = hold_pnl_by_ticker or {}
     mid_9ema = mid_9ema_by_ticker or {}
     exit_detail = exit_detail_by_ticker or {}
+    pick_pnl = pick_pnl_by_ticker or {}
+    was_close = was_close_by_ticker or {}
+    was_entry = was_entry_by_ticker or {}
+    pick_close = pick_close_by_ticker or {}
+    pick_entry = pick_entry_by_ticker or {}
     for row in rows:
         move = row["move"]
         was_t = row["was"]
         rebal_t = row.get("rebal", "")
-        if rebal_t:
-            row["mid_9ema"] = mid_9ema.get(norm_ticker(rebal_t), "")
-        else:
-            row["mid_9ema"] = ""
-        if move == "HOLD" and was_t:
-            row["pnl"] = hold_pnl.get(norm_ticker(was_t), "—")
-            row["now_exit"] = ""
-        elif move == "OUT" and was_t:
+        row["was_pnl"] = ""
+        row["was_entry"] = ""
+        row["was_close"] = ""
+        row["pick_pnl"] = ""
+        row["pick_entry"] = ""
+        row["pick_close"] = ""
+        row["mid_9ema"] = ""
+
+        if move == "OUT" and was_t:
             bare = norm_ticker(was_t)
-            row["pnl"] = pnl_by_ticker.get(bare, "—")
+            row["was_pnl"] = pnl_by_ticker.get(bare, "—")
+            row["was_entry"] = was_entry.get(bare, "—")
+            row["was_close"] = was_close.get(bare, "—")
             row["now_exit"] = exit_detail.get(
                 bare, "Strategy @ rebalance — not in rebalance picks"
             )
-        else:
-            row["pnl"] = ""
+        elif move == "HOLD" and was_t:
+            bare = norm_ticker(was_t)
             row["now_exit"] = ""
+            row["was_pnl"] = hold_pnl.get(bare, "—")
+            row["was_entry"] = was_entry.get(bare, "—")
+            row["was_close"] = was_close.get(bare, "—")
+        else:
+            row["now_exit"] = ""
+
+        if rebal_t:
+            bare = norm_ticker(rebal_t)
+            row["pick_pnl"] = pick_pnl.get(bare, "—")
+            row["pick_entry"] = pick_entry.get(bare, "—")
+            row["pick_close"] = pick_close.get(bare, "—")
+            row["mid_9ema"] = mid_9ema.get(bare, "")
     return rows
 
 
@@ -264,17 +462,27 @@ def build_portfolio_panel(
     panel_exits: list,
     rebalance_ts,
     prev_rebalance_ts: pd.Timestamp | None,
+    as_of_ts: pd.Timestamp | None = None,
     weekly_for_ticker: Callable[[str], pd.Series],
     daily_for_ticker: Callable[[str], pd.Series | None] | None,
     was_rank_for_ticker: Callable[[str], int | None],
     curr_rank_for_ticker: Callable[[str], int | None],
     exit_below_9ema: bool,
     mid_week_9ema: list | None = None,
-) -> list[dict[str, str]]:
-    """Full portfolio panel rows (main RRG UI and backtest Current week)."""
+    live_close_by_ticker: dict[str, float] | None = None,
+    portfolio_slots: int | None = None,
+) -> tuple[list[dict[str, str]], PortfolioPanelTotals]:
+    """Full portfolio panel rows and equal-weight Was / pick totals."""
     from momentum.rrg_portfolio_exits import (
+        compute_portfolio_panel_totals,
         exit_detail_and_pnl_maps,
         holding_pnl_map,
+        mid_week_exit_ts_map,
+        pick_close_map,
+        pick_entry_close_map,
+        pick_pnl_map,
+        was_close_map,
+        was_entry_close_map,
     )
 
     was_list = compact_tickers(prev_portfolio)
@@ -299,32 +507,134 @@ def build_portfolio_panel(
         weekly_for_ticker=weekly_for_ticker,
         daily_for_ticker=daily_for_ticker,
     )
+    mark_ts = (
+        pd.Timestamp(as_of_ts) if as_of_ts is not None else pd.Timestamp(rebalance_ts)
+    )
     rebal_set = {norm_ticker(t) for t in rebal_entered}
     hold_pnl_by = holding_pnl_map(
         [t for t in was_list if norm_ticker(t) in rebal_set],
         rebalance_ts=rebalance_ts,
         prev_rebalance_ts=prev_rebalance_ts,
+        as_of_ts=mark_ts,
         weekly_for_ticker=weekly_for_ticker,
         daily_for_ticker=daily_for_ticker,
+        live_close_by_ticker=live_close_by_ticker,
     )
     mid_9ema_by: dict[str, str] = {}
+    mid_exit_ts: dict[str, pd.Timestamp] = {}
     if exit_below_9ema:
         mid_9ema_by = mid_week_9ema_cell_map(
             mid_week_9ema or [],
             rebalance_tickers=rebal_entered,
         )
+        mid_exit_ts = mid_week_exit_ts_map(
+            mid_week_9ema or [],
+            rebalance_tickers=rebal_entered,
+        )
+    pick_pnl_by = pick_pnl_map(
+        rows,
+        rebalance_ts=rebalance_ts,
+        prev_rebalance_ts=prev_rebalance_ts,
+        as_of_ts=mark_ts,
+        weekly_for_ticker=weekly_for_ticker,
+        daily_for_ticker=daily_for_ticker,
+        mid_week_exit_ts=mid_exit_ts,
+        live_close_by_ticker=live_close_by_ticker,
+    )
+    was_close_by = was_close_map(
+        was_list,
+        rebal_holdings=rebal_set,
+        panel_exits=panel_exits,
+        rebalance_ts=rebalance_ts,
+        as_of_ts=mark_ts,
+        weekly_for_ticker=weekly_for_ticker,
+        daily_for_ticker=daily_for_ticker,
+        live_close_by_ticker=live_close_by_ticker,
+    )
+    was_entry_by = was_entry_close_map(
+        was_list,
+        rebalance_ts=rebalance_ts,
+        prev_rebalance_ts=prev_rebalance_ts,
+        weekly_for_ticker=weekly_for_ticker,
+        daily_for_ticker=daily_for_ticker,
+    )
+    pick_close_by = pick_close_map(
+        rows,
+        rebalance_ts=rebalance_ts,
+        as_of_ts=mark_ts,
+        weekly_for_ticker=weekly_for_ticker,
+        daily_for_ticker=daily_for_ticker,
+        mid_week_exit_ts=mid_exit_ts,
+        live_close_by_ticker=live_close_by_ticker,
+    )
+    pick_entry_by = pick_entry_close_map(
+        rows,
+        rebalance_ts=rebalance_ts,
+        prev_rebalance_ts=prev_rebalance_ts,
+        weekly_for_ticker=weekly_for_ticker,
+        daily_for_ticker=daily_for_ticker,
+    )
     rows = enrich_portfolio_panel_rows(
         rows,
         pnl_by_ticker=pnl_by,
         hold_pnl_by_ticker=hold_pnl_by,
+        pick_pnl_by_ticker=pick_pnl_by,
+        was_close_by_ticker=was_close_by,
+        was_entry_by_ticker=was_entry_by,
+        pick_close_by_ticker=pick_close_by,
+        pick_entry_by_ticker=pick_entry_by,
         mid_9ema_by_ticker=mid_9ema_by,
         exit_detail_by_ticker=exit_detail_by,
     )
-    return apply_portfolio_panel_display(
+    rows = apply_portfolio_panel_display(
         rows,
         was_rank_for_ticker=was_rank_for_ticker,
         curr_rank_for_ticker=curr_rank_for_ticker,
     )
+    slots = portfolio_slots if portfolio_slots is not None else max(len(rebal_tickers), 1)
+    totals = compute_portfolio_panel_totals(
+        was_list=prev_portfolio,
+        rebal_slot_tickers=rebal_tickers,
+        prev_portfolio=prev_portfolio,
+        panel_exits=panel_exits,
+        rebalance_ts=rebalance_ts,
+        prev_rebalance_ts=prev_rebalance_ts,
+        as_of_ts=mark_ts,
+        portfolio_slots=slots,
+        weekly_for_ticker=weekly_for_ticker,
+        daily_for_ticker=daily_for_ticker,
+        mid_week_exit_ts=mid_exit_ts,
+        live_close_by_ticker=live_close_by_ticker,
+    )
+    return rows, totals
+
+
+def portfolio_panel_totals_line(
+    totals: PortfolioPanelTotals | None,
+    *,
+    live_pick: bool = False,
+) -> str:
+    """Equal-weight P/L for last week's Top N and current week's running picks."""
+    from momentum.rrg_portfolio_exits import format_ew_total_pct
+
+    if totals is None:
+        return ""
+    live_tag = " live" if live_pick else ""
+    if totals.was_slots:
+        was_part = (
+            f"Last week P/L ({totals.was_slots}): "
+            f"{format_ew_total_pct(totals.was_ew_pct)}"
+        )
+    else:
+        was_part = "Last week P/L: —"
+    if totals.pick_slots:
+        pick_part = (
+            f"Current week P/L ({totals.pick_slots}){live_tag}: "
+            f"{format_ew_total_pct(totals.pick_ew_pct)}"
+        )
+    else:
+        pick_part = f"Current week P/L{live_tag}: —"
+    return f"{was_part}  ·  {pick_part}"
 
 
 def portfolio_panel_dates_line(

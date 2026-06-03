@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
+
+RRG_DISPLAY_DATE_FMT = "%d-%m-%Y"
 
 
 @dataclass(frozen=True)
@@ -219,3 +222,126 @@ def rrg_period_label(period: str, unit: str = "week") -> str:
     bars = rrg_nav_bars(period, unit)
     bar_word = "daily" if rrg_normalize_bar_unit(unit) == "day" else "weekly"
     return f"{rrg_period_display(period)} lookback ({bars} {bar_word} points)"
+
+
+def rrg_format_date(value) -> str:
+    """Format a timestamp for RRG UI labels (DD-MM-YYYY)."""
+    if value is None or value == "":
+        return ""
+    ts = pd.Timestamp(value)
+    if pd.isna(ts):
+        return ""
+    return ts.strftime(RRG_DISPLAY_DATE_FMT)
+
+
+def rrg_parse_user_date(text: str) -> pd.Timestamp:
+    """Parse RRG date entry fields — strict DD-MM-YYYY only."""
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("Date is required (DD-MM-YYYY).")
+    parts = raw.split("-")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        raise ValueError(
+            f"Use DD-MM-YYYY only (e.g. 03-06-2026). Got: {raw!r}"
+        )
+    day, month, year = (int(parts[0]), int(parts[1]), int(parts[2]))
+    if len(parts[2]) != 4:
+        raise ValueError(
+            f"Use DD-MM-YYYY only (4-digit year). Got: {raw!r}"
+        )
+    try:
+        ts = pd.Timestamp(datetime(year, month, day))
+    except ValueError as exc:
+        raise ValueError(f"Invalid calendar date: {raw!r}") from exc
+    if pd.isna(ts):
+        raise ValueError(f"Invalid date: {raw!r}")
+    if ts.strftime(RRG_DISPLAY_DATE_FMT) != raw:
+        raise ValueError(f"Use DD-MM-YYYY only (e.g. 03-06-2026). Got: {raw!r}")
+    return ts
+
+
+def rrg_config_date_str(text: str) -> str:
+    """Normalize DD-MM-YYYY entry to YYYY-MM-DD for engines and data loads."""
+    return rrg_parse_user_date(text).strftime("%Y-%m-%d")
+
+
+def panel_rebal_bar_index(
+    weekly_index: pd.DatetimeIndex,
+    as_of_ts: pd.Timestamp,
+    tail_bars: int,
+) -> int:
+    """
+    Weekly bar index for the portfolio panel rebalance (same rule as main RRG).
+
+    When ``as_of`` falls on a weekly bar that starts a new hold week, that bar is
+    the rebalance date (e.g. slider on 08-05 → rebalance 08-05, not prior 01-05).
+    """
+    wi = pd.DatetimeIndex(weekly_index).sort_values()
+    if not len(wi):
+        return 0
+    tail_n = max(1, int(tail_bars))
+    end_i = int(wi.get_indexer([pd.Timestamp(as_of_ts)], method="ffill")[0])
+    if end_i < 0:
+        return 0
+    if end_i <= tail_n:
+        return end_i
+    end_ts_local = pd.Timestamp(wi[end_i])
+    for k in range(end_i, tail_n - 1, -1):
+        if k + 1 < len(wi):
+            week_start = pd.Timestamp(wi[k])
+            week_end = pd.Timestamp(wi[k + 1])
+            if week_start <= end_ts_local <= week_end:
+                return k
+    return max(tail_n, end_i - 1)
+
+
+def rrg_build_slider_date_index(
+    bench: pd.Series,
+    *,
+    analysis_period: str,
+    window: int,
+    unit: str = "week",
+    daily_sources: list[pd.Series] | None = None,
+) -> pd.DatetimeIndex:
+    """
+    Bar dates for the RRG Date slider (shared by main app and backtest panel).
+
+    Trims warmup, then caps to analysis window + tail buffer — same rule everywhere.
+    """
+    warmup = rrg_warmup_bars(window, unit)
+    slider_bars = rrg_slider_index_bars(
+        analysis_period, tail=RRG_MAX_TAIL, unit=unit
+    )
+
+    def _cap(cal: pd.DatetimeIndex) -> pd.DatetimeIndex:
+        cal = pd.DatetimeIndex(cal).sort_values()
+        if len(cal) > warmup:
+            cal = cal[warmup:]
+        if len(cal) > slider_bars:
+            cal = cal[-slider_bars:]
+        return cal
+
+    if rrg_normalize_bar_unit(unit) == "day" and daily_sources:
+        best: pd.DatetimeIndex | None = None
+        for daily in daily_sources:
+            if daily is None or not len(daily):
+                continue
+            sub = _cap(daily.dropna().sort_index().index)
+            if len(sub) and (best is None or len(sub) > len(best)):
+                best = sub
+        if best is not None and len(best):
+            return best
+
+    bench = bench.dropna().sort_index()
+    if len(bench.index):
+        return _cap(bench.index)
+    if daily_sources:
+        candidates = [
+            s.dropna().sort_index()
+            for s in daily_sources
+            if s is not None and len(s)
+        ]
+        if candidates:
+            longest = max(candidates, key=len)
+            return _cap(longest.index)
+    return pd.DatetimeIndex([])

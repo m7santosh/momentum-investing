@@ -1,4 +1,4 @@
-"""Tkinter UI for RRG backtest (India / US; week-by-week and run-all modes)."""
+"""Standalone Tkinter UI for RRG backtest (India / US). Not tied to main RRG table."""
 
 from __future__ import annotations
 
@@ -14,11 +14,13 @@ import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from momentum.rrg_ui_copy import (
-    TableRegionCopy,
-    configure_readonly_text,
-    install_copy_support,
+from momentum.rrg_core import (
+    RRG_MAX_TAIL,
+    rrg_config_date_str,
+    rrg_format_date,
+    rrg_parse_user_date,
 )
+from momentum.rrg_ui_copy import install_copy_support
 from utils.nse_bhavcopy import today_ist
 
 
@@ -29,7 +31,7 @@ class _BacktestUiProfile:
     load_status: str
     Config: type
     Engine: type
-    compute_metrics: Callable[[pd.DataFrame, float], dict]
+    compute_metrics: Callable[..., dict]
     format_vol_pct: Callable[[float], str]
     recommendation_row_bg: Callable[[str], str]
 
@@ -49,10 +51,7 @@ def _backtest_profile(name: str) -> _BacktestUiProfile:
         return _BacktestUiProfile(
             title="US RRG Backtest",
             bench_chart="S&P 500",
-            load_status=(
-                "Screening liquid universe and loading Yahoo Finance "
-                "(may take a few minutes)..."
-            ),
+            load_status="Loading universe and Yahoo data (may take a few minutes)...",
             Config=UsRrgBacktestConfig,
             Engine=UsRrgBacktestEngine,
             compute_metrics=compute_metrics,
@@ -81,36 +80,135 @@ def _backtest_profile(name: str) -> _BacktestUiProfile:
     )
 
 
+def backtest_week_pick_detail(record: dict) -> dict[str, str]:
+    """Strategy vs entered Top N for Selected week (matches main RRG panel semantics)."""
+    strategy = [t for t in (record.get("Strategy_Tickers") or []) if t]
+    entered = [t for t in (record.get("Rebalance_Tickers") or []) if t]
+    strategy_s = ", ".join(strategy) if strategy else "—"
+    n_strat = len(strategy)
+    n_ent = len(entered)
+    if n_ent:
+        entered_s = (
+            f"{', '.join(entered)} ({n_ent}/{n_strat})"
+            if n_strat
+            else ", ".join(entered)
+        )
+    else:
+        entered_s = f"— (0/{n_strat})" if n_strat else "—"
+
+    reason_parts: list[str] = []
+    shortfall = (record.get("Pick_Shortfall") or "").strip()
+    if shortfall:
+        reason_parts.append(shortfall)
+    rebal_9ema = (record.get("Rebal_9EMA_Label") or "").strip()
+    if rebal_9ema:
+        reason_parts.append(f"Below 9 EMA @ rebalance: {rebal_9ema}")
+    elif n_ent < n_strat:
+        reason_parts.append(
+            f"{n_ent}/{n_strat} entered — remaining strategy slots empty at rebalance"
+        )
+    reason_s = " | ".join(reason_parts) if reason_parts else "—"
+
+    return {
+        "Strategy picks": strategy_s,
+        "Entered picks": entered_s,
+        "Pick gap reason": reason_s,
+    }
+
+
+def _week_detail_fields(record: dict, *, total_weeks: int) -> dict[str, str]:
+    from momentum.rrg_portfolio_exits import format_exit_summary
+
+    rebal = rrg_format_date(record["Rebal_Date"])
+    end = rrg_format_date(record["End_Date"])
+    exits = format_exit_summary(
+        record.get("Exits") or [],
+        rebalance_tickers=list(record.get("Rebalance_Tickers") or []),
+    )
+    fields = {
+        "Week": f"{record['Week']} of {total_weeks}",
+        "Hold start": rebal,
+        "Hold end": end,
+        "Portfolio %": f"{record['Port_Return'] * 100:+.2f}",
+        "Benchmark %": f"{record['Bench_Return'] * 100:+.2f}",
+        "Portfolio value": f"{record['Portfolio_Value']:,.0f}",
+        "Holdings at week-end": record.get("Holdings") or "CASH",
+        "Exits": exits or "—",
+    }
+    fields.update(backtest_week_pick_detail(record))
+    return fields
+
+
+def _fill_kv_tree(tree: ttk.Treeview, rows: dict[str, str] | None, *, empty: str) -> None:
+    for item in tree.get_children():
+        tree.delete(item)
+    if not rows:
+        tree.insert("", tk.END, values=("—", empty))
+        return
+    for key, value in rows.items():
+        tree.insert("", tk.END, values=(key, value))
+
+
+def _make_kv_tree(
+    parent: tk.Misc,
+    *,
+    height: int,
+    col0_width: int = 140,
+    col1_width: int = 220,
+) -> ttk.Treeview:
+    cols = ("Field", "Value")
+    tree = ttk.Treeview(parent, columns=cols, show="headings", height=height, selectmode="none")
+    tree.heading("Field", text="Field")
+    tree.heading("Value", text="Value")
+    tree.column("Field", width=col0_width, stretch=False)
+    tree.column("Value", width=col1_width, stretch=True)
+    scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
+    tree.configure(yscrollcommand=scroll.set)
+    tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    return tree
+
+
 def open_rrg_backtest(
     parent: tk.Misc,
     *,
     profile: str = "india",
     rrg_window: int = 10,
     tail: int = 1,
+    bar_unit: str = "week",  # ignored — backtest uses weekly rebalance only
+    analysis_period: str = "3m",
     top_n: int = 7,
     backtest_extra: dict[str, Any] | None = None,
     pick_strategy: str | None = None,
     hold_until_rank_exit: bool | None = None,
     max_hold_rank: int | None = None,
     exit_below_9ema: bool | None = None,
+    initial_as_of: str | None = None,  # ignored — use Start/End dates only
+    initial_tail_from: str | None = None,  # ignored
+    initial_start: str | None = None,
+    initial_end: str | None = None,
+    shutdown_root: tk.Misc | None = None,
 ) -> tk.Toplevel:
-    """Open RRG backtest as a normal secondary window (not modal)."""
+    del initial_as_of, initial_tail_from, bar_unit
+
     prof = _backtest_profile(profile)
     bt_extra = dict(backtest_extra or {})
-    if pick_strategy is not None:
-        bt_extra.setdefault("pick_strategy", pick_strategy)
-    if hold_until_rank_exit is not None:
-        bt_extra.setdefault("hold_until_rank_exit", hold_until_rank_exit)
-    if max_hold_rank is not None:
-        bt_extra.setdefault("max_hold_rank", max_hold_rank)
-    if exit_below_9ema is not None:
-        bt_extra.setdefault("exit_below_9ema", exit_below_9ema)
+    bt_extra.setdefault("analysis_period", analysis_period)
+    if profile == "us" and not bt_extra.get("universe_row_ids"):
+        from momentum.etf.us_liquid_rrg_config import (
+            DEFAULT_MIN_ADV,
+            DEFAULT_VOL_PERCENTILE,
+        )
+
+        bt_extra.setdefault("universe_mode", "expanded")
+        bt_extra.setdefault("min_adv_usd", DEFAULT_MIN_ADV)
+        bt_extra.setdefault("vol_percentile", DEFAULT_VOL_PERCENTILE)
+        bt_extra.setdefault("screen_categories", ("all",))
+
     win = tk.Toplevel(parent)
     win.title(prof.title)
-    win.geometry("1280x820")
-    win.minsize(1000, 640)
-    # Do not use transient() — on Windows that hides min/max buttons and traps
-    # focus above the main RRG window so you cannot switch back without closing.
+    win.geometry("1100x780")
+    win.minsize(900, 560)
     try:
         win.attributes("-toolwindow", False)
     except tk.TclError:
@@ -121,17 +219,49 @@ def open_rrg_backtest(
     _busy = False
     _load_run_all_after = False
 
-    # ── Params ──
     params = tk.Frame(win, padx=10, pady=8)
     params.pack(fill=tk.X)
 
-    tk.Label(params, text="Tail from (Fri):").grid(row=0, column=0, sticky="w")
-    start_var = tk.StringVar(value=f"{today_ist().year - 1}-01-01")
-    tk.Entry(params, textvariable=start_var, width=12).grid(row=0, column=1, padx=(4, 16))
+    tk.Label(params, text="Start date:").grid(row=0, column=0, sticky="w")
+    start_default = initial_start or f"{today_ist().year}-01-01"
+    start_var = tk.StringVar(value=rrg_format_date(start_default))
+    start_entry = tk.Entry(params, textvariable=start_var, width=12)
+    start_entry.grid(row=0, column=1, padx=(4, 16))
 
-    tk.Label(params, text="As-of (Fri):").grid(row=0, column=2, sticky="w")
-    end_var = tk.StringVar(value=today_ist().strftime("%Y-%m-%d"))
-    tk.Entry(params, textvariable=end_var, width=12).grid(row=0, column=3, padx=(4, 16))
+    tk.Label(params, text="End date:").grid(row=0, column=2, sticky="w")
+    end_default = initial_end or rrg_format_date(today_ist())
+    end_var = tk.StringVar(value=rrg_format_date(end_default))
+    end_entry = tk.Entry(params, textvariable=end_var, width=12)
+    end_entry.grid(row=0, column=3, padx=(4, 16))
+
+    def _register_dd_mm_yyyy_entry(entry: tk.Entry, var: tk.StringVar) -> None:
+        def _allow_char(proposed: str) -> bool:
+            if proposed == "":
+                return True
+            if len(proposed) > 10:
+                return False
+            return all(c.isdigit() or c == "-" for c in proposed)
+
+        entry.config(
+            validate="key",
+            validatecommand=(win.register(_allow_char), "%P"),
+        )
+
+        def _on_leave(_event=None) -> None:
+            raw = var.get().strip()
+            if not raw:
+                return
+            try:
+                var.set(rrg_format_date(rrg_parse_user_date(raw)))
+            except ValueError as exc:
+                messagebox.showerror("Invalid date", str(exc), parent=win)
+                entry.focus_set()
+                entry.selection_range(0, tk.END)
+
+        entry.bind("<FocusOut>", _on_leave)
+
+    _register_dd_mm_yyyy_entry(start_entry, start_var)
+    _register_dd_mm_yyyy_entry(end_entry, end_var)
 
     tk.Label(params, text="Top N:").grid(row=0, column=4, sticky="w")
     top_n_var = tk.IntVar(value=top_n)
@@ -139,19 +269,18 @@ def open_rrg_backtest(
         row=0, column=5, padx=(4, 16)
     )
 
-    tk.Label(params, text="Tail:").grid(row=0, column=6, sticky="w")
-    tail_var = tk.IntVar(value=tail)
-    ttk.Spinbox(params, from_=1, to=10, width=4, textvariable=tail_var).grid(
-        row=0, column=7, padx=(4, 16)
-    )
-
-    tk.Label(params, text="RRG window:").grid(row=0, column=8, sticky="w")
-    window_var = tk.IntVar(value=rrg_window)
+    tk.Label(params, text="RRG window:").grid(row=0, column=6, sticky="w")
     window_combo = ttk.Combobox(
         params, values=("10", "14"), width=4, state="readonly"
     )
     window_combo.set(str(rrg_window))
-    window_combo.grid(row=0, column=9, padx=(4, 16))
+    window_combo.grid(row=0, column=7, padx=(4, 16))
+
+    tk.Label(params, text="RRG tail (wks):").grid(row=0, column=8, sticky="w")
+    tail_var = tk.IntVar(value=max(1, min(int(tail), RRG_MAX_TAIL)))
+    ttk.Spinbox(
+        params, from_=1, to=RRG_MAX_TAIL, width=4, textvariable=tail_var
+    ).grid(row=0, column=9, padx=(4, 16))
 
     tk.Label(params, text="Capital:").grid(row=0, column=10, sticky="w")
     capital_var = tk.StringVar(value="100000")
@@ -166,13 +295,16 @@ def open_rrg_backtest(
     max_rank_spin: ttk.Spinbox | None = None
 
     if profile in ("india", "us"):
-        from momentum.etf.india_rrg_pick_strategies import PICK_STRATEGIES
+        if profile == "us":
+            from momentum.etf.us_rrg_pick_strategies import PICK_STRATEGIES
+        else:
+            from momentum.etf.india_rrg_pick_strategies import PICK_STRATEGIES
 
         _pick_label_to_key = {label: key for key, label in PICK_STRATEGIES.items()}
         pick_strategy_var.set(PICK_STRATEGIES["recommend"])
         strat_row = tk.Frame(params)
         strat_row.grid(row=1, column=0, columnspan=12, sticky="w", pady=(6, 0))
-        tk.Label(strat_row, text="Base strategy:").pack(side=tk.LEFT)
+        tk.Label(strat_row, text="Strategy:").pack(side=tk.LEFT)
         ttk.Combobox(
             strat_row,
             textvariable=pick_strategy_var,
@@ -181,22 +313,14 @@ def open_rrg_backtest(
             state="readonly",
         ).pack(side=tk.LEFT, padx=(4, 12))
         ttk.Checkbutton(
-            strat_row,
-            text="Hold until rank worse",
-            variable=hold_until_rank_exit_var,
+            strat_row, text="Hold until rank worse", variable=hold_until_rank_exit_var
         ).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Checkbutton(
-            strat_row,
-            text="Exit below 9 EMA",
-            variable=exit_below_9ema_var,
+            strat_row, text="Exit below 9 EMA", variable=exit_below_9ema_var
         ).pack(side=tk.LEFT, padx=(0, 8))
         max_rank_label = tk.Label(strat_row, text="Max hold rank:")
         max_rank_spin = ttk.Spinbox(
-            strat_row,
-            from_=5,
-            to=60,
-            width=4,
-            textvariable=max_hold_rank_var,
+            strat_row, from_=5, to=60, width=4, textvariable=max_hold_rank_var
         )
 
         def _toggle_max_hold_rank(*_) -> None:
@@ -212,46 +336,48 @@ def open_rrg_backtest(
         hold_until_rank_exit_var.trace_add("write", _toggle_max_hold_rank)
         _toggle_max_hold_rank()
 
-    if profile in ("india", "us") and bt_extra.get("pick_strategy"):
-        from momentum.etf.india_rrg_pick_strategies import PICK_STRATEGIES as _PS
-
-        ps_key = str(bt_extra["pick_strategy"])
+    if pick_strategy is not None and profile in ("india", "us"):
+        if profile == "us":
+            from momentum.etf.us_rrg_pick_strategies import PICK_STRATEGIES as _PS
+        else:
+            from momentum.etf.india_rrg_pick_strategies import PICK_STRATEGIES as _PS
+        ps_key = pick_strategy
         if ps_key == "top_n_rank_exit":
             ps_key = "top_n"
             hold_until_rank_exit_var.set(True)
         if ps_key in _PS:
             pick_strategy_var.set(_PS[ps_key])
-    if bt_extra.get("hold_until_rank_exit"):
-        hold_until_rank_exit_var.set(True)
-    if bt_extra.get("max_hold_rank") is not None:
-        max_hold_rank_var.set(int(bt_extra["max_hold_rank"]))
+    if hold_until_rank_exit is not None:
+        hold_until_rank_exit_var.set(bool(hold_until_rank_exit))
+    if max_hold_rank is not None:
+        max_hold_rank_var.set(int(max_hold_rank))
     if "exit_below_9ema" in bt_extra:
         exit_below_9ema_var.set(bool(bt_extra["exit_below_9ema"]))
+    elif exit_below_9ema is not None:
+        exit_below_9ema_var.set(bool(exit_below_9ema))
 
-    mode_var = tk.StringVar(value="step")
+    mode_var = tk.StringVar(value="all")
     mode_row = tk.Frame(params)
-    mode_row.grid(
-        row=2 if profile in ("india", "us") else 1,
-        column=0,
-        columnspan=12,
-        sticky="w",
-        pady=(8, 0),
+    mode_row.grid(row=2, column=0, columnspan=12, sticky="w", pady=(8, 0))
+    ttk.Radiobutton(mode_row, text="Week-by-week", variable=mode_var, value="step").pack(
+        side=tk.LEFT, padx=(0, 12)
     )
-    ttk.Radiobutton(
-        mode_row, text="Week-by-week", variable=mode_var, value="step"
-    ).pack(side=tk.LEFT, padx=(0, 12))
-    ttk.Radiobutton(
-        mode_row, text="Run all (one go)", variable=mode_var, value="all"
-    ).pack(side=tk.LEFT)
+    ttk.Radiobutton(mode_row, text="Run all after load", variable=mode_var, value="all").pack(
+        side=tk.LEFT, padx=(0, 12)
+    )
+    show_equity_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(mode_row, text="Show equity curve", variable=show_equity_var).pack(
+        side=tk.LEFT
+    )
 
     btn_row = tk.Frame(win, pady=6)
     btn_row.pack(fill=tk.X, padx=8)
 
-    status_var = tk.StringVar(value="Set dates and click Load Data.")
-    tk.Label(win, textvariable=status_var, anchor="w", fg="#333", padx=10).pack(
-        fill=tk.X
+    status_var = tk.StringVar(
+        value="Set Start date and End date, then Load Data."
     )
-    # ── Main split: chart + metrics | week detail + log ──
+    tk.Label(win, textvariable=status_var, anchor="w", fg="#333", padx=10).pack(fill=tk.X)
+
     body = ttk.PanedWindow(win, orient=tk.VERTICAL)
     body.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
 
@@ -260,121 +386,38 @@ def open_rrg_backtest(
 
     chart_frame = tk.Frame(top_pane)
     top_pane.add(chart_frame, weight=3)
-
-    fig = Figure(figsize=(7, 3.5), dpi=100)
+    fig = Figure(figsize=(7, 3.2), dpi=100)
     ax = fig.add_subplot(111)
     ax.set_title(f"Portfolio vs {prof.bench_chart}")
-    ax.set_xlabel("Week")
+    ax.set_xlabel("Week #")
     ax.set_ylabel("Value")
     ax.grid(True, alpha=0.3)
     canvas = FigureCanvasTkAgg(fig, master=chart_frame)
     canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    metrics_frame = tk.Frame(top_pane, padx=8)
+    metrics_frame = tk.LabelFrame(top_pane, text="Summary metrics", padx=4, pady=4)
     top_pane.add(metrics_frame, weight=1)
-    metrics_title = tk.Label(metrics_frame, text="Metrics", font=("Arial", 10, "bold"))
-    metrics_title.pack(anchor="w")
-    metrics_text = tk.Text(
-        metrics_frame, width=36, height=18, font=("Consolas", 9)
+    metrics_tree = _make_kv_tree(
+        metrics_frame,
+        height=14,
+        col0_width=150,
+        col1_width=180,
     )
-    metrics_text.pack(fill=tk.BOTH, expand=True)
-    configure_readonly_text(metrics_text)
 
     bottom_pane = ttk.PanedWindow(body, orient=tk.HORIZONTAL)
     body.add(bottom_pane, weight=2)
 
-    week_frame = tk.LabelFrame(bottom_pane, text="Current week", padx=6, pady=4)
-    bottom_pane.add(week_frame, weight=1)
-
-    week_strategy_label = tk.Label(
-        week_frame, text="—", anchor="w", font=("Arial", 10, "bold")
+    detail_frame = tk.LabelFrame(bottom_pane, text="Selected week", padx=4, pady=4)
+    bottom_pane.add(detail_frame, weight=1)
+    detail_tree = _make_kv_tree(
+        detail_frame,
+        height=10,
+        col0_width=130,
+        col1_width=280,
     )
-    week_strategy_label.pack(fill=tk.X)
-    week_week_label = tk.Label(week_frame, text="", anchor="w", font=("Arial", 10))
-    week_week_label.pack(fill=tk.X)
-    week_return_label = tk.Label(week_frame, text="", anchor="w")
-    week_return_label.pack(fill=tk.X)
-    week_dates_label = tk.Label(
-        week_frame,
-        text="",
-        font=("Arial", 9),
-        anchor="w",
-        fg="gray",
-        wraplength=520,
-        justify=tk.LEFT,
-    )
-    week_dates_label.pack(fill=tk.X, pady=(0, 4))
-
-    from momentum.rrg_portfolio_panel import (
-        PORTFOLIO_PANEL_GRID_KEYS,
-        PORTFOLIO_PANEL_HEADERS,
-    )
-
-    portfolio_table = tk.Frame(week_frame)
-    portfolio_table.pack(fill=tk.BOTH, expand=True, pady=(4, 2))
-    portfolio_header: list[tk.Label] = []
-    for col, (_key, header, anchor, min_px) in enumerate(PORTFOLIO_PANEL_HEADERS):
-        portfolio_table.columnconfigure(
-            col,
-            minsize=min_px,
-            weight=1 if _key in ("was", "now", "rebal") else 0,
-        )
-        hdr = tk.Label(
-            portfolio_table,
-            text=header,
-            font=("Arial", 9, "bold"),
-            anchor=anchor,
-            relief=tk.RIDGE,
-            padx=4,
-            pady=1,
-        )
-        hdr.grid(row=0, column=col, sticky="ew", padx=2)
-        portfolio_header.append(hdr)
-    _MAX_TOP_N = 15
-    portfolio_row_widgets: list[dict[str, tk.Label]] = []
-    portfolio_body_cells: list[list[tk.Label]] = []
-    for slot in range(_MAX_TOP_N):
-        widgets: dict[str, tk.Label] = {}
-        row_cells: list[tk.Label] = []
-        grid_row = slot + 1
-        for col, (key, _header, anchor, _min_px) in enumerate(PORTFOLIO_PANEL_HEADERS):
-            font = ("Arial", 8) if key in ("tag", "pick_tag") else ("Arial", 9)
-            fg = "#1565C0" if key in ("tag", "pick_tag") else "black"
-            lbl = tk.Label(
-                portfolio_table,
-                text="",
-                font=font,
-                anchor=anchor,
-                relief=tk.RIDGE,
-                padx=4,
-                pady=1,
-                fg=fg,
-            )
-            lbl.grid(row=grid_row, column=col, sticky="ew", padx=2)
-            widgets[key] = lbl
-            row_cells.append(lbl)
-        portfolio_row_widgets.append(widgets)
-        portfolio_body_cells.append(row_cells)
-
-    def _apply_top_n_rows(n: int | None = None) -> None:
-        count = max(1, min(_MAX_TOP_N, int(n if n is not None else top_n_var.get())))
-        panel_bg = win.cget("bg")
-        for i, widgets in enumerate(portfolio_row_widgets):
-            grid_row = i + 1
-            if i < count:
-                for col, (key, *_rest) in enumerate(PORTFOLIO_PANEL_HEADERS):
-                    widgets[key].grid(row=grid_row, column=col, sticky="ew", padx=2)
-            else:
-                for key, lbl in widgets.items():
-                    lbl.grid_remove()
-                    lbl.config(text="", bg=panel_bg, fg="black")
-
-    _apply_top_n_rows(top_n)
-    top_n_var.trace_add("write", lambda *_: _apply_top_n_rows())
 
     log_frame = tk.LabelFrame(bottom_pane, text="Rebalance log", padx=4, pady=4)
-    bottom_pane.add(log_frame, weight=2)
-
+    bottom_pane.add(log_frame, weight=3)
     log_cols = (
         "Week",
         "Rebal",
@@ -388,7 +431,7 @@ def open_rrg_backtest(
         "Value",
     )
     log_tree = ttk.Treeview(
-        log_frame, columns=log_cols, show="headings", height=12, selectmode="extended"
+        log_frame, columns=log_cols, show="headings", height=10, selectmode="browse"
     )
     _log_heading = {
         "Rebal_9EMA": "9EMA @ reb",
@@ -398,26 +441,14 @@ def open_rrg_backtest(
     }
     for col in log_cols:
         log_tree.heading(col, text=_log_heading.get(col, col))
-        if col == "Holdings":
-            w = 160
-        elif col in ("Rebal_9EMA", "Mid_9EMA"):
-            w = 110
-        elif col == "Exits":
-            w = 200
-        else:
-            w = 88
+        w = 200 if col == "Exits" else 160 if col == "Holdings" else 88
         log_tree.column(col, width=w, stretch=True)
     log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_tree.yview)
     log_tree.configure(yscrollcommand=log_scroll.set)
     log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-    _bt_copy = TableRegionCopy.for_window(win)
-    portfolio_copy_grid = _bt_copy.register_grid(
-        [portfolio_header, *portfolio_body_cells]
-    )
-
-    def _set_busy(busy: bool, cursor: str = "") -> None:
+    def _set_busy(busy: bool) -> None:
         nonlocal _busy
         _busy = busy
         state = tk.DISABLED if busy else tk.NORMAL
@@ -438,13 +469,25 @@ def open_rrg_backtest(
             and engine.current_week > 0
         )
         prev_btn.config(state=tk.NORMAL if can_prev else tk.DISABLED)
+        can_next = (
+            not _busy
+            and engine is not None
+            and engine.loaded
+            and not engine.finished
+        )
+        next_btn.config(state=tk.NORMAL if can_next else tk.DISABLED)
+
     def _update_metrics() -> None:
         if engine is None or engine.trades_df.empty:
-            metrics_text.delete("1.0", tk.END)
-            metrics_text.insert(tk.END, "No results yet.")
+            _fill_kv_tree(metrics_tree, None, empty="No results yet.")
             return
         df = engine.trades_df
         df.attrs["top_n"] = int(top_n_var.get())
+        if profile == "us" and engine is not None:
+            df.attrs["universe_mode"] = getattr(
+                engine.config, "universe_mode", "expanded"
+            )
+            df.attrs["universe_size"] = len(getattr(engine, "_row_ids", ()))
         if profile in ("india", "us") and _pick_label_to_key:
             df.attrs["pick_strategy"] = _pick_label_to_key.get(
                 pick_strategy_var.get(), "recommend"
@@ -457,11 +500,39 @@ def open_rrg_backtest(
             m = prof.compute_metrics(df, cap, benchmark=engine._benchmark)
         else:
             m = prof.compute_metrics(df, cap)
-        lines = [f"{k}: {v}" for k, v in m.items()]
-        metrics_text.delete("1.0", tk.END)
-        metrics_text.insert(tk.END, "\n".join(lines))
+        _fill_kv_tree(
+            metrics_tree,
+            {str(k): str(v) for k, v in m.items()},
+            empty="No results yet.",
+        )
+
+    def _chart_in_top_pane() -> bool:
+        try:
+            return str(chart_frame) in top_pane.panes()
+        except tk.TclError:
+            return False
+
+    def _set_equity_curve_visible(visible: bool) -> None:
+        if visible:
+            if not _chart_in_top_pane():
+                try:
+                    top_pane.add(chart_frame, weight=3)
+                except tk.TclError:
+                    pass
+        elif _chart_in_top_pane():
+            top_pane.forget(chart_frame)
+        win.update_idletasks()
+
+    def _on_equity_toggle(*_) -> None:
+        _set_equity_curve_visible(bool(show_equity_var.get()))
+        if show_equity_var.get():
+            _update_chart()
+
+    show_equity_var.trace_add("write", _on_equity_toggle)
 
     def _update_chart() -> None:
+        if not show_equity_var.get():
+            return
         ax.clear()
         if engine is None or engine.trades_df.empty:
             ax.set_title(f"Portfolio vs {prof.bench_chart}")
@@ -477,274 +548,24 @@ def open_rrg_backtest(
         if engine.current_week < engine.total_weeks:
             ax.axvline(engine.current_week, color="#E65100", linestyle=":", alpha=0.7)
         ax.legend(loc="upper left", fontsize=8)
-        ax.set_title(f"Equity curve ({len(df)} weeks simulated)")
+        ax.set_title(f"Equity curve ({len(df)} week(s))")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         canvas.draw_idle()
 
-    def _panel_exits_for_record(record: dict) -> list:
-        from momentum.rrg_portfolio_exits import (
-            exits_as_of_through_date,
-            filter_exits_portfolio_panel,
-        )
-        from momentum.rrg_portfolio_panel import norm_ticker
-
-        was_portfolio = list(record.get("Was_Portfolio") or [])
-        rebal_tickers = list(record.get("Rebalance_Tickers") or [])
-        rebal_ts = pd.Timestamp(record["Rebal_Date"])
-        exit_slices: list[tuple] = []
-        prev_rebal = record.get("Prev_Rebal_Date")
-        week_num = int(record.get("Week") or 0)
-        if (
-            prev_rebal is not None
-            and engine is not None
-            and week_num > 1
-            and len(engine._records) >= week_num - 1
-        ):
-            prev_rec = engine._records[week_num - 2]
-            exit_slices.append(
-                (pd.Timestamp(prev_rebal), prev_rec.get("Exits") or [])
+    def _show_week_detail(record: dict | None) -> None:
+        if record is None or engine is None:
+            _fill_kv_tree(
+                detail_tree,
+                None,
+                empty="Load data, then Next Week or Run All.",
             )
-        exit_slices.append((rebal_ts, record.get("Exits") or []))
-        return filter_exits_portfolio_panel(
-            exits_as_of_through_date(exit_slices, rebal_ts),
-            prev_holdings=was_portfolio,
-            rebalance_holdings=[t for t in rebal_tickers if t],
-        )
-
-    def _clear_portfolio_row(widgets: dict[str, tk.Label], panel_bg: str) -> None:
-        for key, lbl in widgets.items():
-            fg = "#1565C0" if key in ("tag", "pick_tag") else "black"
-            lbl.config(text="", bg=panel_bg, fg=fg)
-
-    def _clear_week_display() -> None:
-        week_strategy_label.config(text="—")
-        week_week_label.config(text="")
-        week_return_label.config(text="")
-        week_dates_label.config(text="")
-        panel_bg = win.cget("bg")
-        visible_rows = max(1, min(_MAX_TOP_N, int(top_n_var.get())))
-        for slot, widgets in enumerate(portfolio_row_widgets):
-            if slot >= visible_rows:
-                continue
-            _clear_portfolio_row(widgets, panel_bg)
-        TableRegionCopy.for_window(win).sync_styles(portfolio_copy_grid)
-
-    def _show_week_record(record: dict | None) -> None:
-        from momentum.rrg_portfolio_panel import (
-            build_portfolio_panel,
-            norm_ticker,
-            portfolio_panel_dates_line,
-        )
-
-        if record is None:
-            week_strategy_label.config(text="Done — all weeks processed.")
-            week_week_label.config(text="")
-            week_return_label.config(text="")
-            week_dates_label.config(text="")
-            panel_bg = win.cget("bg")
-            visible_rows = max(1, min(_MAX_TOP_N, int(top_n_var.get())))
-            for slot, widgets in enumerate(portfolio_row_widgets):
-                if slot >= visible_rows:
-                    continue
-                _clear_portfolio_row(widgets, panel_bg)
-            TableRegionCopy.for_window(win).sync_styles(portfolio_copy_grid)
             return
-
-        rebal = pd.Timestamp(record["Rebal_Date"]).strftime("%Y-%m-%d")
-        end = pd.Timestamp(record["End_Date"]).strftime("%Y-%m-%d")
-        tail_start = record.get("Tail_Start")
-        if tail_start is not None:
-            tail_s = pd.Timestamp(tail_start).strftime("%Y-%m-%d")
-            week_line = (
-                f"Week {record['Week']} — as of {rebal} "
-                f"(tail {tail_s} → {rebal}) · hold → {end}"
-            )
-        else:
-            week_line = f"Week {record['Week']} — as of {rebal} · hold → {end}"
-
-        if engine is not None and hasattr(engine, "portfolio_panel_context"):
-            ctx = engine.portfolio_panel_context(record)
-            was_portfolio = ctx["was_portfolio"]
-            was_ranks = ctx["was_ranks"]
-            was_label = ctx["was_label"]
-            rebal_ts = ctx["rebal_ts"]
-            prev_rebal_ts = ctx["prev_rebal_ts"]
-            strategy_tickers = ctx["strategy_tickers"]
-            rebal_tickers = ctx["rebal_tickers"]
-            curr_ranks = ctx["curr_ranks"]
-            pick_shortfall = ctx["pick_shortfall"]
-            end_prev_week_holdings = ctx["end_prev_week_holdings"]
-            panel_exits = ctx["panel_exits"]
-            mid_week_9ema = ctx["mid_week_9ema"]
-            rebalance_header = ctx["rebalance_label"]
-            exits_through_ts = ctx["end_ts"]
-        else:
-            rebal_ts = pd.Timestamp(record["Rebal_Date"])
-            was_portfolio = list(record.get("Was_Portfolio") or [])
-            rebal_tickers = list(record.get("Rebalance_Tickers") or [])
-            strategy_tickers = list(record.get("Strategy_Tickers") or rebal_tickers)
-            was_ranks = record.get("Was_Rank_At_Rebal") or {}
-            curr_ranks = record.get("Rank_At_Rebal") or {}
-            prev_rebal = record.get("Prev_Rebal_Date")
-            was_label = (
-                pd.Timestamp(prev_rebal).strftime("%Y-%m-%d")
-                if prev_rebal is not None
-                else "—"
-            )
-            rebalance_header = rebal
-            pick_shortfall = str(record.get("Pick_Shortfall") or "")
-            end_prev_week_holdings = None
-            panel_exits = _panel_exits_for_record(record)
-            mid_week_9ema = record.get("Mid_Week_9EMA") or []
-            exits_through_ts = pd.Timestamp(record["End_Date"])
-            prev_rebal_ts = (
-                pd.Timestamp(prev_rebal) if prev_rebal is not None else None
-            )
-            if engine is not None and not engine.trades_df.empty:
-                week_num = int(record.get("Week") or 0)
-                if week_num > 1:
-                    prev_row = engine.trades_df.iloc[week_num - 2]
-                    end_prev_week_holdings = list(
-                        prev_row.get("Held_Tickers") or []
-                    )
-        week_return_label.config(
-            text=(
-                f"Portfolio: {record['Port_Return'] * 100:+.2f}%  |  "
-                f"Benchmark: {record['Bench_Return'] * 100:+.2f}%  |  "
-                f"Value: {record['Portfolio_Value']:,.0f}"
-            )
+        _fill_kv_tree(
+            detail_tree,
+            _week_detail_fields(record, total_weeks=engine.total_weeks),
+            empty="—",
         )
-
-        strat_key = (
-            _pick_label_to_key.get(pick_strategy_var.get(), "recommend")
-            if _pick_label_to_key
-            else "recommend"
-        )
-        if profile in ("india", "us"):
-            from momentum.etf.india_rrg_pick_strategies import (
-                pick_strategy_label,
-                pick_strategy_subtitle,
-            )
-
-            subtitle = pick_strategy_subtitle(
-                strat_key,
-                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
-                max_hold_rank=int(max_hold_rank_var.get()),
-                exit_below_9ema=bool(exit_below_9ema_var.get()),
-            )
-            title = pick_strategy_label(
-                strat_key,
-                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
-                exit_below_9ema=bool(exit_below_9ema_var.get()),
-            )
-        else:
-            subtitle = ""
-            title = "Portfolio"
-        week_strategy_label.config(text=title)
-        week_week_label.config(text=week_line)
-        rebal_n = len([t for t in rebal_tickers if t])
-        week_dates_label.config(
-            text=portfolio_panel_dates_line(
-                rebalance_label=rebalance_header,
-                was_n=len(was_portfolio),
-                was_label=was_label,
-                rebal_n=rebal_n,
-                pick_shortfall=pick_shortfall,
-                exit_below_9ema=bool(exit_below_9ema_var.get()),
-                subtitle=subtitle,
-                exits_through_label=(
-                    pd.Timestamp(exits_through_ts).strftime("%Y-%m-%d")
-                    if exit_below_9ema_var.get()
-                    else None
-                ),
-            )
-        )
-
-        def _weekly_for_pnl(sym: str) -> pd.Series:
-            if engine is None:
-                return pd.Series(dtype=float)
-            if profile == "india":
-                return engine._ref_etf_weekly.get(
-                    sym.strip().upper().replace(".NS", ""),
-                    pd.Series(dtype=float),
-                )
-            return engine._row_price_weekly.get(sym, pd.Series(dtype=float))
-
-        def _daily_for_pnl(sym: str) -> pd.Series | None:
-            if engine is None:
-                return None
-            bare = sym.strip().upper().replace(".NS", "")
-            if profile == "india":
-                daily = engine._ref_etf_daily.get(bare, pd.Series(dtype=float))
-            else:
-                daily = engine._etf_daily.get(bare, pd.Series(dtype=float))
-            return daily if daily is not None and len(daily) else None
-
-        def _was_rank(ticker: str) -> int | None:
-            rk = was_ranks.get(norm_ticker(ticker))
-            return int(rk) if rk is not None else None
-
-        def _curr_rank(ticker: str) -> int | None:
-            rk = curr_ranks.get(norm_ticker(ticker))
-            return int(rk) if rk is not None else None
-
-        panel_rows = build_portfolio_panel(
-            prev_portfolio=was_portfolio,
-            rebal_strategy=strategy_tickers,
-            rebal_tickers=rebal_tickers,
-            end_prev_week_holdings=end_prev_week_holdings,
-            panel_exits=panel_exits,
-            rebalance_ts=rebal_ts,
-            prev_rebalance_ts=prev_rebal_ts,
-            weekly_for_ticker=_weekly_for_pnl,
-            daily_for_ticker=_daily_for_pnl,
-            was_rank_for_ticker=_was_rank,
-            curr_rank_for_ticker=_curr_rank,
-            exit_below_9ema=bool(exit_below_9ema_var.get()),
-            mid_week_9ema=mid_week_9ema,
-        )
-        panel_bg = win.cget("bg")
-        visible_rows = max(1, min(_MAX_TOP_N, int(top_n_var.get())))
-        max_rows = max(len(panel_rows), 1)
-        for slot, widgets in enumerate(portfolio_row_widgets):
-            if slot >= visible_rows:
-                continue
-            grid_row = slot + 1
-            if slot < len(panel_rows):
-                row = panel_rows[slot]
-                was_text = row["was_text"]
-                now_text = row["now_text"]
-                move = row["move"]
-                rebal_text = row["rebal_text"]
-                pick_tag = row["pick"]
-                pnl_text = row["pnl"]
-                mid_9ema_text = row.get("mid_9ema", "")
-                now_fg = row.get("now_fg", "black")
-                rebal_fg = row.get("rebal_fg", "black")
-                mid_fg = row.get("mid_fg", "black")
-            else:
-                was_text = now_text = move = rebal_text = pick_tag = pnl_text = ""
-                mid_9ema_text = ""
-                now_fg = rebal_fg = mid_fg = "black"
-            if slot < max_rows:
-                widgets["rank"].config(text=str(slot + 1))
-                widgets["was"].config(text=was_text)
-                widgets["now"].config(text=now_text, fg=now_fg)
-                widgets["tag"].config(text=move)
-                widgets["rebal"].config(text=rebal_text, fg=rebal_fg)
-                widgets["pick_tag"].config(text=pick_tag)
-                widgets["pnl"].config(text=pnl_text)
-                widgets["mid_9ema"].config(text=mid_9ema_text, fg=mid_fg)
-                for col, key in enumerate(PORTFOLIO_PANEL_GRID_KEYS):
-                    widgets[key].grid(
-                        row=grid_row, column=col, sticky="ew", padx=2, pady=1
-                    )
-            else:
-                _clear_portfolio_row(widgets, panel_bg)
-                for w in widgets.values():
-                    w.grid_remove()
-        TableRegionCopy.for_window(win).sync_styles(portfolio_copy_grid)
 
     def _refresh_log_table() -> None:
         from momentum.rrg_portfolio_exits import format_exit_summary
@@ -763,10 +584,11 @@ def open_rrg_backtest(
             log_tree.insert(
                 "",
                 tk.END,
+                iid=str(row["Week"]),
                 values=(
                     row["Week"],
-                    pd.Timestamp(row["Rebal_Date"]).strftime("%Y-%m-%d"),
-                    pd.Timestamp(row["End_Date"]).strftime("%Y-%m-%d"),
+                    rrg_format_date(row["Rebal_Date"]),
+                    rrg_format_date(row["End_Date"]),
                     row["Holdings"],
                     row.get("Rebal_9EMA_Label") or "—",
                     row.get("Mid_Week_9EMA_Label") or "—",
@@ -780,21 +602,35 @@ def open_rrg_backtest(
 
     def _clear_results() -> None:
         _refresh_log_table()
-        _clear_week_display()
+        _show_week_detail(None)
         _update_chart()
         _update_metrics()
         _refresh_nav_buttons()
 
-    def _build_engine():
-        return prof.Engine(
-            config=_ui_config(),
-            progress_cb=lambda msg: win.after(0, lambda m=msg: status_var.set(m)),
-        )
+    def _validate_dates() -> bool:
+        try:
+            start_norm = rrg_format_date(rrg_parse_user_date(start_var.get()))
+            end_norm = rrg_format_date(rrg_parse_user_date(end_var.get()))
+            start_var.set(start_norm)
+            end_var.set(end_norm)
+            if pd.Timestamp(rrg_config_date_str(start_norm)) > pd.Timestamp(
+                rrg_config_date_str(end_norm)
+            ):
+                messagebox.showerror(
+                    "Invalid dates",
+                    "Start date must be on or before End date (DD-MM-YYYY).",
+                    parent=win,
+                )
+                return False
+            return True
+        except ValueError as exc:
+            messagebox.showerror("Invalid date", str(exc), parent=win)
+            return False
 
     def _ui_config():
         kw = dict(
-            backtest_start=start_var.get().strip(),
-            backtest_end=end_var.get().strip(),
+            backtest_start=rrg_config_date_str(start_var.get()),
+            backtest_end=rrg_config_date_str(end_var.get()),
             top_n=int(top_n_var.get()),
             tail=int(tail_var.get()),
             rrg_window=int(window_combo.get()),
@@ -807,23 +643,29 @@ def open_rrg_backtest(
             kw["hold_until_rank_exit"] = bool(hold_until_rank_exit_var.get())
             kw["max_hold_rank"] = int(max_hold_rank_var.get())
             kw["exit_below_9ema"] = bool(exit_below_9ema_var.get())
+            if profile == "india":
+                kw["analysis_period"] = bt_extra.get("analysis_period", "3m")
+            elif profile == "us":
+                kw["analysis_period"] = bt_extra.get("analysis_period", "3m")
         if profile == "us":
             row_ids = bt_extra.get("universe_row_ids")
+            extra_us = {
+                k: v
+                for k, v in bt_extra.items()
+                if k
+                in (
+                    "universe_mode",
+                    "min_adv_usd",
+                    "vol_percentile",
+                    "screen_categories",
+                )
+            }
             if row_ids:
                 kw["universe_row_ids"] = tuple(row_ids)
-            kw.update(
-                {
-                    k: v
-                    for k, v in bt_extra.items()
-                    if k
-                    in (
-                        "universe_mode",
-                        "min_adv_usd",
-                        "vol_percentile",
-                        "screen_categories",
-                    )
-                }
-            )
+                kw["universe_mode"] = "main_table"
+            else:
+                kw.update(extra_us)
+                kw.setdefault("universe_mode", "expanded")
         return prof.Config(**kw)
 
     def _config_needs_reload(stored, ui) -> bool:
@@ -833,27 +675,21 @@ def open_rrg_backtest(
             or stored.tail != ui.tail
             or stored.rrg_window != ui.rrg_window
         )
+        if profile in ("india", "us"):
+            base = base or stored.analysis_period != ui.analysis_period
         if profile == "us":
+            base = base or stored.universe_mode != ui.universe_mode
             base = base or (
                 tuple(getattr(stored, "universe_row_ids", None) or ())
                 != tuple(getattr(ui, "universe_row_ids", None) or ())
-                or getattr(stored, "universe_mode", "core")
-                != getattr(ui, "universe_mode", "core")
-                or getattr(stored, "min_adv_usd", 0) != getattr(ui, "min_adv_usd", 0)
-                or getattr(stored, "vol_percentile", 100)
-                != getattr(ui, "vol_percentile", 100)
             )
         return base
 
-    def _sync_engine_config_from_ui(*, require_loaded: bool = True) -> bool:
-        """Apply current inputs. Returns False if a full reload is required first."""
-        if engine is None or not engine.loaded:
-            return False
-        ui_cfg = _ui_config()
-        if _config_needs_reload(engine.config, ui_cfg):
-            return False
-        engine.config = ui_cfg
-        return True
+    def _build_engine():
+        return prof.Engine(
+            config=_ui_config(),
+            progress_cb=lambda msg: win.after(0, lambda m=msg: status_var.set(m)),
+        )
 
     def _on_load_done(eng, err: Exception | None) -> None:
         nonlocal engine, _load_run_all_after
@@ -865,12 +701,13 @@ def open_rrg_backtest(
             return
         engine = eng
         _clear_results()
+        first = rrg_format_date(engine.rebal_dates[0])
+        last = rrg_format_date(engine.rebal_dates[-1])
         status_var.set(
-            f"Loaded {engine.total_weeks} rebalance week(s) "
-            f"({engine.rebal_dates[0].strftime('%Y-%m-%d')} .. "
-            f"{engine.rebal_dates[-1].strftime('%Y-%m-%d')}). "
-            f"Match main RRG Date slider to as-of date. "
-            f"{'Click Next Week or Run All.' if mode_var.get() == 'step' else 'Click Run All.'}"
+            f"Ready: {engine.total_weeks} weekly rebalance(s) from {first} to {last}. "
+            f"Universe: {getattr(engine.config, 'universe_mode', 'n/a')} "
+            f"({len(getattr(engine, '_row_ids', ()))} ETFs). "
+            f"Click Next Week or Run All."
         )
         run_after = _load_run_all_after or mode_var.get() == "all"
         _load_run_all_after = False
@@ -880,6 +717,8 @@ def open_rrg_backtest(
     def _load_data(*, run_all_after: bool = False) -> None:
         nonlocal _load_run_all_after
         if _busy:
+            return
+        if not _validate_dates():
             return
         _load_run_all_after = run_all_after
         _set_busy(True)
@@ -901,32 +740,32 @@ def open_rrg_backtest(
         if engine is None or not engine.loaded:
             messagebox.showinfo("Backtest", "Load data first.", parent=win)
             return
-        if not _sync_engine_config_from_ui():
+        if not _validate_dates():
+            return
+        ui_cfg = _ui_config()
+        if _config_needs_reload(engine.config, ui_cfg):
             messagebox.showinfo(
                 "Backtest",
-                "Dates, tail, or RRG window changed — click Load Data first.",
+                "Settings changed — click Load Data again.",
                 parent=win,
             )
             return
+        engine.config = ui_cfg
         if engine.finished:
-            status_var.set("All weeks done. Click Run All or Reset.")
+            status_var.set("All weeks done. Reset to run again.")
             return
         record = engine.step_week()
         if record:
             _refresh_log_table()
-            _show_week_record(record)
+            _show_week_detail(record)
+            log_tree.selection_set(str(record["Week"]))
             _update_chart()
             _update_metrics()
-            status_var.set(
-                f"Week {engine.current_week}/{engine.total_weeks} complete."
-            )
-        if engine.finished:
-            status_var.set(f"Finished all {engine.total_weeks} weeks.")
+            status_var.set(f"Week {engine.current_week}/{engine.total_weeks} complete.")
         _refresh_nav_buttons()
 
     def _do_previous() -> None:
         if engine is None or not engine.loaded:
-            messagebox.showinfo("Backtest", "Load data first.", parent=win)
             return
         if engine.current_week <= 0:
             status_var.set("Already at the first week.")
@@ -934,13 +773,12 @@ def open_rrg_backtest(
         record = engine.step_back()
         _refresh_log_table()
         if record:
-            _show_week_record(record)
-            status_var.set(
-                f"Showing week {engine.current_week}/{engine.total_weeks}."
-            )
+            _show_week_detail(record)
+            log_tree.selection_set(str(record["Week"]))
+            status_var.set(f"Showing week {engine.current_week}/{engine.total_weeks}.")
         else:
-            _clear_week_display()
-            status_var.set("At start — click Next Week to begin.")
+            _show_week_detail(None)
+            status_var.set("At start — click Next Week.")
         _update_chart()
         _update_metrics()
         _refresh_nav_buttons()
@@ -952,6 +790,8 @@ def open_rrg_backtest(
             _load_data(run_all_after=True)
             return
         if not from_load:
+            if not _validate_dates():
+                return
             ui_cfg = _ui_config()
             if _config_needs_reload(engine.config, ui_cfg):
                 _load_data(run_all_after=True)
@@ -972,9 +812,8 @@ def open_rrg_backtest(
                 eng.reset_run()
                 while not eng.finished:
                     last_record = eng.step_week()
-                    w = eng.current_week
-                    total = eng.total_weeks
-                    win.after(0, lambda w=w, t=total: status_var.set(f"Running week {w}/{t}..."))
+                    w, t = eng.current_week, eng.total_weeks
+                    win.after(0, lambda w=w, t=t: status_var.set(f"Running week {w}/{t}..."))
             except Exception as exc:
                 err = exc
             win.after(0, lambda: _on_run_all_done(err, last_record))
@@ -988,17 +827,42 @@ def open_rrg_backtest(
             return
         _refresh_log_table()
         if last_record:
-            _show_week_record(last_record)
+            _show_week_detail(last_record)
+            log_tree.selection_set(str(last_record["Week"]))
         _update_chart()
         _update_metrics()
-        status_var.set(f"Finished all {engine.total_weeks if engine else 0} weeks.")
+        total = engine.total_weeks if engine else 0
+        status_var.set(f"Finished all {total} week(s).")
         _refresh_nav_buttons()
 
     def _reset() -> None:
         if engine is not None and engine.loaded:
             engine.reset_run()
         _clear_results()
-        status_var.set("Reset. Click Next Week or Run All.")
+        if engine is not None and engine.loaded:
+            first = rrg_format_date(engine.rebal_dates[0])
+            last = rrg_format_date(engine.rebal_dates[-1])
+            status_var.set(
+                f"Reset. {engine.total_weeks} week(s) ({first} → {last}). "
+                f"Click Next Week or Run All."
+            )
+        else:
+            status_var.set("Reset. Load data to begin.")
+
+    def _on_log_select(_event=None) -> None:
+        if engine is None or not engine._records:
+            return
+        sel = log_tree.selection()
+        if not sel:
+            return
+        try:
+            week_num = int(sel[0])
+        except ValueError:
+            return
+        if 1 <= week_num <= len(engine._records):
+            _show_week_detail(engine._records[week_num - 1])
+
+    log_tree.bind("<<TreeviewSelect>>", _on_log_select)
 
     load_btn = ttk.Button(btn_row, text="Load Data", command=_load_data)
     load_btn.pack(side=tk.LEFT, padx=(10, 6))
@@ -1010,9 +874,21 @@ def open_rrg_backtest(
     run_all_btn.pack(side=tk.LEFT, padx=6)
     reset_btn = ttk.Button(btn_row, text="Reset", command=_reset)
     reset_btn.pack(side=tk.LEFT, padx=6)
-    ttk.Button(btn_row, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=10)
+
+    def _close_window() -> None:
+        win.destroy()
+        if shutdown_root is not None:
+            try:
+                shutdown_root.quit()
+            except tk.TclError:
+                pass
+
+    ttk.Button(btn_row, text="Close", command=_close_window).pack(side=tk.RIGHT, padx=10)
+    win.protocol("WM_DELETE_WINDOW", _close_window)
 
     install_copy_support(win)
+    _fill_kv_tree(metrics_tree, None, empty="No results yet.")
+    _show_week_detail(None)
     _refresh_nav_buttons()
     win.focus_set()
     return win
@@ -1038,7 +914,8 @@ def open_us_rrg_backtest(
     parent: tk.Misc,
     *,
     rrg_window: int = 10,
-    tail: int = 2,
+    tail: int = 1,
+    analysis_period: str = "3m",
     top_n: int = 7,
 ) -> tk.Toplevel:
     return open_rrg_backtest(
@@ -1046,5 +923,73 @@ def open_us_rrg_backtest(
         profile="us",
         rrg_window=rrg_window,
         tail=tail,
+        analysis_period=analysis_period,
         top_n=top_n,
     )
+
+
+def launch_standalone_rrg_backtest(
+    *,
+    profile: str = "india",
+    rrg_window: int = 10,
+    tail: int | None = None,
+    top_n: int = 7,
+    start: str | None = None,
+    end: str | None = None,
+    backtest_extra: dict[str, Any] | None = None,
+    ready_file: str | None = None,
+) -> None:
+    """Open backtest UI in its own process (no main RRG window)."""
+    from pathlib import Path
+
+    root = tk.Tk()
+    root.withdraw()
+    if tail is None:
+        tail = 1
+    us_extra = None
+    if profile == "us":
+        from momentum.etf.us_liquid_rrg_config import (
+            DEFAULT_MIN_ADV,
+            DEFAULT_VOL_PERCENTILE,
+        )
+
+        us_extra = {
+            "universe_mode": "expanded",
+            "min_adv_usd": DEFAULT_MIN_ADV,
+            "vol_percentile": DEFAULT_VOL_PERCENTILE,
+            "screen_categories": ("all",),
+            "analysis_period": "3m",
+        }
+    win = open_rrg_backtest(
+        root,
+        profile=profile,
+        rrg_window=rrg_window,
+        tail=tail,
+        top_n=top_n,
+        initial_start=start,
+        initial_end=end,
+        backtest_extra=backtest_extra or us_extra,
+        shutdown_root=root,
+    )
+
+    if ready_file:
+        ready_path = Path(ready_file)
+
+        def _write_ready() -> None:
+            try:
+                ready_path.write_text("ready\n", encoding="utf-8")
+            except OSError:
+                pass
+
+        def _poll_ready() -> None:
+            try:
+                if win.winfo_exists() and win.winfo_viewable():
+                    _write_ready()
+                    return
+            except tk.TclError:
+                return
+            win.after(50, _poll_ready)
+
+        win.after_idle(_poll_ready)
+
+    root.mainloop()
