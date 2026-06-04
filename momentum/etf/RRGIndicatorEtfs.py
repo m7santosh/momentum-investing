@@ -26,7 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -54,8 +54,10 @@ from momentum.rrg_core import RRG_WINDOW_DEFAULT, RRG_WINDOW_ETF  # noqa: E402
 from momentum.rrg_swing_cheat_sheet import ETF_SWING_CHEAT_SHEET  # noqa: E402
 from utils.nse_bhavcopy import (  # noqa: E402
     fetch_index_close_all,
+    load_nse_cm_histories_range,
     load_nse_etf_weekly_histories,
     load_nse_index_weekly_histories,
+    load_nse_index_weekly_histories_range,
     resolve_index_name,
     today_ist,
 )
@@ -159,6 +161,49 @@ def _load_all_histories(
             period=period,
             min_points=min_weekly_points,
             rrg_window=rrg_window,
+            freq=freq,
+        )
+        for sym in RRG_LOAD_ETF_NSE_SYMBOLS:
+            out[sym] = etf_batch.get(sym, pd.Series(dtype=float))
+    return out
+
+
+def _load_all_histories_range(
+    start_date: date,
+    end_date: date,
+    min_weekly_points: int,
+    rrg_window: int,
+    freq: str = "week",
+) -> dict[str, pd.Series]:
+    """Load RRG histories for an explicit calendar range (backtests)."""
+    out: dict[str, pd.Series] = {}
+    print(
+        f"Loading NSE index EOD (ind_close_all) for RRG ({freq}) "
+        f"{start_date:%Y-%m-%d} .. {end_date:%Y-%m-%d}..."
+    )
+    index_batch = load_nse_index_weekly_histories_range(
+        RRG_LOAD_NSE_INDEX_NAMES,
+        start_date,
+        end_date,
+        min_points=min_weekly_points,
+        freq=freq,
+    )
+    for name in RRG_INDEX_ROW_IDS:
+        out[name] = index_batch.get(name, pd.Series(dtype=float))
+    out[RRG_BENCHMARK_NSE] = index_batch.get(RRG_BENCHMARK_NSE, pd.Series(dtype=float))
+
+    if RRG_LOAD_ETF_NSE_SYMBOLS:
+        print(
+            f"Loading NSE ETF EOD (CM bhavcopy) for RRG "
+            f"{start_date:%Y-%m-%d} .. {end_date:%Y-%m-%d}..."
+        )
+        etf_batch = load_nse_cm_histories_range(
+            RRG_LOAD_ETF_NSE_SYMBOLS,
+            start_date,
+            end_date,
+            min_points=min_weekly_points,
+            quiet=True,
+            asset_label="ETF symbol",
             freq=freq,
         )
         for sym in RRG_LOAD_ETF_NSE_SYMBOLS:

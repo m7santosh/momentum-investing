@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -72,7 +72,7 @@ from momentum.rrg_ranking import (  # noqa: E402
 )
 from utils.nse_bhavcopy import today_ist  # noqa: E402
 from utils.output_paths import FINAL_RESULT_ETF_DIR  # noqa: E402
-from utils.yahoo_weekly import load_yahoo_histories, load_yahoo_histories_range  # noqa: E402
+from utils.yahoo_weekly import load_yahoo_histories_range  # noqa: E402
 
 BACKTEST_OUT_DIR = FINAL_RESULT_ETF_DIR / "backtest_rrg_us"
 STRATEGY_TAG = "us_rrg_swing"
@@ -188,33 +188,17 @@ class UsRrgBacktestEngine:
             f"({n_core} core us.py + {n_disc} liquid discoveries)"
         )
 
-    def _load_rrg_weekly_histories(self) -> dict[str, pd.Series]:
-        """Same period-based Yahoo load as live US RRG (not extended backtest range)."""
+    def _load_rrg_weekly_histories(
+        self, dl_start: date, dl_end: date
+    ) -> dict[str, pd.Series]:
+        """Load RRG weekly series for all resolved universe tickers over the backtest range."""
         cfg = self.config
         min_weekly_points = rrg_min_history_bars(cfg.rrg_window, "week")
-        period = cfg.analysis_period
-        if cfg.universe_row_ids:
-            batch = load_yahoo_histories(
-                self._load_tickers,
-                period=period,
-                min_points=min_weekly_points,
-                rrg_window=cfg.rrg_window,
-                freq="week",
-                quiet=True,
-            )
-            return {sym: batch.get(sym, pd.Series(dtype=float)) for sym in self._load_tickers}
-        mode = (cfg.universe_mode or "core").strip().lower()
-        if mode == "core":
-            from momentum.etf.RRGIndicatorUsEtfs import _load_all_histories
-
-            return _load_all_histories(
-                period, min_weekly_points, cfg.rrg_window, freq="week"
-            )
-        batch = load_yahoo_histories(
+        batch = load_yahoo_histories_range(
             self._load_tickers,
-            period=period,
+            dl_start,
+            dl_end,
             min_points=min_weekly_points,
-            rrg_window=cfg.rrg_window,
             freq="week",
             quiet=True,
         )
@@ -285,9 +269,10 @@ class UsRrgBacktestEngine:
         min_history = rrg_effective_window(cfg.rrg_window, "week")
 
         self._log(
-            f"Loading RRG weekly histories ({cfg.analysis_period}, same as live RRG)..."
+            f"Loading RRG weekly histories for {len(self._load_tickers)} ticker(s) "
+            f"{dl_start:%Y-%m-%d} .. {dl_end:%Y-%m-%d} (warmup + backtest range)..."
         )
-        histories = self._load_rrg_weekly_histories()
+        histories = self._load_rrg_weekly_histories(dl_start, dl_end)
         for row_id in self._row_ids:
             self._row_price_weekly[row_id] = histories.get(
                 row_id, pd.Series(dtype=float)
@@ -1063,6 +1048,11 @@ def compute_metrics(
         "Win_Rate_%": round(float(np.mean(port_rets > 0) * 100), 1),
         "Avg_Weekly_Return_%": round(float(np.mean(port_rets) * 100), 2),
         "Total_Trades": total_trades,
+        "Bench_Total_Return_%": round(bench_total * 100, 2),
+        "Bench_CAGR_%": round(bench_cagr * 100, 2),
+        "Bench_Max_Drawdown_%": round(bench_max_dd * 100, 2),
+        "Final_Value": round(float(df["Portfolio_Value"].iloc[-1]), 2),
+        "Bench_Final_Value": round(float(df["Bench_Value"].iloc[-1]), 2),
         "Sharpe": round(sharpe, 2),
         "Sortino": round(sortino, 2),
         "Calmar": round(calmar, 2),
@@ -1070,11 +1060,6 @@ def compute_metrics(
         "Avg_Turnover_%": round(float(df["Turnover"].mean() * 100), 1),
         "Alpha_%": round(alpha * 100, 2),
         "Information_Ratio": round(info_ratio, 2),
-        "Bench_Total_Return_%": round(bench_total * 100, 2),
-        "Bench_CAGR_%": round(bench_cagr * 100, 2),
-        "Bench_Max_Drawdown_%": round(bench_max_dd * 100, 2),
-        "Final_Value": round(float(df["Portfolio_Value"].iloc[-1]), 2),
-        "Bench_Final_Value": round(float(df["Bench_Value"].iloc[-1]), 2),
     }
 
 

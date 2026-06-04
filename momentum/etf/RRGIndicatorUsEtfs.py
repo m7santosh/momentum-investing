@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -49,7 +50,7 @@ from momentum.etf.us_rrg_universe import (  # noqa: E402
 from momentum.rrg_app import RrgAppConfig, run_rrg_app  # noqa: E402
 from momentum.rrg_core import RRG_WINDOW_DEFAULT, RRG_WINDOW_ETF  # noqa: E402
 from momentum.rrg_swing_cheat_sheet import ETF_SWING_CHEAT_SHEET  # noqa: E402
-from utils.yahoo_weekly import load_yahoo_histories  # noqa: E402
+from utils.yahoo_weekly import load_yahoo_histories, load_yahoo_histories_range  # noqa: E402
 
 ENV_US_ETF_PERIOD = "RRG_US_ETF_PERIOD"
 
@@ -113,6 +114,32 @@ def _load_all_histories(
         period=period,
         min_points=min_weekly_points,
         rrg_window=rrg_window,
+        freq=freq,
+    )
+    out: dict[str, pd.Series] = {}
+    for ticker in RRG_ETF_ROW_IDS:
+        out[ticker] = batch.get(ticker, pd.Series(dtype=float))
+    out[RRG_BENCHMARK_YAHOO] = batch.get(RRG_BENCHMARK_YAHOO, pd.Series(dtype=float))
+    return out
+
+
+def _load_all_histories_range(
+    start_date: date,
+    end_date: date,
+    min_weekly_points: int,
+    rrg_window: int,
+    freq: str = "week",
+) -> dict[str, pd.Series]:
+    """Load RRG histories for an explicit calendar range (backtests)."""
+    print(
+        f"Loading US ETF EOD (Yahoo Finance) for RRG ({freq}) "
+        f"{start_date:%Y-%m-%d} .. {end_date:%Y-%m-%d}..."
+    )
+    batch = load_yahoo_histories_range(
+        RRG_LOAD_YAHOO_TICKERS,
+        start_date,
+        end_date,
+        min_points=min_weekly_points,
         freq=freq,
     )
     out: dict[str, pd.Series] = {}

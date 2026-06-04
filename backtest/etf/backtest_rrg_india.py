@@ -4,7 +4,8 @@ Walk-forward backtest for India NSE ETF RRG swing recommendations.
 Replays the same weekly ranking + ``recommend_india_etfs`` pipeline as the live
 RRG screen: tail-window rank, Leading/Improving quadrant, rank delta, vol scoring.
 
-RRG row prices use the same NSE loaders as live RRG (``RRGIndicatorEtfs._load_all_histories``).
+RRG row prices use the same NSE loaders as live RRG, over the backtest date range
+(``RRGIndicatorEtfs._load_all_histories_range``).
 P&L uses equal-weight ref ETF weekly closes from NSE CM bhavcopy.
 
 Examples:
@@ -44,7 +45,7 @@ from momentum.etf.india_rrg_pick_strategies import (  # noqa: E402
 from momentum.etf.india_rrg_recommendations import (  # noqa: E402
     load_india_etf_vol_pct,
 )
-from momentum.etf.RRGIndicatorEtfs import _load_all_histories  # noqa: E402
+from momentum.etf.RRGIndicatorEtfs import _load_all_histories_range  # noqa: E402
 from momentum.rrg_core import (  # noqa: E402
     compute_rrg_indicators,
     rrg_effective_window,
@@ -201,10 +202,12 @@ class IndiaRrgBacktestEngine:
         min_weekly_points = rrg_min_history_bars(cfg.rrg_window, "week")
 
         self._log(
-            f"Loading RRG weekly histories ({cfg.analysis_period}, same as live RRG)..."
+            f"Loading RRG weekly histories {dl_start:%Y-%m-%d} .. {dl_end:%Y-%m-%d} "
+            f"(warmup + backtest range)..."
         )
-        histories = _load_all_histories(
-            cfg.analysis_period,
+        histories = _load_all_histories_range(
+            dl_start,
+            dl_end,
             min_weekly_points,
             cfg.rrg_window,
             freq="week",
@@ -1221,6 +1224,11 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
         "Win_Rate_%": round(float(np.mean(port_rets > 0) * 100), 1),
         "Avg_Weekly_Return_%": round(float(np.mean(port_rets) * 100), 2),
         "Total_Trades": total_trades,
+        "Bench_Total_Return_%": round(bench_total * 100, 2),
+        "Bench_CAGR_%": round(bench_cagr * 100, 2),
+        "Bench_Max_Drawdown_%": round(bench_max_dd * 100, 2),
+        "Final_Value": round(float(df["Portfolio_Value"].iloc[-1]), 2),
+        "Bench_Final_Value": round(float(df["Bench_Value"].iloc[-1]), 2),
         "Sharpe": round(sharpe, 2),
         "Sortino": round(sortino, 2),
         "Calmar": round(calmar, 2),
@@ -1228,11 +1236,6 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
         "Avg_Turnover_%": round(float(df["Turnover"].mean() * 100), 1),
         "Alpha_%": round(alpha * 100, 2),
         "Information_Ratio": round(info_ratio, 2),
-        "Bench_Total_Return_%": round(bench_total * 100, 2),
-        "Bench_CAGR_%": round(bench_cagr * 100, 2),
-        "Bench_Max_Drawdown_%": round(bench_max_dd * 100, 2),
-        "Final_Value": round(float(df["Portfolio_Value"].iloc[-1]), 2),
-        "Bench_Final_Value": round(float(df["Bench_Value"].iloc[-1]), 2),
     }
 
 

@@ -674,6 +674,48 @@ def load_nse_index_weekly_histories(
     return out
 
 
+def load_nse_index_weekly_histories_range(
+    index_names: list[str],
+    start_date: date,
+    end_date: date,
+    *,
+    min_points: int = 15,
+    quiet: bool = True,
+    freq: str = "week",
+) -> dict[str, "pd.Series"]:
+    """NSE ``ind_close_all`` closes between ``start_date`` and ``end_date`` (inclusive)."""
+    from momentum.rrg_core import rrg_normalize_bar_unit
+
+    bar_unit = rrg_normalize_bar_unit(freq)
+    import pandas as pd
+
+    unique = list(dict.fromkeys(index_names))
+    if not unique:
+        return {}
+    if start_date > end_date:
+        raise ValueError("start_date must be on or before end_date")
+
+    daily_batch = fetch_index_close_histories(unique, start_date, end_date, quiet=quiet)
+
+    out: dict[str, pd.Series] = {}
+    for name in unique:
+        daily = daily_batch.get(name, pd.Series(dtype=float))
+        if len(daily) < min_points:
+            out[name] = pd.Series(dtype=float)
+            continue
+        if bar_unit == "day":
+            out[name] = daily
+        else:
+            weekly = daily.resample("W-FRI").last().dropna()
+            out[name] = weekly if len(weekly) >= min_points else pd.Series(dtype=float)
+    if not quiet and unique:
+        print(
+            f"  [NSE Index EOD] {start_date:%Y-%m-%d}..{end_date:%Y-%m-%d}: "
+            f"{len(unique)} index name(s)"
+        )
+    return out
+
+
 def fetch_equity_close_history_bhavcopy(
     nse_symbol: str,
     start_date: date,
