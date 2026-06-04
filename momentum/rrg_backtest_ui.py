@@ -14,6 +14,12 @@ import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+from momentum.rrg_backtest_positions import (  # noqa: E402
+    format_exit_date,
+    format_pl_pct,
+    format_price,
+    sort_position_rows,
+)
 from momentum.rrg_core import (
     RRG_MAX_TAIL,
     rrg_config_date_str,
@@ -54,6 +60,27 @@ def _backtest_profile(name: str) -> _BacktestUiProfile:
             load_status="Loading universe and Yahoo data (may take a few minutes)...",
             Config=UsRrgBacktestConfig,
             Engine=UsRrgBacktestEngine,
+            compute_metrics=compute_metrics,
+            format_vol_pct=format_vol_pct,
+            recommendation_row_bg=recommendation_row_bg,
+        )
+    if name == "stock":
+        from backtest.stock.backtest_rrg_stocks import (
+            StockRrgBacktestConfig,
+            StockRrgBacktestEngine,
+            compute_metrics,
+        )
+        from momentum.stock.stock_rrg_recommendations import (
+            format_vol_pct,
+            recommendation_row_bg,
+        )
+
+        return _BacktestUiProfile(
+            title="Stock RRG Backtest",
+            bench_chart="Benchmark",
+            load_status="Loading NSE stock data (may take a few minutes)...",
+            Config=StockRrgBacktestConfig,
+            Engine=StockRrgBacktestEngine,
             compute_metrics=compute_metrics,
             format_vol_pct=format_vol_pct,
             recommendation_row_bg=recommendation_row_bg,
@@ -139,6 +166,34 @@ def _week_detail_fields(record: dict, *, total_weeks: int) -> dict[str, str]:
     return fields
 
 
+def _fill_position_tree(
+    tree: ttk.Treeview,
+    rows: list[dict] | None,
+    *,
+    strategy_order: list[str] | None = None,
+) -> None:
+    for item in tree.get_children():
+        tree.delete(item)
+    if not rows:
+        tree.insert("", tk.END, values=("—", "—", "—", "—", "—", "—", "—"))
+        return
+    ordered = sort_position_rows(rows, strategy_order)
+    for row in ordered:
+        tree.insert(
+            "",
+            tk.END,
+            values=(
+                row.get("ticker") or "—",
+                row.get("status") or "—",
+                format_price(row.get("entry")),
+                format_price(row.get("exit")),
+                format_exit_date(row.get("exit_date")),
+                format_price(row.get("running")),
+                format_pl_pct(row.get("pl_pct")),
+            ),
+        )
+
+
 def _fill_kv_tree(tree: ttk.Treeview, rows: dict[str, str] | None, *, empty: str) -> None:
     for item in tree.get_children():
         tree.delete(item)
@@ -194,6 +249,10 @@ def open_rrg_backtest(
     prof = _backtest_profile(profile)
     bt_extra = dict(backtest_extra or {})
     bt_extra.setdefault("analysis_period", analysis_period)
+    if profile == "stock" and not bt_extra.get("universe_key"):
+        from momentum.stock.universes import DEFAULT_KEY
+
+        bt_extra.setdefault("universe_key", DEFAULT_KEY)
     if profile == "us" and not bt_extra.get("universe_row_ids"):
         from momentum.etf.us_liquid_rrg_config import (
             DEFAULT_MIN_ADV,
@@ -229,8 +288,9 @@ def open_rrg_backtest(
     start_entry.grid(row=0, column=1, padx=(4, 16))
 
     tk.Label(params, text="End date:").grid(row=0, column=2, sticky="w")
-    end_default = initial_end or rrg_format_date(today_ist())
-    end_var = tk.StringVar(value=rrg_format_date(end_default))
+    end_var = tk.StringVar(
+        value=rrg_format_date(initial_end) if initial_end else rrg_format_date(today_ist())
+    )
     end_entry = tk.Entry(params, textvariable=end_var, width=12)
     end_entry.grid(row=0, column=3, padx=(4, 16))
 
@@ -294,9 +354,11 @@ def open_rrg_backtest(
     max_rank_label: tk.Label | None = None
     max_rank_spin: ttk.Spinbox | None = None
 
-    if profile in ("india", "us"):
+    if profile in ("india", "us", "stock"):
         if profile == "us":
             from momentum.etf.us_rrg_pick_strategies import PICK_STRATEGIES
+        elif profile == "stock":
+            from momentum.stock.stock_rrg_pick_strategies import PICK_STRATEGIES
         else:
             from momentum.etf.india_rrg_pick_strategies import PICK_STRATEGIES
 
@@ -336,9 +398,36 @@ def open_rrg_backtest(
         hold_until_rank_exit_var.trace_add("write", _toggle_max_hold_rank)
         _toggle_max_hold_rank()
 
-    if pick_strategy is not None and profile in ("india", "us"):
+        from momentum.rrg_portfolio_fill import (
+            PORTFOLIO_FILL_MAINTAIN_TOP_N,
+            PORTFOLIO_FILL_MODES,
+        )
+
+        _portfolio_fill_label_to_key = {
+            label: key for key, label in PORTFOLIO_FILL_MODES.items()
+        }
+        portfolio_fill_var = tk.StringVar(
+            value=PORTFOLIO_FILL_MODES[PORTFOLIO_FILL_MAINTAIN_TOP_N]
+        )
+        fill_row = tk.Frame(params)
+        fill_row.grid(row=2, column=0, columnspan=12, sticky="w", pady=(4, 0))
+        tk.Label(fill_row, text="Portfolio fill:").pack(side=tk.LEFT)
+        ttk.Combobox(
+            fill_row,
+            textvariable=portfolio_fill_var,
+            values=list(PORTFOLIO_FILL_MODES.values()),
+            width=44,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=(4, 0))
+    else:
+        portfolio_fill_var = tk.StringVar(value="")
+        _portfolio_fill_label_to_key = {}
+
+    if pick_strategy is not None and profile in ("india", "us", "stock"):
         if profile == "us":
             from momentum.etf.us_rrg_pick_strategies import PICK_STRATEGIES as _PS
+        elif profile == "stock":
+            from momentum.stock.stock_rrg_pick_strategies import PICK_STRATEGIES as _PS
         else:
             from momentum.etf.india_rrg_pick_strategies import PICK_STRATEGIES as _PS
         ps_key = pick_strategy
@@ -355,17 +444,23 @@ def open_rrg_backtest(
         exit_below_9ema_var.set(bool(bt_extra["exit_below_9ema"]))
     elif exit_below_9ema is not None:
         exit_below_9ema_var.set(bool(exit_below_9ema))
+    if profile in ("india", "us", "stock") and bt_extra.get("portfolio_fill_mode"):
+        from momentum.rrg_portfolio_fill import PORTFOLIO_FILL_MODES as _PFM
+
+        pf_key = str(bt_extra["portfolio_fill_mode"]).strip().lower()
+        if pf_key in _PFM:
+            portfolio_fill_var.set(_PFM[pf_key])
 
     mode_var = tk.StringVar(value="all")
     mode_row = tk.Frame(params)
-    mode_row.grid(row=2, column=0, columnspan=12, sticky="w", pady=(8, 0))
+    mode_row.grid(row=3, column=0, columnspan=12, sticky="w", pady=(8, 0))
     ttk.Radiobutton(mode_row, text="Week-by-week", variable=mode_var, value="step").pack(
         side=tk.LEFT, padx=(0, 12)
     )
     ttk.Radiobutton(mode_row, text="Run all after load", variable=mode_var, value="all").pack(
         side=tk.LEFT, padx=(0, 12)
     )
-    show_equity_var = tk.BooleanVar(value=True)
+    show_equity_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(mode_row, text="Show equity curve", variable=show_equity_var).pack(
         side=tk.LEFT
     )
@@ -409,12 +504,38 @@ def open_rrg_backtest(
 
     detail_frame = tk.LabelFrame(bottom_pane, text="Selected week", padx=4, pady=4)
     bottom_pane.add(detail_frame, weight=1)
+    detail_pane = ttk.PanedWindow(detail_frame, orient=tk.VERTICAL)
+    detail_pane.pack(fill=tk.BOTH, expand=True)
+
+    summary_frame = tk.Frame(detail_pane)
+    detail_pane.add(summary_frame, weight=1)
     detail_tree = _make_kv_tree(
-        detail_frame,
-        height=10,
+        summary_frame,
+        height=6,
         col0_width=130,
         col1_width=280,
     )
+
+    pos_frame = tk.LabelFrame(detail_pane, text="ETF prices & P/L", padx=4, pady=4)
+    detail_pane.add(pos_frame, weight=2)
+    pos_cols = ("ETF", "Status", "Entry", "Exit", "Exit date", "Running", "P/L %")
+    pos_tree = ttk.Treeview(
+        pos_frame, columns=pos_cols, show="headings", height=8, selectmode="none"
+    )
+    for col in pos_cols:
+        pos_tree.heading(col, text=col)
+        w = (
+            120
+            if col == "Status"
+            else 84
+            if col in ("Entry", "Exit", "Running", "P/L %", "Exit date")
+            else 80
+        )
+        pos_tree.column(col, width=w, stretch=True)
+    pos_scroll = ttk.Scrollbar(pos_frame, orient=tk.VERTICAL, command=pos_tree.yview)
+    pos_tree.configure(yscrollcommand=pos_scroll.set)
+    pos_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    pos_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
     log_frame = tk.LabelFrame(bottom_pane, text="Rebalance log", padx=4, pady=4)
     bottom_pane.add(log_frame, weight=3)
@@ -488,13 +609,16 @@ def open_rrg_backtest(
                 engine.config, "universe_mode", "expanded"
             )
             df.attrs["universe_size"] = len(getattr(engine, "_row_ids", ()))
-        if profile in ("india", "us") and _pick_label_to_key:
+        if profile in ("india", "us", "stock") and _pick_label_to_key:
             df.attrs["pick_strategy"] = _pick_label_to_key.get(
                 pick_strategy_var.get(), "recommend"
             )
             df.attrs["hold_until_rank_exit"] = bool(hold_until_rank_exit_var.get())
             df.attrs["max_hold_rank"] = int(max_hold_rank_var.get())
             df.attrs["exit_below_9ema"] = bool(exit_below_9ema_var.get())
+            df.attrs["portfolio_fill_mode"] = _portfolio_fill_label_to_key.get(
+                portfolio_fill_var.get(), "maintain_top_n"
+            )
         cap = float(capital_var.get())
         if profile == "us" and hasattr(engine, "_benchmark"):
             m = prof.compute_metrics(df, cap, benchmark=engine._benchmark)
@@ -529,6 +653,7 @@ def open_rrg_backtest(
             _update_chart()
 
     show_equity_var.trace_add("write", _on_equity_toggle)
+    _set_equity_curve_visible(bool(show_equity_var.get()))
 
     def _update_chart() -> None:
         if not show_equity_var.get():
@@ -560,11 +685,17 @@ def open_rrg_backtest(
                 None,
                 empty="Load data, then Next Week or Run All.",
             )
+            _fill_position_tree(pos_tree, None)
             return
         _fill_kv_tree(
             detail_tree,
             _week_detail_fields(record, total_weeks=engine.total_weeks),
             empty="—",
+        )
+        _fill_position_tree(
+            pos_tree,
+            record.get("Position_Rows") or [],
+            strategy_order=list(record.get("Strategy_Tickers") or []),
         )
 
     def _refresh_log_table() -> None:
@@ -636,17 +767,20 @@ def open_rrg_backtest(
             rrg_window=int(window_combo.get()),
             initial_capital=float(capital_var.get()),
         )
-        if profile in ("india", "us") and _pick_label_to_key:
+        if profile in ("india", "us", "stock") and _pick_label_to_key:
             kw["pick_strategy"] = _pick_label_to_key.get(
                 pick_strategy_var.get(), "recommend"
             )
             kw["hold_until_rank_exit"] = bool(hold_until_rank_exit_var.get())
             kw["max_hold_rank"] = int(max_hold_rank_var.get())
             kw["exit_below_9ema"] = bool(exit_below_9ema_var.get())
-            if profile == "india":
+            kw["portfolio_fill_mode"] = _portfolio_fill_label_to_key.get(
+                portfolio_fill_var.get(), "maintain_top_n"
+            )
+            if profile in ("india", "stock", "us"):
                 kw["analysis_period"] = bt_extra.get("analysis_period", "3m")
-            elif profile == "us":
-                kw["analysis_period"] = bt_extra.get("analysis_period", "3m")
+        if profile == "stock":
+            kw["universe_key"] = bt_extra.get("universe_key", "quality")
         if profile == "us":
             row_ids = bt_extra.get("universe_row_ids")
             extra_us = {
@@ -675,8 +809,10 @@ def open_rrg_backtest(
             or stored.tail != ui.tail
             or stored.rrg_window != ui.rrg_window
         )
-        if profile in ("india", "us"):
+        if profile in ("india", "us", "stock"):
             base = base or stored.analysis_period != ui.analysis_period
+        if profile == "stock":
+            base = base or stored.universe_key != ui.universe_key
         if profile == "us":
             base = base or stored.universe_mode != ui.universe_mode
             base = base or (
@@ -894,6 +1030,24 @@ def open_rrg_backtest(
     return win
 
 
+def open_stock_rrg_backtest(
+    parent: tk.Misc,
+    *,
+    rrg_window: int = 10,
+    tail: int = 1,
+    top_n: int = 7,
+    universe_key: str = "quality",
+) -> tk.Toplevel:
+    return open_rrg_backtest(
+        parent,
+        profile="stock",
+        rrg_window=rrg_window,
+        tail=tail,
+        top_n=top_n,
+        backtest_extra={"universe_key": universe_key},
+    )
+
+
 def open_india_rrg_backtest(
     parent: tk.Misc,
     *,
@@ -960,6 +1114,14 @@ def launch_standalone_rrg_backtest(
             "screen_categories": ("all",),
             "analysis_period": "3m",
         }
+    stock_extra = None
+    if profile == "stock":
+        from momentum.stock.universes import DEFAULT_KEY
+
+        stock_extra = {
+            "universe_key": DEFAULT_KEY,
+            "analysis_period": "3m",
+        }
     win = open_rrg_backtest(
         root,
         profile=profile,
@@ -968,7 +1130,7 @@ def launch_standalone_rrg_backtest(
         top_n=top_n,
         initial_start=start,
         initial_end=end,
-        backtest_extra=backtest_extra or us_extra,
+        backtest_extra=backtest_extra or us_extra or stock_extra,
         shutdown_root=root,
     )
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -224,12 +224,42 @@ def rrg_period_label(period: str, unit: str = "week") -> str:
     return f"{rrg_period_display(period)} lookback ({bars} {bar_word} points)"
 
 
+def rrg_coerce_date(value) -> pd.Timestamp:
+    """Parse RRG date inputs: ``date``, Timestamp, YYYY-MM-DD, or DD-MM-YYYY."""
+    if value is None or value == "":
+        raise ValueError("Date is required.")
+    if isinstance(value, pd.Timestamp):
+        ts = value
+    elif isinstance(value, datetime):
+        ts = pd.Timestamp(value)
+    elif isinstance(value, date):
+        ts = pd.Timestamp(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            raise ValueError("Date is required.")
+        parts = raw.split("-")
+        if len(parts) == 3 and all(p.isdigit() for p in parts) and len(parts[2]) == 4:
+            if len(parts[0]) == 4:
+                ts = pd.Timestamp(datetime(int(parts[0]), int(parts[1]), int(parts[2])))
+            else:
+                ts = rrg_parse_user_date(raw)
+        else:
+            ts = pd.Timestamp(value)
+    else:
+        ts = pd.Timestamp(value)
+    if pd.isna(ts):
+        raise ValueError(f"Invalid date: {value!r}")
+    return ts
+
+
 def rrg_format_date(value) -> str:
     """Format a timestamp for RRG UI labels (DD-MM-YYYY)."""
     if value is None or value == "":
         return ""
-    ts = pd.Timestamp(value)
-    if pd.isna(ts):
+    try:
+        ts = rrg_coerce_date(value)
+    except ValueError:
         return ""
     return ts.strftime(RRG_DISPLAY_DATE_FMT)
 

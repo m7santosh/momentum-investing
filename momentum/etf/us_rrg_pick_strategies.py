@@ -17,6 +17,14 @@ from momentum.etf.us_rrg_recommendations import (
     recommend_us_etfs,
 )
 from momentum.rrg_core import get_status
+from momentum.rrg_portfolio_fill import (
+    PORTFOLIO_FILL_ACCUMULATE,
+    PORTFOLIO_FILL_MAINTAIN_TOP_N,
+    PORTFOLIO_FILL_REPLACE,
+    bare_symbol,
+    merge_accumulate,
+    merge_maintain_top_n,
+)
 
 __all__ = [
     "BASE_PICK_STRATEGIES",
@@ -50,6 +58,7 @@ class UsPickContext:
     prev_holdings: list[str]
     hold_until_rank_exit: bool = False
     max_hold_rank: int = 10
+    portfolio_fill_mode: str = PORTFOLIO_FILL_REPLACE
 
 
 def order_picks_by_table_rank(
@@ -205,6 +214,56 @@ def _pick_base(strategy: str, ctx: UsPickContext) -> list[UsEtfRecommendation]:
     )
 
 
+def _renumber_us_picks(
+    picks: list[UsEtfRecommendation],
+) -> list[UsEtfRecommendation]:
+    out: list[UsEtfRecommendation] = []
+    for i, p in enumerate(picks, start=1):
+        out.append(replace(p, pick_rank=i))
+    return out
+
+
+def _reconstruct_us_pick(ctx: UsPickContext, bare: str) -> UsEtfRecommendation | None:
+    ticker_to_j: dict[str, int] = {}
+    for j in range(len(ctx.indices)):
+        ticker = _ticker(ctx, j)
+        if ticker and ticker not in ticker_to_j:
+            ticker_to_j[ticker] = j
+    j = ticker_to_j.get(bare)
+    if j is None:
+        return None
+    rebuilt = _row_indices_to_picks(ctx, [j])
+    return rebuilt[0] if rebuilt else None
+
+
+def apply_portfolio_fill_mode(
+    ctx: UsPickContext,
+    base_picks: list[UsEtfRecommendation],
+) -> list[UsEtfRecommendation]:
+    mode = (ctx.portfolio_fill_mode or PORTFOLIO_FILL_REPLACE).strip().lower()
+    if mode == PORTFOLIO_FILL_REPLACE or not ctx.prev_holdings:
+        return base_picks
+    pick_by_ticker = {bare_symbol(p.ticker): p for p in base_picks}
+    if mode == PORTFOLIO_FILL_MAINTAIN_TOP_N:
+        return merge_maintain_top_n(
+            ctx.prev_holdings,
+            base_picks,
+            top_n=ctx.top_n,
+            pick_by_ticker=pick_by_ticker,
+            reconstruct=lambda bare: _reconstruct_us_pick(ctx, bare),
+            renumber=_renumber_us_picks,
+        )
+    if mode == PORTFOLIO_FILL_ACCUMULATE:
+        return merge_accumulate(
+            ctx.prev_holdings,
+            base_picks,
+            pick_by_ticker=pick_by_ticker,
+            reconstruct=lambda bare: _reconstruct_us_pick(ctx, bare),
+            renumber=_renumber_us_picks,
+        )
+    return base_picks
+
+
 def apply_rank_exit_overlay(
     ctx: UsPickContext,
     base_picks: list[UsEtfRecommendation],
@@ -326,6 +385,8 @@ def pick_us_portfolio(strategy: str, ctx: UsPickContext) -> list[UsEtfRecommenda
     hold = ctx.hold_until_rank_exit or key == "top_n_rank_exit"
     base_key = "top_n" if key == "top_n_rank_exit" else key
     base = _pick_base(base_key, ctx)
-    if not hold:
-        return base
-    return apply_rank_exit_overlay(ctx, base)
+    mode = (ctx.portfolio_fill_mode or PORTFOLIO_FILL_REPLACE).strip().lower()
+    picks = apply_portfolio_fill_mode(ctx, base)
+    if hold and mode == PORTFOLIO_FILL_REPLACE:
+        return apply_rank_exit_overlay(ctx, base)
+    return picks

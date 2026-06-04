@@ -137,6 +137,17 @@ def live_close_for_panel(
             for sym, q in quotes.items()
             if q.get("close")
         }
+    if profile == "stock":
+        from utils.nse_bhavcopy import fetch_nse_live_quotes
+
+        quotes = fetch_nse_live_quotes()
+        if not quotes:
+            return None
+        return {
+            sym: float(q["close"])
+            for sym, q in quotes.items()
+            if q.get("close")
+        }
     if profile == "us" and etf_daily_close:
         out: dict[str, float] = {}
         for sym, series in etf_daily_close.items():

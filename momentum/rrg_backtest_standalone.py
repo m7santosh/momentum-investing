@@ -38,9 +38,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--profile",
-        choices=("india", "us"),
+        choices=("india", "us", "stock"),
         default="india",
-        help="india = NSE ETFs vs Nifty 500; us = US ETFs vs S&P 500",
+        help="india = NSE ETFs vs Nifty 500; us = US ETFs vs S&P 500; stock = NSE stocks",
     )
     parser.add_argument(
         "--start",
@@ -77,14 +77,14 @@ def _run_gui_child(args: argparse.Namespace) -> None:
 
 
 def _run_console_bootstrap(args: argparse.Namespace) -> int:
-    label = "India" if args.profile == "india" else "US"
+    label = {"india": "India", "us": "US", "stock": "Stock"}.get(args.profile, args.profile)
     print(f"Starting {label} RRG backtest window...")
     ready_path = Path(tempfile.mktemp(suffix=".rrg_ready"))
     env = os.environ.copy()
     env[_READY_ENV] = str(ready_path)
 
     cmd = [str(Path(__file__).resolve()), _GUI_CHILD_FLAG]
-    if args.profile != "india":
+    if args.profile not in ("india",):
         cmd.extend(["--profile", args.profile])
     if args.start:
         cmd.extend(["--start", args.start])

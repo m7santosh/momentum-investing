@@ -104,7 +104,7 @@ class RrgAppConfig:
     side_cheat_sheet_title: str = "Swing trading cheat sheet"
     side_cheat_sheet: tuple[tuple[str, tuple[str, ...]], ...] | None = None
     etf_table_extras: bool = False
-    etf_recommend_profile: str = "us"  # "us" | "india"
+    etf_recommend_profile: str = "us"  # "us" | "india" | "stock"
     etf_recommend_count: int = 7
     etf_recommend_title: str = "Recommended Top 7 (weekly swing)"
     pick_strategy: str = "recommend"
@@ -112,7 +112,8 @@ class RrgAppConfig:
     max_hold_rank: int = 10
     exit_below_9ema: bool = True
     backtest_enabled: bool = False
-    backtest_profile: str = "india"  # "india" | "us"
+    backtest_profile: str = "india"  # "india" | "us" | "stock"
+    backtest_universe_key: str = "quality"
     backtest_universe_mode: str = "expanded"  # US: "core" | "expanded"
     backtest_min_adv: float = 10_000_000.0
     backtest_vol_percentile: float = 100.0
@@ -302,6 +303,17 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     etf_vol_by_row[j] = vol_by_ref.get(ref, 0.0)
             except Exception as exc:
                 print(f"Vol% load skipped: {exc}")
+        elif config.etf_recommend_profile == "stock":
+            print("Loading 63-day Vol% for stock table...")
+            try:
+                from momentum.stock.stock_rrg_recommendations import load_stock_vol_pct
+
+                vol_by_ref = load_stock_vol_pct(indices, vol_days=63, history_days=120)
+                for j in range(len(indices)):
+                    sym = indices[j].upper().replace(".NS", "")
+                    etf_vol_by_row[j] = vol_by_ref.get(sym, 0.0)
+            except Exception as exc:
+                print(f"Vol% load skipped: {exc}")
         else:
             print("Loading 63-day Vol% for US ETF table...")
             try:
@@ -356,6 +368,30 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 min_points=5,
                 quiet=True,
                 asset_label="ETF symbol",
+                freq="day",
+            )
+            for sym, series in batch.items():
+                if len(series):
+                    _etf_daily_close[sym] = series.sort_index()
+        elif config.etf_recommend_profile == "stock":
+            from utils.nse_bhavcopy import load_nse_cm_histories_range
+
+            syms = {
+                indices[j].strip().upper().replace(".NS", "")
+                for j in range(len(indices))
+            }
+            syms.discard("")
+            print(
+                f"Loading NSE stock daily CM (bhavcopy) for "
+                f"{len(syms)} symbol(s)..."
+            )
+            batch = load_nse_cm_histories_range(
+                sorted(syms),
+                start_d,
+                end_d,
+                min_points=5,
+                quiet=True,
+                asset_label="equity symbol",
                 freq="day",
             )
             for sym, series in batch.items():
@@ -822,6 +858,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 PICK_STRATEGIES,
                 pick_strategy_subtitle,
             )
+        elif config.etf_recommend_profile == "stock":
+            from momentum.stock.stock_rrg_pick_strategies import (
+                PICK_STRATEGIES,
+                pick_strategy_subtitle,
+            )
         else:
             from momentum.etf.india_rrg_pick_strategies import (
                 PICK_STRATEGIES,
@@ -932,6 +973,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                             "screen_categories": config.backtest_categories,
                         }
                         if config.backtest_profile == "us"
+                        else {}
+                    ),
+                    **(
+                        {"universe_key": config.backtest_universe_key}
+                        if config.backtest_profile == "stock"
                         else {}
                     ),
                     "pick_strategy": _pick_strategy_key(),
@@ -2063,6 +2109,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
         if config.etf_recommend_profile == "us":
             from momentum.etf.us_rrg_pick_strategies import pick_strategy_label
+        elif config.etf_recommend_profile == "stock":
+            from momentum.stock.stock_rrg_pick_strategies import pick_strategy_label
         else:
             from momentum.etf.india_rrg_pick_strategies import pick_strategy_label
 
@@ -2180,6 +2228,42 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                         prev_holdings=prev_portfolio,
                         hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
                         max_hold_rank=int(max_hold_rank_var.get()),
+                    ),
+                    rebal_n,
+                )
+            elif config.etf_recommend_profile == "stock":
+                from momentum.stock.stock_rrg_pick_strategies import (
+                    StockPickContext,
+                    pick_shortfall_hint,
+                )
+
+                vol_by_ref = {
+                    indices[j].upper().replace(".NS", ""): etf_vol_by_row.get(j, 0.0)
+                    for j in range(len(indices))
+                }
+                pick_shortfall = pick_shortfall_hint(
+                    _pick_strategy_key(),
+                    StockPickContext(
+                        ranked_row_indices=panel_ranked,
+                        indices=indices,
+                        ref_labels=index_metadata["ref_label"],
+                        display_labels=index_metadata["display"],
+                        vol_by_ref=vol_by_ref,
+                        end_ts=panel_rebal_ts,
+                        rsr_series_by_row=rsr_tickers,
+                        rsm_series_by_row=rsm_tickers,
+                        rank_delta_by_row=panel_rank_delta,
+                        change_pct_fn=lambda j: _tail_change_pct(
+                            j, panel_start_ts, panel_rebal_ts
+                        ),
+                        series_at_fn=series_at,
+                        curr_ranks=panel_curr_ranks,
+                        prev_ranks=panel_prev_ranks,
+                        top_n=n_port,
+                        prev_holdings=prev_portfolio,
+                        hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                        max_hold_rank=int(max_hold_rank_var.get()),
+                        benchmark=config.benchmark_nse,
                     ),
                     rebal_n,
                 )
@@ -2410,6 +2494,38 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             )
             return pick_india_portfolio(strategy, ctx)
 
+        if config.etf_recommend_profile == "stock":
+            from momentum.stock.stock_rrg_pick_strategies import (
+                StockPickContext,
+                pick_stock_portfolio,
+            )
+
+            vol_by_ref = {
+                indices[j].upper().replace(".NS", ""): etf_vol_by_row.get(j, 0.0)
+                for j in range(len(indices))
+            }
+            ctx = StockPickContext(
+                ranked_row_indices=ranked,
+                indices=indices,
+                ref_labels=index_metadata["ref_label"],
+                display_labels=index_metadata["display"],
+                vol_by_ref=vol_by_ref,
+                end_ts=end_ts,
+                rsr_series_by_row=rsr_tickers,
+                rsm_series_by_row=rsm_tickers,
+                rank_delta_by_row=rank_delta_by_row,
+                change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
+                series_at_fn=series_at,
+                curr_ranks=curr_ranks,
+                prev_ranks=prev_ranks,
+                top_n=top_n,
+                prev_holdings=holdings,
+                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                max_hold_rank=max_rank,
+                benchmark=config.benchmark_nse,
+            )
+            return pick_stock_portfolio(strategy, ctx)
+
         from momentum.etf.us_rrg_pick_strategies import UsPickContext, pick_us_portfolio
 
         vol_by_ticker = {
@@ -2534,10 +2650,14 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         return holdings, dropped, mid_week
 
     def _ref_to_row_for_exits() -> dict[str, int]:
-        from momentum.etf.india_rrg_pick_strategies import ref_to_row_index
-
         if config.etf_recommend_profile == "india":
+            from momentum.etf.india_rrg_pick_strategies import ref_to_row_index
+
             return ref_to_row_index(indices, index_metadata["ref_label"])
+        if config.etf_recommend_profile == "stock":
+            from momentum.stock.stock_rrg_pick_strategies import ref_to_row_index
+
+            return ref_to_row_index(indices)
         return {indices[j].strip().upper(): j for j in range(len(indices))}
 
     def _build_live_week_exits(
@@ -2746,13 +2866,23 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 format_vol_pct,
                 recommendation_row_bg,
             )
+        elif config.etf_recommend_profile == "stock":
+            from momentum.stock.stock_rrg_recommendations import (
+                format_vol_pct,
+                recommendation_row_bg,
+            )
         else:
             from momentum.etf.us_rrg_recommendations import (
                 format_vol_pct,
                 recommendation_row_bg,
             )
         if recommend_dates_label is not None:
-            from momentum.etf.india_rrg_pick_strategies import pick_strategy_subtitle
+            if config.etf_recommend_profile == "us":
+                from momentum.etf.us_rrg_pick_strategies import pick_strategy_subtitle
+            elif config.etf_recommend_profile == "stock":
+                from momentum.stock.stock_rrg_pick_strategies import pick_strategy_subtitle
+            else:
+                from momentum.etf.india_rrg_pick_strategies import pick_strategy_subtitle
 
             end_l = format_date_label(int(date_scale.get()))
             subtitle = pick_strategy_subtitle(

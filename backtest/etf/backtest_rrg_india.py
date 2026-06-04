@@ -49,8 +49,14 @@ from momentum.etf.RRGIndicatorEtfs import _load_all_histories_range  # noqa: E40
 from momentum.rrg_core import (  # noqa: E402
     compute_rrg_indicators,
     rrg_effective_window,
+    rrg_format_date,
     rrg_min_history_bars,
     rrg_warmup_weeks,
+)
+from momentum.rrg_backtest_positions import (  # noqa: E402
+    build_week_position_rows,
+    register_new_week_entries,
+    update_entry_prices_after_week,
 )
 from momentum.rrg_ema_exit import (  # noqa: E402
     midweek_9ema_exit_count,
@@ -61,6 +67,13 @@ from momentum.rrg_portfolio_exits import (  # noqa: E402
     format_exit_summary,
     mid_week_9ema_label,
     rebal_9ema_label,
+)
+from momentum.rrg_portfolio_fill import (  # noqa: E402
+    PORTFOLIO_FILL_MAINTAIN_TOP_N,
+    PORTFOLIO_FILL_MODES,
+    PORTFOLIO_FILL_REPLACE,
+    equal_weight_port_return,
+    uses_prior_holdings,
 )
 from momentum.rrg_ranking import (  # noqa: E402
     build_rank_delta_by_row,
@@ -90,6 +103,7 @@ class IndiaRrgBacktestConfig:
     max_hold_rank: int = 10
     exit_below_9ema: bool = True
     analysis_period: str = "3m"
+    portfolio_fill_mode: str = PORTFOLIO_FILL_MAINTAIN_TOP_N
 
 
 @dataclass
@@ -118,6 +132,7 @@ class IndiaRrgBacktestEngine:
     _prev_rebalance_tickers: list[str] = field(default_factory=list)
     _prev_rank_at_rebal: dict[str, int] = field(default_factory=dict)
     _last_pick_ctx: IndiaPickContext | None = None
+    _entry_prices: dict[str, float] = field(default_factory=dict)
     _loaded: bool = False
 
     def __post_init__(self) -> None:
@@ -170,6 +185,7 @@ class IndiaRrgBacktestEngine:
         self._prev_holdings = []
         self._prev_rebalance_tickers = []
         self._prev_rank_at_rebal = {}
+        self._entry_prices = {}
 
     @staticmethod
     def _collapse_tail_window_dates(
@@ -202,8 +218,8 @@ class IndiaRrgBacktestEngine:
         min_weekly_points = rrg_min_history_bars(cfg.rrg_window, "week")
 
         self._log(
-            f"Loading RRG weekly histories {dl_start:%Y-%m-%d} .. {dl_end:%Y-%m-%d} "
-            f"(warmup + backtest range)..."
+            f"Loading RRG weekly histories {rrg_format_date(dl_start)} .. "
+            f"{rrg_format_date(dl_end)} (warmup + backtest range)..."
         )
         histories = _load_all_histories_range(
             dl_start,
@@ -236,7 +252,8 @@ class IndiaRrgBacktestEngine:
 
         vol_start = dl_start - timedelta(days=cfg.vol_days + 30)
         self._log(
-            f"Loading NSE ETF bhavcopy {vol_start} .. {dl_end} "
+            f"Loading NSE ETF bhavcopy {rrg_format_date(vol_start)} .. "
+            f"{rrg_format_date(dl_end)} "
             f"({len(etf_bhavcopy_syms)} symbols, same source as live RRG)..."
         )
         etf_daily_batch = load_nse_cm_histories_range(
@@ -333,7 +350,6 @@ class IndiaRrgBacktestEngine:
             )
         self.reset_run()
         self._loaded = True
-        from momentum.rrg_core import rrg_format_date
 
         first = rrg_format_date(self._rebal_dates[0])
         last = rrg_format_date(self._rebal_dates[-1])
@@ -375,10 +391,12 @@ class IndiaRrgBacktestEngine:
                     ]
             self._prev_rebalance_tickers = list(last.get("Rebalance_Tickers") or [])
             self._prev_rank_at_rebal = dict(last.get("Rank_At_Rebal") or {})
+            self._entry_prices = dict(last.get("Entry_Prices") or {})
         else:
             self._prev_holdings = []
             self._prev_rebalance_tickers = []
             self._prev_rank_at_rebal = {}
+            self._entry_prices = {}
         return self._records[-1] if self._records else None
 
     def run_all(self) -> pd.DataFrame:
@@ -455,6 +473,14 @@ class IndiaRrgBacktestEngine:
 
         held_at_rebal = list(holdings)
 
+        register_new_week_entries(
+            self._entry_prices,
+            held_at_rebal=held_at_rebal,
+            prev_holdings=self._prev_holdings,
+            decision_date=decision_date,
+            price_weekly=self._ref_etf_weekly,
+        )
+
         turnover = 0.0
         new_entries = 0
         if self._prev_holdings:
@@ -475,9 +501,9 @@ class IndiaRrgBacktestEngine:
                     next_date,
                     self._ref_etf_daily,
                     self._ref_etf_weekly,
-                    cfg.top_n,
+                    max(cfg.top_n, len(holdings)),
                 )
-                port_ret = float(np.mean(week_rets))
+                port_ret = equal_weight_port_return(week_rets, len(held_at_rebal))
                 holdings = end_holdings
             else:
                 week_rets = []
@@ -552,6 +578,25 @@ class IndiaRrgBacktestEngine:
                 cfg.pick_strategy, pick_ctx, rebal_n_count
             )
 
+        position_rows = build_week_position_rows(
+            held_at_rebal=held_at_rebal,
+            end_holdings=holdings,
+            mid_week_9ema=mid_week_9ema,
+            week_exits=week_exits,
+            entry_prices=self._entry_prices,
+            decision_date=decision_date,
+            end_date=next_date,
+            price_weekly=self._ref_etf_weekly,
+            daily_close=self._ref_etf_daily,
+            strategy_order=rebalance_holdings,
+        )
+        update_entry_prices_after_week(
+            self._entry_prices,
+            end_holdings=holdings,
+            mid_week_9ema=mid_week_9ema,
+            week_exits=week_exits,
+        )
+
         record = {
             "Week": idx + 1,
             "Rebal_Date": decision_date,
@@ -591,6 +636,8 @@ class IndiaRrgBacktestEngine:
             "Portfolio_Value": self._portfolio_value,
             "Picks": picks,
             "Pick_Prices": pick_prices,
+            "Position_Rows": position_rows,
+            "Entry_Prices": dict(self._entry_prices),
         }
         self._records.append(record)
         self._prev_holdings = holdings
@@ -662,10 +709,13 @@ class IndiaRrgBacktestEngine:
             prev_ranks=prev_ranks,
             top_n=cfg.top_n,
             prev_holdings=(
-                list(self._prev_holdings) if cfg.hold_until_rank_exit else []
+                list(self._prev_holdings)
+                if cfg.hold_until_rank_exit or uses_prior_holdings(cfg.portfolio_fill_mode)
+                else []
             ),
             hold_until_rank_exit=cfg.hold_until_rank_exit,
             max_hold_rank=cfg.max_hold_rank,
+            portfolio_fill_mode=cfg.portfolio_fill_mode,
         )
         self._last_pick_ctx = ctx
         return pick_india_portfolio(cfg.pick_strategy, ctx)
@@ -1029,7 +1079,9 @@ class IndiaRrgBacktestEngine:
         if prev_rebal_ts is not None:
             prev_rec = self._record_by_rebal(prev_rebal_ts)
             if prev_rec is not None and (
-                cfg.hold_until_rank_exit or cfg.exit_below_9ema
+                cfg.hold_until_rank_exit
+                or cfg.exit_below_9ema
+                or uses_prior_holdings(cfg.portfolio_fill_mode)
             ):
                 prev_holdings_for_picks = list(
                     prev_rec.get("Held_Tickers") or []
@@ -1197,27 +1249,21 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
     calmar = cagr / abs(max_dd) if max_dd != 0 else 0.0
 
     alpha = cagr - bench_cagr
-    excess = pd.Series(port_rets) - pd.Series(bench_rets)
-    te = float(excess.std(ddof=1)) * np.sqrt(weeks_per_year)
-    info_ratio = alpha / te if te > 0 else 0.0
 
     total_trades = int(df["New_Entries"].sum()) if "New_Entries" in df.columns else 0
 
     return {
-        "Strategy": STRATEGY_TAG,
         "Pick_Strategy": pick_strategy_label(
             str(df.attrs.get("pick_strategy", "recommend")),
             hold_until_rank_exit=bool(df.attrs.get("hold_until_rank_exit", False)),
             exit_below_9ema=bool(df.attrs.get("exit_below_9ema", True)),
         ),
         "Max_Hold_Rank": df.attrs.get("max_hold_rank"),
-        "Benchmark": RRG_BENCHMARK_NSE,
         "Period": (
             f"{rrg_format_date(df['Rebal_Date'].iloc[0])} to "
             f"{rrg_format_date(df['End_Date'].iloc[-1])}"
         ),
         "Weeks": n_weeks,
-        "Top_N": int(df.attrs.get("top_n", 7)),
         "Total_Return_%": round(total_ret * 100, 2),
         "CAGR_%": round(cagr * 100, 2),
         "Max_Drawdown_%": round(max_dd * 100, 2),
@@ -1235,7 +1281,6 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
         "Ann_Volatility_%": round(ann_vol * 100, 2),
         "Avg_Turnover_%": round(float(df["Turnover"].mean() * 100), 1),
         "Alpha_%": round(alpha * 100, 2),
-        "Information_Ratio": round(info_ratio, 2),
     }
 
 
@@ -1252,6 +1297,7 @@ def run_backtest(
     max_hold_rank: int = 10,
     exit_below_9ema: bool = True,
     analysis_period: str = "3m",
+    portfolio_fill_mode: str = PORTFOLIO_FILL_MAINTAIN_TOP_N,
     progress_cb: Callable[[str], None] | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     cfg = IndiaRrgBacktestConfig(
@@ -1266,6 +1312,7 @@ def run_backtest(
         max_hold_rank=max_hold_rank,
         exit_below_9ema=exit_below_9ema,
         analysis_period=analysis_period,
+        portfolio_fill_mode=portfolio_fill_mode,
     )
     engine = IndiaRrgBacktestEngine(config=cfg, progress_cb=progress_cb)
     engine.load_data()
@@ -1276,6 +1323,7 @@ def run_backtest(
         df.attrs["hold_until_rank_exit"] = hold_until_rank_exit
         df.attrs["max_hold_rank"] = max_hold_rank
         df.attrs["exit_below_9ema"] = exit_below_9ema
+        df.attrs["portfolio_fill_mode"] = portfolio_fill_mode
     metrics = compute_metrics(df, initial_capital)
     return df, metrics
 
@@ -1312,6 +1360,13 @@ def _parse_args() -> argparse.Namespace:
         default=True,
         help="Exit when close < 9 EMA (mid-week); default on",
     )
+    parser.add_argument(
+        "--portfolio-fill",
+        choices=tuple(PORTFOLIO_FILL_MODES),
+        default=PORTFOLIO_FILL_MAINTAIN_TOP_N,
+        metavar="MODE",
+        help="How rebalance picks combine with prior holdings (default: maintain_top_n)",
+    )
     return parser.parse_args()
 
 
@@ -1334,6 +1389,7 @@ def main() -> None:
         hold_until_rank_exit=args.hold_until_rank_exit,
         max_hold_rank=args.max_hold_rank,
         exit_below_9ema=args.exit_below_9ema,
+        portfolio_fill_mode=args.portfolio_fill,
         progress_cb=print,
     )
     if metrics:
