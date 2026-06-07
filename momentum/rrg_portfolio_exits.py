@@ -11,6 +11,7 @@ from momentum.rrg_core import rrg_format_date, rrg_parse_user_date
 
 RULE_RANK = "Rank"
 RULE_9EMA = "9 EMA"
+RULE_STOP_LOSS = "Stop loss"
 RULE_STRATEGY = "Strategy"
 
 TIMING_REBALANCE = "Rebalance"
@@ -98,6 +99,25 @@ def exits_9ema_midweek(
     return out
 
 
+def exits_stop_loss_midweek(
+    exited: list[tuple[str, pd.Timestamp]],
+    *,
+    stop_loss_pct: float,
+) -> list[PortfolioExit]:
+    out: list[PortfolioExit] = []
+    pct = float(stop_loss_pct)
+    for ticker, day in exited:
+        out.append(
+            PortfolioExit(
+                ticker=ticker,
+                rule=RULE_STOP_LOSS,
+                timing=TIMING_MIDWEEK,
+                detail=f"hit {pct:g}% stop loss on {rrg_format_date(day)}",
+            )
+        )
+    return out
+
+
 def strategy_rebalance_exits(
     prev_holdings: list[str],
     rebalance_holdings: list[str],
@@ -135,6 +155,9 @@ def build_week_exits(
     mid_week_9ema: list[tuple[str, pd.Timestamp]],
     decision_date: pd.Timestamp,
     include_strategy_exits: bool = True,
+    exit_stop_loss: bool = False,
+    mid_week_stop_loss: list[tuple[str, pd.Timestamp]] | None = None,
+    stop_loss_pct: float = 5.0,
 ) -> list[PortfolioExit]:
     rank_ex = rank_overlay_exits(
         prev_holdings,
@@ -149,13 +172,21 @@ def build_week_exits(
         else []
     )
     ema_mid = exits_9ema_midweek(mid_week_9ema) if exit_below_9ema else []
-    already = {ex.ticker for ex in rank_ex + ema_rebal + ema_mid}
+    sl_mid = (
+        exits_stop_loss_midweek(
+            mid_week_stop_loss or [],
+            stop_loss_pct=stop_loss_pct,
+        )
+        if exit_stop_loss
+        else []
+    )
+    already = {ex.ticker for ex in rank_ex + ema_rebal + ema_mid + sl_mid}
     strat: list[PortfolioExit] = []
     if include_strategy_exits:
         strat = strategy_rebalance_exits(
             prev_holdings, rebalance_holdings, already_exited=already
         )
-    return merge_week_exits(rank_ex, ema_rebal, ema_mid, strat)
+    return merge_week_exits(rank_ex, ema_rebal, ema_mid, sl_mid, strat)
 
 
 def merge_week_exits(*groups: list[PortfolioExit]) -> list[PortfolioExit]:
@@ -242,6 +273,24 @@ def mid_week_9ema_label(
     rebalance_tickers: list[str] | None = None,
 ) -> str:
     """Mid-week 9 EMA exits for this week's Top N picks only (not prior Was holdings)."""
+    if not mid_week_exits:
+        return ""
+    pick_set = _top_n_pick_set(rebalance_tickers)
+    parts: list[str] = []
+    for ticker, day in mid_week_exits:
+        bare = ticker.strip().upper().replace(".NS", "")
+        if not bare or (pick_set is not None and bare not in pick_set):
+            continue
+        parts.append(f"{bare}@{rrg_format_date(day)}")
+    return ", ".join(parts)
+
+
+def mid_week_stop_loss_label(
+    mid_week_exits: list[tuple[str, pd.Timestamp]],
+    *,
+    rebalance_tickers: list[str] | None = None,
+) -> str:
+    """Mid-week stop-loss exits for this week's Top N picks only."""
     if not mid_week_exits:
         return ""
     pick_set = _top_n_pick_set(rebalance_tickers)

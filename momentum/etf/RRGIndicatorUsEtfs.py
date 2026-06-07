@@ -172,41 +172,9 @@ def _count_summary(kind_list: list[str]) -> str:
 
 
 def _build_config(analysis_period: str, rrg_window: int) -> RrgAppConfig:
-    return RrgAppConfig(
-        window_title=f"RRG — US ETFs vs S&P 500 ({analysis_period} Yahoo)",
-        benchmark_nse=RRG_BENCHMARK_YAHOO,
-        rows=RRG_ROWS,
-        row_by_id=RRG_ROW_BY_ID,
-        default_visible_ids=RRG_DEFAULT_VISIBLE_IDS,
-        ref_column_header="Ticker",
-        name_column_header="Name",
-        defaults_checkbox_text="Default ETFs",
-        hover_ref_prefix="ticker",
-        universe_summary=(
-            f"RRG universe: {len(RRG_ETF_ROW_IDS)} US ETFs "
-            f"(benchmark {RRG_BENCHMARK_YAHOO}; edit momentum/etf/universes/us.py)"
-        ),
-        row_ref_label=row_ref_label,
-        row_display_label=row_display_label,
-        row_kind=row_kind,
-        resolve_row_id=_resolve_row_id,
-        load_all_histories=_load_all_histories,
-        load_row_history=_load_row_history,
-        count_summary=_count_summary,
-        analysis_period=analysis_period,
-        rrg_window=rrg_window,
-        default_tail=1,
-        top_movers_panel=True,
-        top_movers_count=10,
-        top_movers_title="Top 10 — Was vs Now",
-        side_cheat_sheet=ETF_SWING_CHEAT_SHEET,
-        etf_table_extras=True,
-        etf_recommend_profile="us",
-        etf_recommend_count=7,
-        backtest_enabled=True,
-        backtest_profile="us",
-        backtest_universe_mode="core",
-    )
+    from momentum.etf.us_rrg_universe_modes import build_us_core_rrg_config
+
+    return build_us_core_rrg_config(analysis_period, rrg_window)
 
 
 def main() -> None:

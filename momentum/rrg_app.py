@@ -118,6 +118,7 @@ class RrgAppConfig:
     backtest_min_adv: float = 10_000_000.0
     backtest_vol_percentile: float = 100.0
     backtest_categories: tuple[str, ...] = ("all",)
+    us_universe_switchable: bool = False
 
 
 _PORTFOLIO_N_MAX = 25
@@ -334,10 +335,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     _etf_daily_close: dict[str, pd.Series] = {}
 
-    def _load_etf_daily_close_data() -> None:
+    def _load_etf_daily_close_data(*, force: bool = False) -> None:
         """CM/Yahoo daily closes for ETF rows (9 EMA, exit P&L, portfolio panel)."""
-        if _etf_daily_close:
+        if _etf_daily_close and not force:
             return
+        if force:
+            _etf_daily_close.clear()
         from datetime import timedelta
 
         from utils.nse_bhavcopy import today_ist
@@ -852,6 +855,48 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 pass
         return config.etf_recommend_count
 
+    _us_universe_label_to_key: dict[str, str] = {}
+    us_universe_var = tk.StringVar()
+
+    if config.us_universe_switchable:
+        from momentum.etf.us_rrg_universe_modes import (
+            US_UNIVERSE_DROPDOWN_VALUES,
+            US_UNIVERSE_LABELS,
+        )
+
+        _us_universe_label_to_key = {
+            label: key for key, label in US_UNIVERSE_LABELS.items()
+        }
+        us_universe_var.set(
+            US_UNIVERSE_LABELS.get(
+                config.backtest_universe_mode, US_UNIVERSE_DROPDOWN_VALUES[0]
+            )
+        )
+
+    def _us_universe_mode_key() -> str:
+        if not config.us_universe_switchable:
+            return config.backtest_universe_mode
+        return _us_universe_label_to_key.get(
+            us_universe_var.get(), config.backtest_universe_mode
+        )
+
+    if config.us_universe_switchable:
+        universe_row = tk.Frame(controls_frame)
+        universe_row.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        tk.Label(universe_row, text="ETF universe", width=12, anchor="w").pack(
+            side=tk.LEFT
+        )
+        us_universe_combo = ttk.Combobox(
+            universe_row,
+            textvariable=us_universe_var,
+            values=list(US_UNIVERSE_DROPDOWN_VALUES),
+            width=42,
+            state="readonly",
+        )
+        us_universe_combo.pack(side=tk.LEFT, padx=(0, 12))
+    else:
+        us_universe_combo = None
+
     if config.etf_table_extras:
         if config.etf_recommend_profile == "us":
             from momentum.etf.us_rrg_pick_strategies import (
@@ -966,8 +1011,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 backtest_extra={
                     **(
                         {
-                            "universe_mode": config.backtest_universe_mode,
-                            "universe_row_ids": tuple(indices),
+                            "universe_mode": _us_universe_mode_key(),
                             "min_adv_usd": config.backtest_min_adv,
                             "vol_percentile": config.backtest_vol_percentile,
                             "screen_categories": config.backtest_categories,
@@ -2492,7 +2536,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
                 max_hold_rank=max_rank,
             )
-            return pick_india_portfolio(strategy, ctx)
+            return _filter_picks_by_tradable_ref(
+                pick_india_portfolio(strategy, ctx), end_ts
+            )
 
         if config.etf_recommend_profile == "stock":
             from momentum.stock.stock_rrg_pick_strategies import (
@@ -2549,7 +2595,32 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
             max_hold_rank=max_rank,
         )
-        return pick_us_portfolio(strategy, ctx)
+        return _filter_picks_by_tradable_ref(
+            pick_us_portfolio(strategy, ctx), end_ts
+        )
+
+    def _ref_price_weekly_for_picks() -> dict[str, pd.Series]:
+        """Weekly ref/ticker closes used to validate picks (bhavcopy or Yahoo)."""
+        from momentum.rrg_ref_price import weekly_map_from_daily
+
+        if config.etf_recommend_profile == "india":
+            _ensure_etf_daily_close()
+            return weekly_map_from_daily(_etf_daily_close)
+        if config.etf_recommend_profile == "us":
+            return {
+                indices[j]: indices_data[indices[j]]
+                for j in range(len(indices))
+                if len(indices_data.get(indices[j], pd.Series(dtype=float)))
+            }
+        return {}
+
+    def _filter_picks_by_tradable_ref(picks, end_ts):
+        from momentum.rrg_ref_price import filter_picks_with_ref_price
+
+        weekly = _ref_price_weekly_for_picks()
+        if not weekly:
+            return picks
+        return filter_picks_with_ref_price(picks, weekly, end_ts)
 
     def _portfolio_cache_enabled() -> bool:
         """Walk-forward portfolio state for Was/Now panel (all pick strategies)."""
@@ -3121,123 +3192,143 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     if _etf_extras:
         _main_copy_cols.append('vol_label')
 
-    for i in range(len(indices)):
-        row_id = indices[i]
-        display_label = index_metadata['display'][i]
-        ref_label = index_metadata['ref_label'][i]
-        price = round(float(indices_data[row_id].loc[end_date]), 2)
-        chg = (
-            float(indices_data[row_id].loc[end_date])
-            - float(indices_data[row_id].loc[start_date])
-        ) / float(indices_data[row_id].loc[start_date]) * 100
-        bg_color = get_color(rsr_tickers[i].iloc[-1], rsm_tickers[i].iloc[-1])
-        fg_color = rrg_row_fg_color(bg_color)
-        index_var = tk.StringVar(value=display_label)
-        rank_label = tk.Label(
-            table_body,
-            text=i + 1,
-            relief=tk.RIDGE,
-            anchor='e',
-            bg=bg_color,
-            fg=fg_color,
-            font=_TABLE_FONT,
-        )
-        rank_delta_label = tk.Label(
-            table_body,
-            text='—',
-            relief=tk.RIDGE,
-            anchor='e',
-            bg=bg_color,
-            fg=fg_color,
-            font=_TABLE_FONT,
-        )
-        ref_label_widget = tk.Label(
-            table_body,
-            text=ref_label,
-            relief=tk.RIDGE,
-            anchor='w',
-            bg=bg_color,
-            fg=fg_color,
-            font=_TABLE_FONT,
-        )
-        index_entry = tk.Entry(
-            table_body,
-            textvariable=index_var,
-            relief=tk.RIDGE,
-            bg=bg_color,
-            fg=fg_color,
-            font=_TABLE_FONT,
-        )
-        index_entry._row_idx = i
-        index_entry.bind('<Return>', update_entry)
-        price_label = tk.Label(
-            table_body,
-            text=price,
-            relief=tk.RIDGE,
-            anchor='e',
-            bg=bg_color,
-            fg=fg_color,
-            font=_TABLE_FONT,
-        )
-        chg_label = tk.Label(
-            table_body,
-            text=format_change_pct(chg),
-            relief=tk.RIDGE,
-            anchor='e',
-            bg=bg_color,
-            fg=fg_color,
-            font=_TABLE_FONT,
-        )
-        vol_label = None
-        if _etf_extras:
-            vol_label = tk.Label(
+    main_table_copy_grid = None
+
+    def _build_table_rows() -> None:
+        nonlocal main_table_copy_grid, end_date, start_date
+        for w in table_widgets:
+            for widget in w.values():
+                try:
+                    widget.destroy()
+                except tk.TclError:
+                    pass
+        for child in table_body.winfo_children():
+            child.destroy()
+        checkbox_vars.clear()
+        table_widgets.clear()
+
+        end_date = _rrg_index[end_date_idx]
+        start_date = _rrg_index[end_date_idx - tail]
+
+        for i in range(len(indices)):
+            row_id = indices[i]
+            display_label = index_metadata['display'][i]
+            ref_label = index_metadata['ref_label'][i]
+            price = round(float(indices_data[row_id].loc[end_date]), 2)
+            chg = (
+                float(indices_data[row_id].loc[end_date])
+                - float(indices_data[row_id].loc[start_date])
+            ) / float(indices_data[row_id].loc[start_date]) * 100
+            bg_color = get_color(rsr_tickers[i].iloc[-1], rsm_tickers[i].iloc[-1])
+            fg_color = rrg_row_fg_color(bg_color)
+            index_var = tk.StringVar(value=display_label)
+            rank_label = tk.Label(
                 table_body,
-                text='',
+                text=i + 1,
                 relief=tk.RIDGE,
                 anchor='e',
                 bg=bg_color,
                 fg=fg_color,
                 font=_TABLE_FONT,
             )
-        visible_cell = tk.Frame(
-            table_body,
-            relief=tk.RIDGE,
-            bg=_TABLE_NEUTRAL_BG,
-            highlightthickness=0,
-        )
-        checkbox_var = tk.BooleanVar(value=indices[i] in indices_to_show)
-        checkbox_vars.append(checkbox_var)
-        checkbox = ttk.Checkbutton(
-            visible_cell,
-            variable=checkbox_var,
-            command=lambda idx=i: on_visibility_toggle(idx),
-        )
-        checkbox.pack(anchor='center', expand=True)
-        row_widgets = {
-            'rank_label': rank_label,
-            'rank_delta_label': rank_delta_label,
-            'ref_label': ref_label_widget,
-            'index_entry': index_entry,
-            'price_label': price_label,
-            'chg_label': chg_label,
-            'visible_cell': visible_cell,
-        }
-        if vol_label is not None:
-            row_widgets['vol_label'] = vol_label
-        table_widgets.append(row_widgets)
+            rank_delta_label = tk.Label(
+                table_body,
+                text='—',
+                relief=tk.RIDGE,
+                anchor='e',
+                bg=bg_color,
+                fg=fg_color,
+                font=_TABLE_FONT,
+            )
+            ref_label_widget = tk.Label(
+                table_body,
+                text=ref_label,
+                relief=tk.RIDGE,
+                anchor='w',
+                bg=bg_color,
+                fg=fg_color,
+                font=_TABLE_FONT,
+            )
+            index_entry = tk.Entry(
+                table_body,
+                textvariable=index_var,
+                relief=tk.RIDGE,
+                bg=bg_color,
+                fg=fg_color,
+                font=_TABLE_FONT,
+            )
+            index_entry._row_idx = i
+            index_entry.bind('<Return>', update_entry)
+            price_label = tk.Label(
+                table_body,
+                text=price,
+                relief=tk.RIDGE,
+                anchor='e',
+                bg=bg_color,
+                fg=fg_color,
+                font=_TABLE_FONT,
+            )
+            chg_label = tk.Label(
+                table_body,
+                text=format_change_pct(chg),
+                relief=tk.RIDGE,
+                anchor='e',
+                bg=bg_color,
+                fg=fg_color,
+                font=_TABLE_FONT,
+            )
+            vol_label = None
+            if _etf_extras:
+                vol_label = tk.Label(
+                    table_body,
+                    text='',
+                    relief=tk.RIDGE,
+                    anchor='e',
+                    bg=bg_color,
+                    fg=fg_color,
+                    font=_TABLE_FONT,
+                )
+            visible_cell = tk.Frame(
+                table_body,
+                relief=tk.RIDGE,
+                bg=_TABLE_NEUTRAL_BG,
+                highlightthickness=0,
+            )
+            checkbox_var = tk.BooleanVar(value=indices[i] in indices_to_show)
+            checkbox_vars.append(checkbox_var)
+            checkbox = ttk.Checkbutton(
+                visible_cell,
+                variable=checkbox_var,
+                command=lambda idx=i: on_visibility_toggle(idx),
+            )
+            checkbox.pack(anchor='center', expand=True)
+            row_widgets = {
+                'rank_label': rank_label,
+                'rank_delta_label': rank_delta_label,
+                'ref_label': ref_label_widget,
+                'index_entry': index_entry,
+                'price_label': price_label,
+                'chg_label': chg_label,
+                'visible_cell': visible_cell,
+            }
+            if vol_label is not None:
+                row_widgets['vol_label'] = vol_label
+            table_widgets.append(row_widgets)
 
-    _tc = TableRegionCopy.for_window(root)
-    main_table_copy_grid = _tc.register_grid(
-        [[w[k] for k in _main_copy_cols] for w in table_widgets]
-    )
+        _tc = TableRegionCopy.for_window(root)
+        main_table_copy_grid = _tc.register_grid(
+            [[w[k] for k in _main_copy_cols] for w in table_widgets]
+        )
 
-    select_all_cb.config(command=on_select_all_toggle)
-    refresh_table_ranking()
-    _sync_select_all_checkbox()
-    root.update_idletasks()
-    _sync_header_scroll_gutter()
-    _sync_table_layout()
-    root.after_idle(_sync_table_layout)
+        select_all_cb.config(command=on_select_all_toggle)
+        refresh_table_ranking()
+        _sync_select_all_checkbox()
+        root.update_idletasks()
+        _sync_header_scroll_gutter()
+        _sync_table_layout()
+        root.after_idle(_sync_table_layout)
+
+    _build_table_rows()
 
     scatter_plots = [None] * len(indices)
     line_plots = [None] * len(indices)
@@ -3311,6 +3402,139 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             f"{len(_rrg_index)} dates on slider, end {format_date_label(end_date_idx)}"
         )
 
+    def _reload_us_universe() -> None:
+        nonlocal config, end_date, start_date, _rrg_index, end_date_idx
+        from dataclasses import replace
+
+        from momentum.etf.us_rrg_universe_modes import (
+            US_UNIVERSE_LABELS,
+            build_us_rrg_config,
+        )
+
+        if not config.us_universe_switchable:
+            return
+        prev_mode = config.backtest_universe_mode
+        mode = _us_universe_mode_key()
+        if mode == prev_mode:
+            return
+
+        print(f"RRG: switching US ETF universe to {mode}...")
+        root.config(cursor='watch')
+        root.update_idletasks()
+        try:
+            new_cfg = build_us_rrg_config(
+                mode,
+                period=period,
+                rrg_window=window,
+                min_adv=config.backtest_min_adv,
+                vol_percentile=config.backtest_vol_percentile,
+                categories=config.backtest_categories,
+            )
+            config = replace(
+                new_cfg,
+                pick_strategy=_pick_strategy_key(),
+                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                max_hold_rank=int(max_hold_rank_var.get()),
+                exit_below_9ema=bool(exit_below_9ema_var.get()),
+            )
+            requested_indices.clear()
+            requested_indices.extend(row.row_id for row in config.rows)
+            if default_indices_var.get():
+                indices_to_show[:] = [
+                    n for n in requested_indices if n in config.default_visible_ids
+                ]
+            else:
+                indices_to_show[:] = list(requested_indices)
+
+            _history_cache.clear()
+            _etf_daily_close.clear()
+            etf_vol_by_row.clear()
+            _clear_pick_cache()
+
+            prev_end_ts = (
+                _rrg_index[end_date_idx]
+                if end_date_idx is not None and len(_rrg_index)
+                else None
+            )
+
+            _apply_price_histories(_histories_for_unit(bar_unit))
+            rs_tickers.clear()
+            rsr_tickers.clear()
+            rsr_roc_tickers.clear()
+            rsm_tickers.clear()
+            for i in range(len(indices)):
+                name = indices[i]
+                rsr, rsr_roc, rsm = compute(
+                    indices_data[name], benchmark_data, effective_window
+                )
+                if rsr is None:
+                    continue
+                rs_tickers.append(100 * (indices_data[name] / benchmark_data))
+                rsr_tickers.append(rsr)
+                rsr_roc_tickers.append(rsr_roc)
+                rsm_tickers.append(rsm)
+            if not rsr_tickers:
+                raise RuntimeError(
+                    "No RRG rows with enough history in the selected universe."
+                )
+            indices[:] = indices[: len(rsr_tickers)]
+            indices_to_show[:] = [n for n in indices_to_show if n in indices]
+            index_metadata['ref_label'] = [
+                config.row_ref_label(name) for name in indices
+            ]
+            index_metadata['display'] = [
+                config.row_display_label(name) for name in indices
+            ]
+            index_metadata['kind'] = [config.row_kind(name) for name in indices]
+
+            _rrg_index = _build_rrg_date_index()
+            if not len(_rrg_index):
+                raise RuntimeError("No RRG dates after universe switch.")
+
+            date_min = _date_slider_min_idx()
+            date_max = _date_slider_max_idx()
+            date_scale.config(from_=date_min, to=date_max)
+            end_date_idx = _resolve_end_date_idx(prev_end_ts, date_min, date_max)
+            date_scale.set(end_date_idx)
+            date_value_label.config(text=format_date_label(end_date_idx))
+            date_range_label.config(text=_date_range_hint_text())
+            update_calc_context_label()
+
+            if config.etf_table_extras and indices:
+                try:
+                    from momentum.etf.us_liquid_screener import _fetch_metrics
+
+                    vol_metrics = _fetch_metrics(
+                        list(indices),
+                        adv_days=20,
+                        vol_days=63,
+                        history_days=120,
+                        quiet=True,
+                    )
+                    for j, sym in enumerate(indices):
+                        if sym in vol_metrics:
+                            etf_vol_by_row[j] = vol_metrics[sym][1]
+                except Exception as exc:
+                    print(f"Vol% load skipped: {exc}")
+
+            _load_etf_daily_close_data(force=True)
+
+            scatter_plots[:] = [None] * len(indices)
+            line_plots[:] = [None] * len(indices)
+            head_arrows[:] = [None] * len(indices)
+            annotations[:] = [None] * len(indices)
+            _ensure_plot_slots()
+            _build_table_rows()
+            root.title(config.window_title)
+            us_universe_var.set(US_UNIVERSE_LABELS[mode])
+            print(config.universe_summary)
+            redraw_chart()
+        except Exception as exc:
+            us_universe_var.set(US_UNIVERSE_LABELS.get(prev_mode, us_universe_var.get()))
+            messagebox.showerror("Universe switch failed", str(exc), parent=root)
+        finally:
+            root.config(cursor='')
+
     def on_bar_unit_change(_event=None):
         nonlocal bar_unit
         selected = rrg_normalize_bar_unit(bar_unit_var.get())
@@ -3330,6 +3554,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             root.config(cursor='')
 
     bar_unit_combo.bind('<<ComboboxSelected>>', on_bar_unit_change)
+    if us_universe_combo is not None:
+        us_universe_combo.bind('<<ComboboxSelected>>', lambda _e: _reload_us_universe())
     update_nav_button_labels()
 
     def remove_ticker_artists(j):

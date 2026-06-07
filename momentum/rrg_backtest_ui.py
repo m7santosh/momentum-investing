@@ -143,7 +143,27 @@ def backtest_week_pick_detail(record: dict) -> dict[str, str]:
     }
 
 
-def _week_detail_fields(record: dict, *, total_weeks: int) -> dict[str, str]:
+def backtest_drawdown_pct_series(port_returns: pd.Series) -> pd.Series:
+    """Running drawdown % from weekly ``Port_Return`` (same rule as summary Max DD)."""
+    if port_returns.empty:
+        return pd.Series(dtype=float)
+    cum = (1 + port_returns).cumprod()
+    return (cum / cum.cummax() - 1) * 100
+
+
+def backtest_cum_pl_pct(portfolio_value: float, initial_capital: float) -> float:
+    """Total portfolio P/L % since backtest start."""
+    if initial_capital <= 0:
+        return 0.0
+    return (portfolio_value / initial_capital - 1) * 100
+
+
+def _week_detail_fields(
+    record: dict,
+    *,
+    total_weeks: int,
+    initial_capital: float,
+) -> dict[str, str]:
     from momentum.rrg_portfolio_exits import format_exit_summary
 
     rebal = rrg_format_date(record["Rebal_Date"])
@@ -152,11 +172,13 @@ def _week_detail_fields(record: dict, *, total_weeks: int) -> dict[str, str]:
         record.get("Exits") or [],
         rebalance_tickers=list(record.get("Rebalance_Tickers") or []),
     )
+    cum_pl = backtest_cum_pl_pct(float(record["Portfolio_Value"]), initial_capital)
     fields = {
         "Week": f"{record['Week']} of {total_weeks}",
         "Hold start": rebal,
         "Hold end": end,
-        "Portfolio %": f"{record['Port_Return'] * 100:+.2f}",
+        "Portfolio % (week)": f"{record['Port_Return'] * 100:+.2f}",
+        "Portfolio P/L % (since start)": f"{cum_pl:+.2f}",
         "Benchmark %": f"{record['Bench_Return'] * 100:+.2f}",
         "Portfolio value": f"{record['Portfolio_Value']:,.0f}",
         "Holdings at week-end": record.get("Holdings") or "CASH",
@@ -349,10 +371,69 @@ def open_rrg_backtest(
     pick_strategy_var = tk.StringVar()
     hold_until_rank_exit_var = tk.BooleanVar(value=False)
     exit_below_9ema_var = tk.BooleanVar(value=bool(bt_extra.get("exit_below_9ema", True)))
+    _default_stop_loss_pct = 10.0 if profile == "stock" else 3.0
+    exit_stop_loss_var = tk.BooleanVar(value=bool(bt_extra.get("exit_stop_loss", False)))
+    stop_loss_pct_var = tk.DoubleVar(
+        value=float(bt_extra.get("stop_loss_pct", _default_stop_loss_pct))
+    )
     max_hold_rank_var = tk.IntVar(value=10)
     _pick_label_to_key: dict[str, str] = {}
     max_rank_label: tk.Label | None = None
     max_rank_spin: ttk.Spinbox | None = None
+    us_universe_var = tk.StringVar()
+    _us_universe_label_to_key: dict[str, str] = {}
+    params_row = 1
+
+    from momentum.rrg_portfolio_fill import (
+        PORTFOLIO_FILL_MAINTAIN_TOP_N,
+        PORTFOLIO_FILL_MODES,
+    )
+
+    _portfolio_fill_label_to_key = {
+        label: key for key, label in PORTFOLIO_FILL_MODES.items()
+    }
+    portfolio_fill_var = tk.StringVar(
+        value=PORTFOLIO_FILL_MODES[PORTFOLIO_FILL_MAINTAIN_TOP_N]
+    )
+
+    def _pack_portfolio_fill(parent: tk.Misc) -> None:
+        tk.Label(parent, text="Portfolio fill:").pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Combobox(
+            parent,
+            textvariable=portfolio_fill_var,
+            values=list(PORTFOLIO_FILL_MODES.values()),
+            width=36,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=(4, 0))
+
+    if profile == "us":
+        from momentum.etf.us_rrg_universe_modes import (
+            US_UNIVERSE_DROPDOWN_VALUES,
+            US_UNIVERSE_LABELS,
+            normalize_us_universe_mode,
+        )
+
+        _us_universe_label_to_key = {
+            label: key for key, label in US_UNIVERSE_LABELS.items()
+        }
+        init_mode = normalize_us_universe_mode(
+            str(bt_extra.get("universe_mode", "expanded"))
+        )
+        us_universe_var.set(
+            US_UNIVERSE_LABELS.get(init_mode, US_UNIVERSE_DROPDOWN_VALUES[0])
+        )
+        uni_row = tk.Frame(params)
+        uni_row.grid(row=params_row, column=0, columnspan=12, sticky="w", pady=(6, 0))
+        tk.Label(uni_row, text="ETF universe:").pack(side=tk.LEFT)
+        ttk.Combobox(
+            uni_row,
+            textvariable=us_universe_var,
+            values=list(US_UNIVERSE_DROPDOWN_VALUES),
+            width=36,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=(4, 0))
+        _pack_portfolio_fill(uni_row)
+        params_row += 1
 
     if profile in ("india", "us", "stock"):
         if profile == "us":
@@ -365,21 +446,50 @@ def open_rrg_backtest(
         _pick_label_to_key = {label: key for key, label in PICK_STRATEGIES.items()}
         pick_strategy_var.set(PICK_STRATEGIES["recommend"])
         strat_row = tk.Frame(params)
-        strat_row.grid(row=1, column=0, columnspan=12, sticky="w", pady=(6, 0))
+        strat_row.grid(
+            row=params_row, column=0, columnspan=12, sticky="w", pady=(6, 0)
+        )
+        params_row += 1
         tk.Label(strat_row, text="Strategy:").pack(side=tk.LEFT)
         ttk.Combobox(
             strat_row,
             textvariable=pick_strategy_var,
             values=list(PICK_STRATEGIES.values()),
-            width=40,
+            width=36,
             state="readonly",
         ).pack(side=tk.LEFT, padx=(4, 12))
+        if profile != "us":
+            _pack_portfolio_fill(strat_row)
         ttk.Checkbutton(
             strat_row, text="Hold until rank worse", variable=hold_until_rank_exit_var
         ).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Checkbutton(
             strat_row, text="Exit below 9 EMA", variable=exit_below_9ema_var
         ).pack(side=tk.LEFT, padx=(0, 8))
+        stop_loss_cb = ttk.Checkbutton(
+            strat_row, text="Exit stop loss", variable=exit_stop_loss_var
+        )
+        stop_loss_cb.pack(side=tk.LEFT, padx=(0, 4))
+        stop_loss_label = tk.Label(strat_row, text="Stop %:")
+        stop_loss_spin = ttk.Spinbox(
+            strat_row,
+            from_=1,
+            to=50,
+            increment=0.5,
+            width=5,
+            textvariable=stop_loss_pct_var,
+        )
+
+        def _toggle_stop_loss_pct(*_) -> None:
+            if exit_stop_loss_var.get():
+                stop_loss_label.pack(side=tk.LEFT)
+                stop_loss_spin.pack(side=tk.LEFT, padx=(4, 8))
+            else:
+                stop_loss_label.pack_forget()
+                stop_loss_spin.pack_forget()
+
+        exit_stop_loss_var.trace_add("write", _toggle_stop_loss_pct)
+        _toggle_stop_loss_pct()
         max_rank_label = tk.Label(strat_row, text="Max hold rank:")
         max_rank_spin = ttk.Spinbox(
             strat_row, from_=5, to=60, width=4, textvariable=max_hold_rank_var
@@ -397,28 +507,6 @@ def open_rrg_backtest(
 
         hold_until_rank_exit_var.trace_add("write", _toggle_max_hold_rank)
         _toggle_max_hold_rank()
-
-        from momentum.rrg_portfolio_fill import (
-            PORTFOLIO_FILL_MAINTAIN_TOP_N,
-            PORTFOLIO_FILL_MODES,
-        )
-
-        _portfolio_fill_label_to_key = {
-            label: key for key, label in PORTFOLIO_FILL_MODES.items()
-        }
-        portfolio_fill_var = tk.StringVar(
-            value=PORTFOLIO_FILL_MODES[PORTFOLIO_FILL_MAINTAIN_TOP_N]
-        )
-        fill_row = tk.Frame(params)
-        fill_row.grid(row=2, column=0, columnspan=12, sticky="w", pady=(4, 0))
-        tk.Label(fill_row, text="Portfolio fill:").pack(side=tk.LEFT)
-        ttk.Combobox(
-            fill_row,
-            textvariable=portfolio_fill_var,
-            values=list(PORTFOLIO_FILL_MODES.values()),
-            width=44,
-            state="readonly",
-        ).pack(side=tk.LEFT, padx=(4, 0))
     else:
         portfolio_fill_var = tk.StringVar(value="")
         _portfolio_fill_label_to_key = {}
@@ -444,6 +532,10 @@ def open_rrg_backtest(
         exit_below_9ema_var.set(bool(bt_extra["exit_below_9ema"]))
     elif exit_below_9ema is not None:
         exit_below_9ema_var.set(bool(exit_below_9ema))
+    if "exit_stop_loss" in bt_extra:
+        exit_stop_loss_var.set(bool(bt_extra["exit_stop_loss"]))
+    if "stop_loss_pct" in bt_extra:
+        stop_loss_pct_var.set(float(bt_extra["stop_loss_pct"]))
     if profile in ("india", "us", "stock") and bt_extra.get("portfolio_fill_mode"):
         from momentum.rrg_portfolio_fill import PORTFOLIO_FILL_MODES as _PFM
 
@@ -453,7 +545,7 @@ def open_rrg_backtest(
 
     mode_var = tk.StringVar(value="all")
     mode_row = tk.Frame(params)
-    mode_row.grid(row=3, column=0, columnspan=12, sticky="w", pady=(8, 0))
+    mode_row.grid(row=params_row, column=0, columnspan=12, sticky="w", pady=(8, 0))
     ttk.Radiobutton(mode_row, text="Week-by-week", variable=mode_var, value="step").pack(
         side=tk.LEFT, padx=(0, 12)
     )
@@ -546,9 +638,11 @@ def open_rrg_backtest(
         "Holdings",
         "Rebal_9EMA",
         "Mid_9EMA",
+        "Mid_SL",
         "Exits",
         "Port%",
         "Bench%",
+        "Drawdown%",
         "Value",
     )
     log_tree = ttk.Treeview(
@@ -557,12 +651,22 @@ def open_rrg_backtest(
     _log_heading = {
         "Rebal_9EMA": "9EMA @ reb",
         "Mid_9EMA": "9EMA mid-out",
+        "Mid_SL": "SL mid-out",
         "Port%": "Port%",
         "Bench%": "Bench%",
+        "Drawdown%": "Drawdown %",
     }
     for col in log_cols:
         log_tree.heading(col, text=_log_heading.get(col, col))
-        w = 200 if col == "Exits" else 160 if col == "Holdings" else 88
+        w = (
+            200
+            if col == "Exits"
+            else 160
+            if col == "Holdings"
+            else 92
+            if col == "Drawdown%"
+            else 88
+        )
         log_tree.column(col, width=w, stretch=True)
     log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_tree.yview)
     log_tree.configure(yscrollcommand=log_scroll.set)
@@ -616,6 +720,8 @@ def open_rrg_backtest(
             df.attrs["hold_until_rank_exit"] = bool(hold_until_rank_exit_var.get())
             df.attrs["max_hold_rank"] = int(max_hold_rank_var.get())
             df.attrs["exit_below_9ema"] = bool(exit_below_9ema_var.get())
+            df.attrs["exit_stop_loss"] = bool(exit_stop_loss_var.get())
+            df.attrs["stop_loss_pct"] = _parse_stop_loss_pct()
             df.attrs["portfolio_fill_mode"] = _portfolio_fill_label_to_key.get(
                 portfolio_fill_var.get(), "maintain_top_n"
             )
@@ -687,9 +793,14 @@ def open_rrg_backtest(
             )
             _fill_position_tree(pos_tree, None)
             return
+        cap = float(capital_var.get())
         _fill_kv_tree(
             detail_tree,
-            _week_detail_fields(record, total_weeks=engine.total_weeks),
+            _week_detail_fields(
+                record,
+                total_weeks=engine.total_weeks,
+                initial_capital=cap,
+            ),
             empty="—",
         )
         _fill_position_tree(
@@ -705,13 +816,15 @@ def open_rrg_backtest(
             log_tree.delete(item)
         if engine is None or engine.trades_df.empty:
             return
-        for _, row in engine.trades_df.iterrows():
+        dd_vals = backtest_drawdown_pct_series(engine.trades_df["Port_Return"]).values
+        for pos, (_, row) in enumerate(engine.trades_df.iterrows()):
             rebal_tickers = row.get("Rebalance_Tickers")
             exits = row.get("Exits") or []
             exit_text = format_exit_summary(
                 exits,
                 rebalance_tickers=list(rebal_tickers) if rebal_tickers else None,
             )
+            dd_pct = float(dd_vals[pos]) if pos < len(dd_vals) else 0.0
             log_tree.insert(
                 "",
                 tk.END,
@@ -723,9 +836,11 @@ def open_rrg_backtest(
                     row["Holdings"],
                     row.get("Rebal_9EMA_Label") or "—",
                     row.get("Mid_Week_9EMA_Label") or "—",
+                    row.get("Mid_Week_Stop_Loss_Label") or "—",
                     exit_text or "—",
                     f"{row['Port_Return'] * 100:+.2f}",
                     f"{row['Bench_Return'] * 100:+.2f}",
+                    f"{dd_pct:+.2f}",
                     f"{row['Portfolio_Value']:,.0f}",
                 ),
             )
@@ -774,6 +889,8 @@ def open_rrg_backtest(
             kw["hold_until_rank_exit"] = bool(hold_until_rank_exit_var.get())
             kw["max_hold_rank"] = int(max_hold_rank_var.get())
             kw["exit_below_9ema"] = bool(exit_below_9ema_var.get())
+            kw["exit_stop_loss"] = bool(exit_stop_loss_var.get())
+            kw["stop_loss_pct"] = _parse_stop_loss_pct()
             kw["portfolio_fill_mode"] = _portfolio_fill_label_to_key.get(
                 portfolio_fill_var.get(), "maintain_top_n"
             )
@@ -788,7 +905,6 @@ def open_rrg_backtest(
                 for k, v in bt_extra.items()
                 if k
                 in (
-                    "universe_mode",
                     "min_adv_usd",
                     "vol_percentile",
                     "screen_categories",
@@ -799,8 +915,23 @@ def open_rrg_backtest(
                 kw["universe_mode"] = "main_table"
             else:
                 kw.update(extra_us)
-                kw.setdefault("universe_mode", "expanded")
+                kw["universe_mode"] = _us_universe_label_to_key.get(
+                    us_universe_var.get(), "expanded"
+                )
+                kw.setdefault("min_adv_usd", bt_extra.get("min_adv_usd", 10_000_000.0))
+                kw.setdefault("vol_percentile", bt_extra.get("vol_percentile", 100.0))
+                kw.setdefault(
+                    "screen_categories", bt_extra.get("screen_categories", ("all",))
+                )
         return prof.Config(**kw)
+
+    def _parse_stop_loss_pct() -> float:
+        default_pct = 10.0 if profile == "stock" else 3.0
+        try:
+            pct = float(stop_loss_pct_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            pct = default_pct
+        return max(0.1, min(pct, 50.0))
 
     def _config_needs_reload(stored, ui) -> bool:
         base = (
@@ -820,6 +951,31 @@ def open_rrg_backtest(
                 != tuple(getattr(ui, "universe_row_ids", None) or ())
             )
         return base
+
+    def _simulation_settings_changed(stored, ui) -> bool:
+        """Pick / exit / fill params that affect weekly simulation (no data reload)."""
+        keys = (
+            "top_n",
+            "pick_strategy",
+            "hold_until_rank_exit",
+            "max_hold_rank",
+            "exit_below_9ema",
+            "exit_stop_loss",
+            "stop_loss_pct",
+            "portfolio_fill_mode",
+        )
+        for key in keys:
+            if getattr(stored, key, None) != getattr(ui, key, None):
+                return True
+        return False
+
+    def _exit_rules_summary(cfg) -> str:
+        rules: list[str] = []
+        if getattr(cfg, "exit_below_9ema", False):
+            rules.append("9 EMA")
+        if getattr(cfg, "exit_stop_loss", False):
+            rules.append(f"stop loss {getattr(cfg, 'stop_loss_pct', _default_stop_loss_pct):g}%")
+        return ", ".join(rules) if rules else "none"
 
     def _build_engine():
         return prof.Engine(
@@ -886,10 +1042,15 @@ def open_rrg_backtest(
                 parent=win,
             )
             return
+        prior_cfg = engine.config
         engine.config = ui_cfg
         if engine.finished:
-            status_var.set("All weeks done. Reset to run again.")
-            return
+            if _simulation_settings_changed(prior_cfg, ui_cfg):
+                engine.reset_run()
+                _clear_results()
+            else:
+                status_var.set("All weeks done. Change exit rules or Reset, then run again.")
+                return
         record = engine.step_week()
         if record:
             _refresh_log_table()
@@ -925,18 +1086,19 @@ def open_rrg_backtest(
         if engine is None or not engine.loaded:
             _load_data(run_all_after=True)
             return
-        if not from_load:
-            if not _validate_dates():
-                return
-            ui_cfg = _ui_config()
-            if _config_needs_reload(engine.config, ui_cfg):
-                _load_data(run_all_after=True)
-                return
-            engine.config = ui_cfg
-            engine.reset_run()
-            _clear_results()
+        if not _validate_dates():
+            return
+        ui_cfg = _ui_config()
+        if _config_needs_reload(engine.config, ui_cfg):
+            _load_data(run_all_after=True)
+            return
+        # Always apply current UI exit/pick settings before simulating.
+        engine.config = ui_cfg
+        engine.reset_run()
+        _clear_results()
+        exit_rules = _exit_rules_summary(ui_cfg)
         _set_busy(True)
-        status_var.set("Running all weeks...")
+        status_var.set(f"Running all weeks (exits: {exit_rules})...")
 
         def worker():
             err = None
@@ -945,6 +1107,7 @@ def open_rrg_backtest(
                 eng = engine
                 if eng is None:
                     return
+                eng.config = ui_cfg
                 eng.reset_run()
                 while not eng.finished:
                     last_record = eng.step_week()
@@ -952,11 +1115,15 @@ def open_rrg_backtest(
                     win.after(0, lambda w=w, t=t: status_var.set(f"Running week {w}/{t}..."))
             except Exception as exc:
                 err = exc
-            win.after(0, lambda: _on_run_all_done(err, last_record))
+            win.after(0, lambda: _on_run_all_done(err, last_record, ui_cfg))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_run_all_done(err: Exception | None, last_record: dict | None) -> None:
+    def _on_run_all_done(
+        err: Exception | None,
+        last_record: dict | None,
+        ui_cfg=None,
+    ) -> None:
         _set_busy(False)
         if err is not None:
             messagebox.showerror("Run failed", str(err), parent=win)
@@ -968,7 +1135,15 @@ def open_rrg_backtest(
         _update_chart()
         _update_metrics()
         total = engine.total_weeks if engine else 0
-        status_var.set(f"Finished all {total} week(s).")
+        cfg = ui_cfg if ui_cfg is not None else getattr(engine, "config", None)
+        exit_rules = _exit_rules_summary(cfg) if cfg is not None else "n/a"
+        sl_exits = 0
+        if engine is not None and engine._records and "Mid_Week_Stop_Loss" in engine._records[0]:
+            sl_exits = sum(len(r.get("Mid_Week_Stop_Loss") or []) for r in engine._records)
+        status_var.set(
+            f"Finished all {total} week(s). Exits: {exit_rules}. "
+            f"Mid-week stop-loss exits: {sl_exits}."
+        )
         _refresh_nav_buttons()
 
     def _reset() -> None:
@@ -1102,16 +1277,27 @@ def launch_standalone_rrg_backtest(
         tail = 1
     us_extra = None
     if profile == "us":
+        from momentum.etf.us_rrg_universe_modes import (
+            US_UNIVERSE_LABELS,
+            normalize_us_universe_mode,
+        )
         from momentum.etf.us_liquid_rrg_config import (
             DEFAULT_MIN_ADV,
             DEFAULT_VOL_PERCENTILE,
         )
 
+        init_mode = "expanded"
+        if backtest_extra and backtest_extra.get("universe_mode"):
+            init_mode = normalize_us_universe_mode(str(backtest_extra["universe_mode"]))
         us_extra = {
-            "universe_mode": "expanded",
-            "min_adv_usd": DEFAULT_MIN_ADV,
-            "vol_percentile": DEFAULT_VOL_PERCENTILE,
-            "screen_categories": ("all",),
+            "universe_mode": init_mode,
+            "min_adv_usd": (backtest_extra or {}).get("min_adv_usd", DEFAULT_MIN_ADV),
+            "vol_percentile": (backtest_extra or {}).get(
+                "vol_percentile", DEFAULT_VOL_PERCENTILE
+            ),
+            "screen_categories": (backtest_extra or {}).get(
+                "screen_categories", ("all",)
+            ),
             "analysis_period": "3m",
         }
     stock_extra = None

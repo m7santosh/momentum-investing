@@ -305,23 +305,37 @@ def panel_rebal_bar_index(
 
     When ``as_of`` falls on a weekly bar that starts a new hold week, that bar is
     the rebalance date (e.g. slider on 08-05 → rebalance 08-05, not prior 01-05).
+
+    Mid-week ``as_of`` (between bars) maps to the hold week that contains it.
+    The latest available weekly bar is a rebalance when ``as_of`` is on that date
+    (or later with no following bar yet).
     """
     wi = pd.DatetimeIndex(weekly_index).sort_values()
     if not len(wi):
         return 0
     tail_n = max(1, int(tail_bars))
-    end_i = int(wi.get_indexer([pd.Timestamp(as_of_ts)], method="ffill")[0])
+    as_of = pd.Timestamp(as_of_ts)
+    end_i = int(wi.get_indexer([as_of], method="ffill")[0])
     if end_i < 0:
         return 0
     if end_i <= tail_n:
         return end_i
-    end_ts_local = pd.Timestamp(wi[end_i])
+    end_ts_local = pd.Timestamp(wi[end_i]).normalize()
+    as_of_day = as_of.normalize()
+
+    if as_of_day == end_ts_local:
+        return end_i
+
     for k in range(end_i, tail_n - 1, -1):
         if k + 1 < len(wi):
             week_start = pd.Timestamp(wi[k])
             week_end = pd.Timestamp(wi[k + 1])
-            if week_start <= end_ts_local <= week_end:
+            if week_start <= as_of <= week_end:
                 return k
+
+    if end_i == len(wi) - 1 and as_of_day >= end_ts_local:
+        return end_i
+
     return max(tail_n, end_i - 1)
 
 

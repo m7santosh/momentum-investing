@@ -85,9 +85,12 @@ def build_week_position_rows(
     price_weekly: dict[str, pd.Series],
     daily_close: dict[str, pd.Series],
     strategy_order: list[str] | None = None,
+    mid_week_stop_loss: list[tuple[str, pd.Timestamp]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build per-ETF price/P/L rows for names held at this week's rebalance only."""
+    _ = entry_prices  # display uses rebalance-week entry, not multi-week cost basis
     mid_by_ticker = {_norm(t): pd.Timestamp(d) for t, d in mid_week_9ema}
+    sl_by_ticker = {_norm(t): pd.Timestamp(d) for t, d in (mid_week_stop_loss or [])}
     end_set = {_norm(t) for t in end_holdings}
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -99,7 +102,7 @@ def build_week_position_rows(
         if bare in seen:
             continue
         seen.add(bare)
-        entry = entry_prices.get(bare) or _weekly_price(price_weekly, sym, decision_date)
+        entry = _weekly_price(price_weekly, sym, decision_date)
         if bare in mid_by_ticker:
             exit_day = mid_by_ticker[bare]
             exit_p = _daily_price(daily_close, sym, exit_day) or _weekly_price(
@@ -109,6 +112,21 @@ def build_week_position_rows(
                 _row(
                     sym,
                     "Exited mid-week (9 EMA)",
+                    entry,
+                    exit_p,
+                    None,
+                    exit_date=exit_day,
+                )
+            )
+        elif bare in sl_by_ticker:
+            exit_day = sl_by_ticker[bare]
+            exit_p = _daily_price(daily_close, sym, exit_day) or _weekly_price(
+                price_weekly, sym, exit_day
+            )
+            rows.append(
+                _row(
+                    sym,
+                    "Exited mid-week (Stop loss)",
                     entry,
                     exit_p,
                     None,
@@ -178,9 +196,11 @@ def update_entry_prices_after_week(
     end_holdings: list[str],
     mid_week_9ema: list[tuple[str, pd.Timestamp]],
     week_exits: list[PortfolioExit],
+    mid_week_stop_loss: list[tuple[str, pd.Timestamp]] | None = None,
 ) -> None:
     """Drop entry prices for names exited this week; keep still-held positions."""
     exited = {_norm(t) for t, _ in mid_week_9ema}
+    exited.update(_norm(t) for t, _ in (mid_week_stop_loss or []))
     exited.update(_norm(ex.ticker) for ex in week_exits)
     end_set = {_norm(t) for t in end_holdings}
     for bare in list(entry_prices):

@@ -155,7 +155,79 @@ def first_9ema_exit_day(
     return None
 
 
-def simulate_week_with_9ema_exits(
+def _close_on_date(
+    daily: pd.Series,
+    weekly: pd.Series | None,
+    as_of: pd.Timestamp,
+) -> float | None:
+    """Mark on ``as_of``: daily close first (mid-week exits), else weekly W-FRI."""
+    as_of = pd.Timestamp(as_of)
+    if daily is not None and not daily.empty:
+        sliced = daily.loc[:as_of]
+        if len(sliced):
+            px = float(sliced.iloc[-1])
+            if px > 0:
+                return px
+    if weekly is not None and not weekly.empty:
+        sliced = weekly.loc[:as_of]
+        if len(sliced):
+            px = float(sliced.iloc[-1])
+            if px > 0:
+                return px
+    return None
+
+
+def first_stop_loss_exit_day(
+    close: pd.Series,
+    entry_price: float,
+    after: pd.Timestamp,
+    through: pd.Timestamp,
+    stop_loss_pct: float,
+) -> pd.Timestamp | None:
+    """First session after ``after`` where close is at/below entry stop (``stop_loss_pct`` % loss)."""
+    if close.empty or entry_price <= 0 or stop_loss_pct <= 0:
+        return None
+    stop_px = entry_price * (1.0 - stop_loss_pct / 100.0)
+    idx = close.index
+    mask = (idx > after) & (idx <= through)
+    for day in idx[mask]:
+        sliced = close.loc[:day]
+        if len(sliced) == 0:
+            continue
+        if float(sliced.iloc[-1]) <= stop_px:
+            return pd.Timestamp(day)
+    return None
+
+
+def _first_intraweek_exit_day(
+    daily: pd.Series,
+    p_entry: float,
+    decision_date: pd.Timestamp,
+    period_end: pd.Timestamp,
+    *,
+    exit_below_9ema: bool,
+    exit_stop_loss: bool,
+    stop_loss_pct: float,
+) -> tuple[pd.Timestamp | None, str | None]:
+    """Earliest mid-week exit day and rule tag (``9ema`` | ``stop_loss``)."""
+    candidates: list[tuple[pd.Timestamp, str]] = []
+    if exit_below_9ema:
+        ema_day = first_9ema_exit_day(daily, decision_date, period_end)
+        if ema_day is not None:
+            candidates.append((ema_day, "9ema"))
+    if exit_stop_loss:
+        sl_day = first_stop_loss_exit_day(
+            daily, p_entry, decision_date, period_end, stop_loss_pct
+        )
+        if sl_day is not None:
+            candidates.append((sl_day, "stop_loss"))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0]
+
+
+def simulate_week_with_exits(
     holdings: list[str],
     decision_date: pd.Timestamp,
     next_date: pd.Timestamp,
@@ -163,17 +235,30 @@ def simulate_week_with_9ema_exits(
     price_weekly: dict[str, pd.Series],
     top_n: int,
     *,
+    exit_below_9ema: bool = False,
+    exit_stop_loss: bool = False,
+    stop_loss_pct: float = 5.0,
     through_date: pd.Timestamp | None = None,
-) -> tuple[list[float], list[str], list[tuple[str, pd.Timestamp]]]:
+) -> tuple[
+    list[float],
+    list[str],
+    list[tuple[str, pd.Timestamp]],
+    list[tuple[str, pd.Timestamp]],
+]:
     """
-    Equal-weight slot returns for one rebalance week with 9 EMA exits.
+    Equal-weight slot returns for one rebalance week with optional 9 EMA / stop-loss exits.
 
-    Exited slots earn return through exit day; empty slots (no refill) earn 0%.
-    ``through_date`` caps the path (for UI as-of the selected slider date).
-    Returns (slot_returns length top_n, end_holdings, mid_week_exits as (ticker, day)).
+    When both are enabled, the earlier trigger wins. Returns
+    (slot_returns, end_holdings, mid_week_9ema, mid_week_stop_loss).
     """
     if not holdings:
-        return [0.0] * top_n, [], []
+        return [0.0] * top_n, [], [], []
+
+    if not exit_below_9ema and not exit_stop_loss:
+        rets, end_h, mid = _weekly_returns_only(
+            holdings, decision_date, next_date, price_weekly, top_n
+        )
+        return rets, end_h, mid, []
 
     period_end = pd.Timestamp(next_date)
     if through_date is not None:
@@ -185,15 +270,14 @@ def simulate_week_with_9ema_exits(
         if close is not None:
             all_days.extend(close.index.tolist())
     if not all_days:
-        return _weekly_returns_only(
+        rets, end_h, mid = _weekly_returns_only(
             holdings, decision_date, period_end, price_weekly, top_n
         )
-
-    intraweek = pd.DatetimeIndex(sorted(set(all_days)))
-    intraweek = intraweek[(intraweek > decision_date) & (intraweek <= period_end)]
+        return rets, end_h, mid, []
 
     per_slot: list[dict] = []
-    mid_week_exits: list[tuple[str, pd.Timestamp]] = []
+    mid_week_9ema: list[tuple[str, pd.Timestamp]] = []
+    mid_week_stop_loss: list[tuple[str, pd.Timestamp]] = []
 
     for sym in holdings:
         weekly = _weekly_price_series(price_weekly, sym)
@@ -212,12 +296,17 @@ def simulate_week_with_9ema_exits(
             per_slot.append({"sym": sym, "ret": 0.0})
             continue
 
-        exit_day = first_9ema_exit_day(daily, decision_date, period_end)
+        exit_day, rule = _first_intraweek_exit_day(
+            daily,
+            p_entry,
+            decision_date,
+            period_end,
+            exit_below_9ema=exit_below_9ema,
+            exit_stop_loss=exit_stop_loss,
+            stop_loss_pct=stop_loss_pct,
+        )
         if exit_day is not None:
-            exit_slice = weekly.loc[:exit_day]
-            if len(exit_slice) == 0:
-                exit_slice = daily.loc[:exit_day]
-            p_exit = float(exit_slice.iloc[-1]) if len(exit_slice) else p_entry
+            p_exit = _close_on_date(daily, weekly, exit_day) or p_entry
             per_slot.append(
                 {
                     "sym": sym,
@@ -225,7 +314,10 @@ def simulate_week_with_9ema_exits(
                     "exited": True,
                 }
             )
-            mid_week_exits.append((sym, exit_day))
+            if rule == "9ema":
+                mid_week_9ema.append((sym, exit_day))
+            elif rule == "stop_loss":
+                mid_week_stop_loss.append((sym, exit_day))
             continue
 
         exit_slice = weekly.loc[:period_end]
@@ -236,7 +328,32 @@ def simulate_week_with_9ema_exits(
     slot_returns = [s["ret"] for s in per_slot]
     n_empty = max(top_n - len(slot_returns), 0)
     slot_returns.extend([0.0] * n_empty)
-    return slot_returns, end_holdings, mid_week_exits
+    return slot_returns, end_holdings, mid_week_9ema, mid_week_stop_loss
+
+
+def simulate_week_with_9ema_exits(
+    holdings: list[str],
+    decision_date: pd.Timestamp,
+    next_date: pd.Timestamp,
+    daily_close: dict[str, pd.Series],
+    price_weekly: dict[str, pd.Series],
+    top_n: int,
+    *,
+    through_date: pd.Timestamp | None = None,
+) -> tuple[list[float], list[str], list[tuple[str, pd.Timestamp]]]:
+    """Backward-compatible wrapper — 9 EMA exits only."""
+    rets, end_h, mid_9, _mid_sl = simulate_week_with_exits(
+        holdings,
+        decision_date,
+        next_date,
+        daily_close,
+        price_weekly,
+        top_n,
+        exit_below_9ema=True,
+        exit_stop_loss=False,
+        through_date=through_date,
+    )
+    return rets, end_h, mid_9
 
 
 def midweek_9ema_exit_count(

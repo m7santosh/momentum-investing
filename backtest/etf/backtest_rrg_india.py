@@ -58,14 +58,13 @@ from momentum.rrg_backtest_positions import (  # noqa: E402
     register_new_week_entries,
     update_entry_prices_after_week,
 )
-from momentum.rrg_ema_exit import (  # noqa: E402
-    midweek_9ema_exit_count,
-    simulate_week_with_9ema_exits,
-)
+from momentum.rrg_backtest_week_sim import intraweek_exits_enabled, simulate_backtest_week  # noqa: E402
+from momentum.rrg_ema_exit import midweek_9ema_exit_count  # noqa: E402
 from momentum.rrg_portfolio_exits import (  # noqa: E402
     build_week_exits,
     format_exit_summary,
     mid_week_9ema_label,
+    mid_week_stop_loss_label,
     rebal_9ema_label,
 )
 from momentum.rrg_portfolio_fill import (  # noqa: E402
@@ -74,6 +73,10 @@ from momentum.rrg_portfolio_fill import (  # noqa: E402
     PORTFOLIO_FILL_REPLACE,
     equal_weight_port_return,
     uses_prior_holdings,
+)
+from momentum.rrg_ref_price import (  # noqa: E402
+    filter_picks_with_ref_price,
+    filter_tickers_with_ref_price,
 )
 from momentum.rrg_ranking import (  # noqa: E402
     build_rank_delta_by_row,
@@ -102,6 +105,8 @@ class IndiaRrgBacktestConfig:
     hold_until_rank_exit: bool = False
     max_hold_rank: int = 10
     exit_below_9ema: bool = True
+    exit_stop_loss: bool = False
+    stop_loss_pct: float = 3.0
     analysis_period: str = "3m"
     portfolio_fill_mode: str = PORTFOLIO_FILL_MAINTAIN_TOP_N
 
@@ -438,6 +443,7 @@ class IndiaRrgBacktestEngine:
         dropped_pick_9ema: list[str] = []
         dropped_9ema_rebal: list[str] = []
         mid_week_9ema: list = []
+        mid_week_stop_loss: list = []
 
         if cfg.exit_below_9ema:
             from momentum.rrg_ema_exit import (
@@ -471,6 +477,9 @@ class IndiaRrgBacktestEngine:
         else:
             holdings = list(rebalance_holdings)
 
+        holdings = filter_tickers_with_ref_price(
+            list(holdings), self._ref_etf_weekly, decision_date
+        )
         held_at_rebal = list(holdings)
 
         register_new_week_entries(
@@ -494,35 +503,18 @@ class IndiaRrgBacktestEngine:
             new_entries = len(holdings)
 
         if holdings:
-            if cfg.exit_below_9ema:
-                week_rets, end_holdings, mid_week_9ema = simulate_week_with_9ema_exits(
-                    holdings,
-                    decision_date,
-                    next_date,
-                    self._ref_etf_daily,
-                    self._ref_etf_weekly,
-                    max(cfg.top_n, len(holdings)),
-                )
-                port_ret = equal_weight_port_return(week_rets, len(held_at_rebal))
-                holdings = end_holdings
-            else:
-                week_rets = []
-                for ref in holdings:
-                    series = self._ref_etf_weekly.get(ref)
-                    if series is None or series.empty:
-                        week_rets.append(0.0)
-                        continue
-                    s_from = series.loc[:decision_date]
-                    s_to = series.loc[:next_date]
-                    if len(s_from) == 0 or len(s_to) == 0:
-                        week_rets.append(0.0)
-                        continue
-                    p0 = float(s_from.iloc[-1])
-                    p1 = float(s_to.iloc[-1])
-                    week_rets.append((p1 / p0 - 1) if p0 > 0 else 0.0)
-                port_ret = float(np.mean(week_rets))
+            port_ret, holdings, mid_week_9ema, mid_week_stop_loss = simulate_backtest_week(
+                cfg,
+                holdings,
+                decision_date,
+                next_date,
+                self._ref_etf_daily,
+                self._ref_etf_weekly,
+                len(held_at_rebal),
+            )
         else:
             port_ret = 0.0
+            mid_week_stop_loss = []
 
         mid_week_9ema_exits = midweek_9ema_exit_count(mid_week_9ema)
         pick_ctx = self._last_pick_ctx
@@ -538,6 +530,9 @@ class IndiaRrgBacktestEngine:
                 dropped_9ema_rebal=dropped_9ema_rebal,
                 mid_week_9ema=mid_week_9ema,
                 decision_date=decision_date,
+                exit_stop_loss=cfg.exit_stop_loss,
+                mid_week_stop_loss=mid_week_stop_loss,
+                stop_loss_pct=cfg.stop_loss_pct,
             )
         else:
             week_exits = []
@@ -582,6 +577,7 @@ class IndiaRrgBacktestEngine:
             held_at_rebal=held_at_rebal,
             end_holdings=holdings,
             mid_week_9ema=mid_week_9ema,
+            mid_week_stop_loss=mid_week_stop_loss,
             week_exits=week_exits,
             entry_prices=self._entry_prices,
             decision_date=decision_date,
@@ -594,6 +590,7 @@ class IndiaRrgBacktestEngine:
             self._entry_prices,
             end_holdings=holdings,
             mid_week_9ema=mid_week_9ema,
+            mid_week_stop_loss=mid_week_stop_loss,
             week_exits=week_exits,
         )
 
@@ -615,6 +612,10 @@ class IndiaRrgBacktestEngine:
             "Mid_Week_9EMA": list(mid_week_9ema),
             "Mid_Week_9EMA_Label": mid_week_9ema_label(
                 mid_week_9ema, rebalance_tickers=held_at_rebal
+            ),
+            "Mid_Week_Stop_Loss": list(mid_week_stop_loss),
+            "Mid_Week_Stop_Loss_Label": mid_week_stop_loss_label(
+                mid_week_stop_loss, rebalance_tickers=held_at_rebal
             ),
             "Was_Portfolio": was_portfolio,
             "Was_Rank_At_Rebal": was_rank_at_rebal,
@@ -718,7 +719,10 @@ class IndiaRrgBacktestEngine:
             portfolio_fill_mode=cfg.portfolio_fill_mode,
         )
         self._last_pick_ctx = ctx
-        return pick_india_portfolio(cfg.pick_strategy, ctx)
+        picks = pick_india_portfolio(cfg.pick_strategy, ctx)
+        return filter_picks_with_ref_price(
+            picks, self._ref_etf_weekly, end_ts
+        )
 
     def _rebalance_picks_at(
         self, decision_date: pd.Timestamp
@@ -829,11 +833,12 @@ class IndiaRrgBacktestEngine:
             held_at_rebal = [t for t in rebal_slots if t]
             dropped_9ema_rebal: list[str] = list(dropped_pick_9ema)
             mid_week_9ema: list = []
+            mid_week_stop_loss: list = []
 
             if cfg.exit_below_9ema:
                 from momentum.rrg_ema_exit import (
                     rebalance_9ema_dropped,
-                    simulate_week_with_9ema_exits,
+                    simulate_week_with_exits,
                 )
 
                 holdings, dropped_was_9ema = rebalance_9ema_dropped(
@@ -854,14 +859,18 @@ class IndiaRrgBacktestEngine:
                 if (
                     next_date is not None
                     and pd.Timestamp(next_date) > pd.Timestamp(decision_date)
+                    and intraweek_exits_enabled(cfg)
                 ):
-                    _, _, mid_week_9ema = simulate_week_with_9ema_exits(
+                    _, _, mid_week_9ema, mid_week_stop_loss = simulate_week_with_exits(
                         holdings,
                         decision_date,
                         next_date,
                         self._ref_etf_daily,
                         self._ref_etf_weekly,
                         cfg.top_n,
+                        exit_below_9ema=cfg.exit_below_9ema,
+                        exit_stop_loss=cfg.exit_stop_loss,
+                        stop_loss_pct=cfg.stop_loss_pct,
                     )
             if pick_ctx is None:
                 return []
@@ -876,6 +885,9 @@ class IndiaRrgBacktestEngine:
                 dropped_9ema_rebal=dropped_9ema_rebal,
                 mid_week_9ema=mid_week_9ema,
                 decision_date=decision_date,
+                exit_stop_loss=cfg.exit_stop_loss,
+                mid_week_stop_loss=mid_week_stop_loss,
+                stop_loss_pct=cfg.stop_loss_pct,
             )
         finally:
             self._prev_holdings = saved
@@ -1134,17 +1146,19 @@ class IndiaRrgBacktestEngine:
         )
 
         mid_week_9ema: list = []
+        mid_week_stop_loss: list = []
         cur_rec = self._record_by_rebal(panel_rebal_ts)
         if cur_rec is not None:
             mid_week_9ema = list(cur_rec.get("Mid_Week_9EMA") or [])
+            mid_week_stop_loss = list(cur_rec.get("Mid_Week_Stop_Loss") or [])
         elif (
-            cfg.exit_below_9ema
+            intraweek_exits_enabled(cfg)
             and pd.Timestamp(panel_end_ts) > pd.Timestamp(panel_rebal_ts)
         ):
             from momentum.rrg_ema_exit import (
                 rebalance_9ema_dropped,
                 rebalance_holdings_entered,
-                simulate_week_with_9ema_exits,
+                simulate_week_with_exits,
             )
 
             held = rebalance_holdings_entered(rebal_tickers)
@@ -1154,13 +1168,16 @@ class IndiaRrgBacktestEngine:
                 self._ref_etf_daily,
                 panel_rebal_ts,
             )
-            _, _, mid_week_9ema = simulate_week_with_9ema_exits(
+            _, _, mid_week_9ema, mid_week_stop_loss = simulate_week_with_exits(
                 held,
                 panel_rebal_ts,
                 panel_end_ts,
                 self._ref_etf_daily,
                 self._ref_etf_weekly,
                 cfg.top_n,
+                exit_below_9ema=cfg.exit_below_9ema,
+                exit_stop_loss=cfg.exit_stop_loss,
+                stop_loss_pct=cfg.stop_loss_pct,
             )
 
         was_label = (
@@ -1183,6 +1200,7 @@ class IndiaRrgBacktestEngine:
             "end_prev_week_holdings": end_prev_week_holdings,
             "panel_exits": panel_exits,
             "mid_week_9ema": mid_week_9ema,
+            "mid_week_stop_loss": mid_week_stop_loss,
         }
 
     def _vol_by_ref_at(self, as_of: pd.Timestamp) -> dict[str, float]:
@@ -1296,6 +1314,8 @@ def run_backtest(
     hold_until_rank_exit: bool = False,
     max_hold_rank: int = 10,
     exit_below_9ema: bool = True,
+    exit_stop_loss: bool = False,
+    stop_loss_pct: float = 3.0,
     analysis_period: str = "3m",
     portfolio_fill_mode: str = PORTFOLIO_FILL_MAINTAIN_TOP_N,
     progress_cb: Callable[[str], None] | None = None,
@@ -1311,6 +1331,8 @@ def run_backtest(
         hold_until_rank_exit=hold_until_rank_exit,
         max_hold_rank=max_hold_rank,
         exit_below_9ema=exit_below_9ema,
+        exit_stop_loss=exit_stop_loss,
+        stop_loss_pct=stop_loss_pct,
         analysis_period=analysis_period,
         portfolio_fill_mode=portfolio_fill_mode,
     )
@@ -1323,6 +1345,8 @@ def run_backtest(
         df.attrs["hold_until_rank_exit"] = hold_until_rank_exit
         df.attrs["max_hold_rank"] = max_hold_rank
         df.attrs["exit_below_9ema"] = exit_below_9ema
+        df.attrs["exit_stop_loss"] = exit_stop_loss
+        df.attrs["stop_loss_pct"] = stop_loss_pct
         df.attrs["portfolio_fill_mode"] = portfolio_fill_mode
     metrics = compute_metrics(df, initial_capital)
     return df, metrics
@@ -1361,6 +1385,19 @@ def _parse_args() -> argparse.Namespace:
         help="Exit when close < 9 EMA (mid-week); default on",
     )
     parser.add_argument(
+        "--exit-stop-loss",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Exit when loss from rebalance entry hits stop-loss %% (mid-week)",
+    )
+    parser.add_argument(
+        "--stop-loss-pct",
+        type=float,
+        default=3.0,
+        metavar="PCT",
+        help="Stop-loss %% below rebalance entry (default: 3)",
+    )
+    parser.add_argument(
         "--portfolio-fill",
         choices=tuple(PORTFOLIO_FILL_MODES),
         default=PORTFOLIO_FILL_MAINTAIN_TOP_N,
@@ -1389,6 +1426,8 @@ def main() -> None:
         hold_until_rank_exit=args.hold_until_rank_exit,
         max_hold_rank=args.max_hold_rank,
         exit_below_9ema=args.exit_below_9ema,
+        exit_stop_loss=args.exit_stop_loss,
+        stop_loss_pct=args.stop_loss_pct,
         portfolio_fill_mode=args.portfolio_fill,
         progress_cb=print,
     )
