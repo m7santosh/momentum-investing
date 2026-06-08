@@ -20,9 +20,10 @@ ETF_SWING_CHEAT_SHEET: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "Unit: Week",
             "Tail: 1–2",
-            "Date: latest EOD",
+            "Date: latest EOD (or Latest button)",
+            "Mid-week: check Preview today's picks for daily Top N",
             "Change % start → end: see calc line under Date",
-            "Day unit: only to time entries inside the week",
+            "Day unit: full daily slider; jumps to latest trading day",
         ),
     ),
     (
@@ -38,7 +39,7 @@ ETF_SWING_CHEAT_SHEET: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Table columns",
         (
             "Rank — best Change % over your tail window",
-            "Rank Δ — move vs prior bar",
+            "Rank Δ — move vs prior bar (daily when Preview on)",
             "Price — underlying index close; trade the Ref ETF",
             "Change % — return from tail start → end (not RRG)",
         ),
@@ -87,9 +88,10 @@ STOCK_SWING_CHEAT_SHEET: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "Unit: Week",
             "Tail: 1–2",
-            "Date: latest EOD",
+            "Date: latest EOD (or Latest button)",
+            "Mid-week: check Preview today's picks for daily Top N",
             "Change % start → end: see calc line under Date",
-            "Day unit: only to time entries inside the week",
+            "Day unit: full daily slider; jumps to latest trading day",
         ),
     ),
     (
@@ -105,7 +107,7 @@ STOCK_SWING_CHEAT_SHEET: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Table columns",
         (
             "Rank — best Change % over your tail window",
-            "Rank Δ — move vs prior bar",
+            "Rank Δ — move vs prior bar (daily when Preview on)",
             "Price — stock close vs benchmark",
             "Change % — return from tail start → end (not RRG)",
             "Industry — sector for diversification",

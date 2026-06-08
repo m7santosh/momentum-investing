@@ -63,7 +63,7 @@ tickers = [
     'EWG',
     'EWC',
     'EIDO',
-    'FM',
+    # 'FM',
     'KSA',
     'ARGT',
     'TUR',

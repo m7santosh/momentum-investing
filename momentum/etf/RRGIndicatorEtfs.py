@@ -272,7 +272,9 @@ def _build_config(analysis_period: str, rrg_window: int) -> RrgAppConfig:
         top_movers_title="Portfolio — Was vs Now",
         side_cheat_sheet=ETF_SWING_CHEAT_SHEET,
         etf_table_extras=True,
+        preview_today_picks=True,
         etf_recommend_profile="india",
+        pick_strategy="leading_improved",
         etf_recommend_count=7,
         backtest_enabled=True,
     )

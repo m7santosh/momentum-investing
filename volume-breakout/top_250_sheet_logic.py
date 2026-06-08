@@ -18,7 +18,7 @@ from utils.nse_bhavcopy import fetch_nse_live_quotes
 _DMA_CALENDAR_DAYS = {50: 75, 100: 150, 200: 300}
 
 _IST = timezone(timedelta(hours=5, minutes=30))
-_FILTER_KEYWORDS = "BEES|ETF|GOLD|LIQUID|CASE|SILVER|LIQ"
+_FILTER_KEYWORDS = "BEES|ETF|GOLD|LIQUID|CASE|SILVER|LIQ|GSEC|MOSMALL"
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }

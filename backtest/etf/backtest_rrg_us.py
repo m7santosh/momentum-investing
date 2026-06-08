@@ -921,6 +921,12 @@ class UsRrgBacktestEngine:
         tail_bars: int | None = None,
         weekly_index: pd.DatetimeIndex | None = None,
     ) -> dict:
+        """
+        Portfolio panel at ``as_of`` using the same rebalance bar rule as main RRG.
+
+        Maps ``as_of`` to the weekly bar that started the active hold week
+        (e.g. slider on 12-06 with prior bar 05-06 → rebalance 05-06).
+        """
         from momentum.rrg_core import panel_rebal_bar_index, rrg_format_date
         from momentum.rrg_portfolio_exits import panel_was_out_exits
 

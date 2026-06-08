@@ -26,6 +26,7 @@ from momentum.rrg_core import (
     rrg_format_date,
     rrg_parse_user_date,
 )
+from momentum.rrg_busy import RrgBusyOverlay
 from momentum.rrg_ui_copy import install_copy_support
 from utils.nse_bhavcopy import today_ist
 
@@ -299,6 +300,7 @@ def open_rrg_backtest(
     engine: Any | None = None
     _busy = False
     _load_run_all_after = False
+    _overlay = RrgBusyOverlay(win)
 
     params = tk.Frame(win, padx=10, pady=8)
     params.pack(fill=tk.X)
@@ -673,7 +675,7 @@ def open_rrg_backtest(
     log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-    def _set_busy(busy: bool) -> None:
+    def _set_busy(busy: bool, message: str | None = None) -> None:
         nonlocal _busy
         _busy = busy
         state = tk.DISABLED if busy else tk.NORMAL
@@ -682,7 +684,10 @@ def open_rrg_backtest(
         prev_btn.config(state=state)
         run_all_btn.config(state=state)
         reset_btn.config(state=state)
-        win.config(cursor="watch" if busy else "")
+        if busy:
+            _overlay.show(message or status_var.get())
+        else:
+            _overlay.hide()
         if not busy:
             _refresh_nav_buttons()
 
@@ -977,10 +982,14 @@ def open_rrg_backtest(
             rules.append(f"stop loss {getattr(cfg, 'stop_loss_pct', _default_stop_loss_pct):g}%")
         return ", ".join(rules) if rules else "none"
 
+    def _on_progress(msg: str) -> None:
+        status_var.set(msg)
+        _overlay.update_message(msg)
+
     def _build_engine():
         return prof.Engine(
             config=_ui_config(),
-            progress_cb=lambda msg: win.after(0, lambda m=msg: status_var.set(m)),
+            progress_cb=lambda msg: win.after(0, lambda m=msg: _on_progress(m)),
         )
 
     def _on_load_done(eng, err: Exception | None) -> None:
@@ -1013,8 +1022,8 @@ def open_rrg_backtest(
         if not _validate_dates():
             return
         _load_run_all_after = run_all_after
-        _set_busy(True)
         status_var.set(prof.load_status)
+        _set_busy(True, prof.load_status)
 
         def worker():
             err = None
@@ -1097,8 +1106,9 @@ def open_rrg_backtest(
         engine.reset_run()
         _clear_results()
         exit_rules = _exit_rules_summary(ui_cfg)
-        _set_busy(True)
-        status_var.set(f"Running all weeks (exits: {exit_rules})...")
+        run_msg = f"Running all weeks (exits: {exit_rules})…"
+        status_var.set(run_msg)
+        _set_busy(True, run_msg)
 
         def worker():
             err = None
@@ -1112,7 +1122,10 @@ def open_rrg_backtest(
                 while not eng.finished:
                     last_record = eng.step_week()
                     w, t = eng.current_week, eng.total_weeks
-                    win.after(0, lambda w=w, t=t: status_var.set(f"Running week {w}/{t}..."))
+                    win.after(
+                        0,
+                        lambda w=w, t=t: _on_progress(f"Running week {w}/{t}…"),
+                    )
             except Exception as exc:
                 err = exc
             win.after(0, lambda: _on_run_all_done(err, last_record, ui_cfg))

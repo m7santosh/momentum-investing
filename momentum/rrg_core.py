@@ -303,39 +303,27 @@ def panel_rebal_bar_index(
     """
     Weekly bar index for the portfolio panel rebalance (same rule as main RRG).
 
-    When ``as_of`` falls on a weekly bar that starts a new hold week, that bar is
-    the rebalance date (e.g. slider on 08-05 → rebalance 08-05, not prior 01-05).
+    Shared by India ETF, US ETF, and stock RRG apps and backtests.
 
-    Mid-week ``as_of`` (between bars) maps to the hold week that contains it.
-    The latest available weekly bar is a rebalance when ``as_of`` is on that date
-    (or later with no following bar yet).
+    Maps slider ``as_of`` to the weekly bar that *started* the active hold week.
+    E.g. slider on 12-06 with prior bar 05-06 → rebalance 05-06 (not 12-06).
     """
     wi = pd.DatetimeIndex(weekly_index).sort_values()
     if not len(wi):
         return 0
     tail_n = max(1, int(tail_bars))
-    as_of = pd.Timestamp(as_of_ts)
-    end_i = int(wi.get_indexer([as_of], method="ffill")[0])
+    end_i = int(wi.get_indexer([pd.Timestamp(as_of_ts)], method="ffill")[0])
     if end_i < 0:
         return 0
     if end_i <= tail_n:
         return end_i
-    end_ts_local = pd.Timestamp(wi[end_i]).normalize()
-    as_of_day = as_of.normalize()
-
-    if as_of_day == end_ts_local:
-        return end_i
-
+    end_ts_local = pd.Timestamp(wi[end_i])
     for k in range(end_i, tail_n - 1, -1):
         if k + 1 < len(wi):
             week_start = pd.Timestamp(wi[k])
             week_end = pd.Timestamp(wi[k + 1])
-            if week_start <= as_of <= week_end:
+            if week_start <= end_ts_local <= week_end:
                 return k
-
-    if end_i == len(wi) - 1 and as_of_day >= end_ts_local:
-        return end_i
-
     return max(tail_n, end_i - 1)
 
 
@@ -365,16 +353,19 @@ def rrg_build_slider_date_index(
             cal = cal[-slider_bars:]
         return cal
 
-    if rrg_normalize_bar_unit(unit) == "day" and daily_sources:
-        best: pd.DatetimeIndex | None = None
-        for daily in daily_sources:
-            if daily is None or not len(daily):
-                continue
-            sub = _cap(daily.dropna().sort_index().index)
-            if len(sub) and (best is None or len(sub) > len(best)):
-                best = sub
-        if best is not None and len(best):
-            return best
+    if rrg_normalize_bar_unit(unit) == "day":
+        candidates: list[pd.Series] = []
+        bench_daily = bench.dropna().sort_index()
+        if len(bench_daily):
+            candidates.append(bench_daily)
+        if daily_sources:
+            for daily in daily_sources:
+                if daily is None or not len(daily):
+                    continue
+                candidates.append(daily.dropna().sort_index())
+        if candidates:
+            latest = max(candidates, key=lambda s: s.index[-1])
+            return _cap(latest.index)
 
     bench = bench.dropna().sort_index()
     if len(bench.index):
@@ -386,6 +377,6 @@ def rrg_build_slider_date_index(
             if s is not None and len(s)
         ]
         if candidates:
-            longest = max(candidates, key=len)
-            return _cap(longest.index)
+            latest = max(candidates, key=lambda s: s.index[-1])
+            return _cap(latest.index)
     return pd.DatetimeIndex([])

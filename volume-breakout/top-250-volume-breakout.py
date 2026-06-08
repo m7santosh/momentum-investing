@@ -72,7 +72,7 @@ def fetch_bhavcopy_for_date(date_obj):
                         df = df[df[series_col].astype(str).str.strip() == 'EQ']
                     
                     # ETF, GOLD, LIQUID हटाना
-                    filter_keywords = 'BEES|ETF|GOLD|LIQUID|CASE|SILVER|LIQ'
+                    filter_keywords = 'BEES|ETF|GOLD|LIQUID|CASE|SILVER|LIQ|GSEC|MOSMALL'
                     df = df[~df[sym_col].astype(str).str.contains(filter_keywords, case=False, na=False)]
                     
                     # --- डेटा को दो भागों में बाँटना ---

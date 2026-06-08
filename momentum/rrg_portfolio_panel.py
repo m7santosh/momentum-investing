@@ -20,7 +20,7 @@ PORTFOLIO_PANEL_WAS_ROW: tuple[tuple[str, str, str, int], ...] = (
 )
 
 PORTFOLIO_PANEL_PICK_ROW: tuple[tuple[str, str, str, int], ...] = (
-    ("rebal", "Top N", "w", 118),
+    ("rebal", "Top N", "w", 200),
     ("pick_tag", "Pick", "w", 40),
     ("pick_pnl", "P/L pick", "e", 56),
     ("pick_entry", "Pick entry", "e", 68),
@@ -204,12 +204,21 @@ def compact_tickers(tickers: list[str]) -> list[str]:
     return [t for t in tickers if t]
 
 
-def format_portfolio_cell(ticker: str, rank: int | None = None) -> str:
+def format_portfolio_cell(
+    ticker: str,
+    rank: int | None = None,
+    *,
+    detail: str | None = None,
+) -> str:
     if not ticker:
         return ""
+    text = ticker
+    extra = (detail or "").strip()
+    if extra and extra.upper() != ticker.strip().upper():
+        text = f"{ticker} — {extra}"
     if rank is not None:
-        return f"{ticker} (rk {rank})"
-    return ticker
+        return f"{text} (rk {rank})"
+    return text
 
 
 def format_rebal_pick_cell(
@@ -228,10 +237,11 @@ def format_rebal_skip_cell(
     *,
     rebalance_ts,
     reason: str = "9 EMA",
+    detail: str | None = None,
 ) -> str:
     """Strategy pick skipped at rebalance (e.g. below 9 EMA)."""
     reb_d = rrg_format_date(rebalance_ts)
-    name = format_portfolio_cell(ticker, rank)
+    name = format_portfolio_cell(ticker, rank, detail=detail)
     return f"{name} · {reason} @{reb_d}"
 
 
@@ -241,6 +251,7 @@ def build_rebal_display_rows(
     *,
     rebalance_ts,
     rank_for_ticker: Callable[[str], int | None] | None = None,
+    detail_for_ticker: Callable[[str], str] | None = None,
     exit_below_9ema: bool = False,
 ) -> list[tuple[str, str]]:
     """
@@ -248,6 +259,13 @@ def build_rebal_display_rows(
     Returns list of (kind, value) where kind is ``ticker`` or ``skip``.
     """
     rank_fn = rank_for_ticker or (lambda _t: None)
+
+    def _detail(sym: str) -> str | None:
+        if detail_for_ticker is None:
+            return None
+        text = (detail_for_ticker(sym) or "").strip()
+        return text or None
+
     entered = compact_tickers(rebal_slots)
     if not exit_below_9ema:
         source = entered if entered else compact_tickers(strategy_tickers)
@@ -265,7 +283,10 @@ def build_rebal_display_rows(
                 (
                     "skip",
                     format_rebal_skip_cell(
-                        strat, rank_fn(strat), rebalance_ts=rebalance_ts
+                        strat,
+                        rank_fn(strat),
+                        rebalance_ts=rebalance_ts,
+                        detail=_detail(strat),
                     ),
                 )
             )
@@ -430,6 +451,7 @@ def apply_portfolio_panel_display(
     *,
     was_rank_for_ticker: Callable[[str], int | None],
     curr_rank_for_ticker: Callable[[str], int | None],
+    rebal_detail_for_ticker: Callable[[str], str] | None = None,
 ) -> list[dict[str, str]]:
     """Add was_text / now_text / rebal_text and fg colors for UI binding."""
     for row in rows:
@@ -451,8 +473,15 @@ def apply_portfolio_panel_display(
         else:
             row["now_text"] = ""
         if rebal_t:
+            detail = (
+                (rebal_detail_for_ticker(rebal_t) or "").strip()
+                if rebal_detail_for_ticker is not None
+                else None
+            )
             row["rebal_text"] = format_portfolio_cell(
-                rebal_t, curr_rank_for_ticker(rebal_t)
+                rebal_t,
+                curr_rank_for_ticker(rebal_t),
+                detail=detail or None,
             )
         elif rebal_note:
             row["rebal_text"] = rebal_note
@@ -482,6 +511,7 @@ def build_portfolio_panel(
     mid_week_9ema: list | None = None,
     live_close_by_ticker: dict[str, float] | None = None,
     portfolio_slots: int | None = None,
+    rebal_detail_for_ticker: Callable[[str], str] | None = None,
 ) -> tuple[list[dict[str, str]], PortfolioPanelTotals]:
     """Full portfolio panel rows and equal-weight Was / pick totals."""
     from momentum.rrg_portfolio_exits import (
@@ -503,6 +533,7 @@ def build_portfolio_panel(
         rebal_tickers,
         rebalance_ts=rebalance_ts,
         rank_for_ticker=curr_rank_for_ticker,
+        detail_for_ticker=rebal_detail_for_ticker,
         exit_below_9ema=exit_below_9ema,
     )
     rows = portfolio_panel_rows(
@@ -601,6 +632,7 @@ def build_portfolio_panel(
         rows,
         was_rank_for_ticker=was_rank_for_ticker,
         curr_rank_for_ticker=curr_rank_for_ticker,
+        rebal_detail_for_ticker=rebal_detail_for_ticker,
     )
     slots = portfolio_slots if portfolio_slots is not None else max(len(rebal_tickers), 1)
     totals = compute_portfolio_panel_totals(
@@ -624,27 +656,30 @@ def portfolio_panel_totals_line(
     totals: PortfolioPanelTotals | None,
     *,
     live_pick: bool = False,
+    mode: str = "week",
 ) -> str:
-    """Equal-weight P/L for last week's Top N and current week's running picks."""
+    """Equal-weight P/L for Was holdings and current Top N picks."""
     from momentum.rrg_portfolio_exits import format_ew_total_pct
 
     if totals is None:
         return ""
     live_tag = " live" if live_pick else ""
+    was_hdr = "Prior day P/L" if mode == "day" else "Last week P/L"
+    pick_hdr = "Day P/L" if mode == "day" else "Current week P/L"
     if totals.was_slots:
         was_part = (
-            f"Last week P/L ({totals.was_slots}): "
+            f"{was_hdr} ({totals.was_slots}): "
             f"{format_ew_total_pct(totals.was_ew_pct)}"
         )
     else:
-        was_part = "Last week P/L: —"
+        was_part = f"{was_hdr}: —"
     if totals.pick_slots:
         pick_part = (
-            f"Current week P/L ({totals.pick_slots}){live_tag}: "
+            f"{pick_hdr} ({totals.pick_slots}){live_tag}: "
             f"{format_ew_total_pct(totals.pick_ew_pct)}"
         )
     else:
-        pick_part = f"Current week P/L{live_tag}: —"
+        pick_part = f"{pick_hdr}{live_tag}: —"
     return f"{was_part}  ·  {pick_part}"
 
 
@@ -658,12 +693,19 @@ def portfolio_panel_dates_line(
     exit_below_9ema: bool = False,
     subtitle: str = "",
     exits_through_label: str | None = None,
+    mode: str = "week",
 ) -> str:
     if exit_below_9ema:
         through = exits_through_label or rebalance_label
         exits_note = f" · Exits through {through}"
     else:
         exits_note = ""
+    if mode == "day":
+        pick_part = pick_shortfall or f"Top N {rebal_n} today"
+        return (
+            f"As of {rebalance_label}  ·  Was {was_n} from {was_label}  ·  "
+            f"{pick_part} (★ order){exits_note}  ·  {subtitle}"
+        )
     pick_part = pick_shortfall or f"Top N {rebal_n} this week"
     return (
         f"Rebalance {rebalance_label}  ·  Was {was_n} from {was_label}  ·  "

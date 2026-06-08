@@ -12,8 +12,9 @@ import tkinter as tk
 import tkinter.font as tkfont
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import FancyArrowPatch
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
+from momentum.rrg_busy import RrgBusyOverlay
 from momentum.rrg_portfolio_panel import (
     PORTFOLIO_PANEL_NUM_COLS,
     PORTFOLIO_PANEL_PICK_GRID_ROW,
@@ -104,10 +105,11 @@ class RrgAppConfig:
     side_cheat_sheet_title: str = "Swing trading cheat sheet"
     side_cheat_sheet: tuple[tuple[str, tuple[str, ...]], ...] | None = None
     etf_table_extras: bool = False
+    preview_today_picks: bool = True  # Week unit: daily preview checkbox (US/India ETF/stock)
     etf_recommend_profile: str = "us"  # "us" | "india" | "stock"
     etf_recommend_count: int = 7
     etf_recommend_title: str = "Recommended Top 7 (weekly swing)"
-    pick_strategy: str = "recommend"
+    pick_strategy: str = "leading_improved"
     hold_until_rank_exit: bool = False
     max_hold_rank: int = 10
     exit_below_9ema: bool = True
@@ -139,6 +141,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     hover_points = []
     _last_hover_idx = None
     _history_cache: dict[str, dict[str, pd.Series]] = {}
+    _daily_pick_rrg_cache: tuple | None = None
     indices_data = pd.DataFrame()
     benchmark_data = pd.Series(dtype=float)
 
@@ -159,14 +162,56 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         else indices.copy()
     )
 
+    root = tk.Tk()
+    root.withdraw()
+    root.title(config.window_title)
+    root.geometry(
+        '1600x900'
+        if use_right_extras
+        else ('1400x900' if config.top_movers_panel else '1100x900')
+    )
+    root.minsize(
+        1280 if use_right_extras else (1280 if config.top_movers_panel else 900),
+        650,
+    )
+    root.resizable(True, True)
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+    _busy = RrgBusyOverlay(root)
+    root.deiconify()
+    root.update_idletasks()
+
     def _histories_for_unit(unit: str) -> dict[str, pd.Series]:
         u = rrg_normalize_bar_unit(unit)
         if u not in _history_cache:
+            unit_lbl = "daily" if u == "day" else "weekly"
             min_pts = rrg_min_history_bars(window, u)
-            _history_cache[u] = config.load_all_histories(
-                period, min_pts, window, freq=u
+
+            def _load() -> dict[str, pd.Series]:
+                return config.load_all_histories(period, min_pts, window, freq=u)
+
+            _history_cache[u] = _busy.run_threaded(
+                _load, f"Downloading {unit_lbl} price data…"
             )
         return _history_cache[u]
+
+    def _day_unit_slider_calendar() -> pd.DatetimeIndex:
+        """Union of all daily bar dates (benchmark, universe, CM/Yahoo)."""
+        dates: set[pd.Timestamp] = set()
+        bench = benchmark_data.dropna().sort_index()
+        if len(bench):
+            dates.update(pd.DatetimeIndex(bench.index))
+        for col in indices:
+            if col in indices_data.columns:
+                series = indices_data[col].dropna().sort_index()
+                if len(series):
+                    dates.update(pd.DatetimeIndex(series.index))
+        for series in _etf_daily_close.values():
+            if series is not None and len(series):
+                dates.update(pd.DatetimeIndex(series.dropna().index))
+        if not dates:
+            return pd.DatetimeIndex([])
+        return pd.DatetimeIndex(sorted(dates))
 
     def _build_rrg_date_index():
         """Bar dates for the Date slider (analysis window + tail buffer)."""
@@ -174,10 +219,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
         daily_sources = None
         if bar_unit == "day":
-            daily_sources = [
-                _etf_daily_close.get(sym, pd.Series(dtype=float))
-                for sym in indices
-            ]
+            cal = _day_unit_slider_calendar()
+            if len(cal):
+                daily_sources = [pd.Series(0.0, index=cal)]
+            else:
+                daily_sources = [
+                    indices_data[col].dropna().sort_index()
+                    for col in indices
+                    if col in indices_data.columns and indices_data[col].notna().any()
+                ]
         return rrg_build_slider_date_index(
             benchmark_data,
             analysis_period=period,
@@ -286,10 +336,13 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
     etf_vol_by_row: dict[int, float] = {}
     if config.etf_table_extras and indices:
-        if config.etf_recommend_profile == "india":
-            print("Loading 63-day Vol% for India ETF table...")
-            try:
-                from momentum.etf.india_rrg_recommendations import load_india_etf_vol_pct
+        def _load_vol() -> dict[int, float]:
+            vol: dict[int, float] = {}
+            if config.etf_recommend_profile == "india":
+                print("Loading 63-day Vol% for India ETF table...")
+                from momentum.etf.india_rrg_recommendations import (
+                    load_india_etf_vol_pct,
+                )
 
                 vol_by_ref = load_india_etf_vol_pct(
                     indices,
@@ -301,23 +354,21 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     ref = (
                         index_metadata["ref_label"][j] or indices[j]
                     ).upper().replace(".NS", "")
-                    etf_vol_by_row[j] = vol_by_ref.get(ref, 0.0)
-            except Exception as exc:
-                print(f"Vol% load skipped: {exc}")
-        elif config.etf_recommend_profile == "stock":
-            print("Loading 63-day Vol% for stock table...")
-            try:
-                from momentum.stock.stock_rrg_recommendations import load_stock_vol_pct
+                    vol[j] = vol_by_ref.get(ref, 0.0)
+            elif config.etf_recommend_profile == "stock":
+                print("Loading 63-day Vol% for stock table...")
+                from momentum.stock.stock_rrg_recommendations import (
+                    load_stock_vol_pct,
+                )
 
-                vol_by_ref = load_stock_vol_pct(indices, vol_days=63, history_days=120)
+                vol_by_ref = load_stock_vol_pct(
+                    indices, vol_days=63, history_days=120
+                )
                 for j in range(len(indices)):
                     sym = indices[j].upper().replace(".NS", "")
-                    etf_vol_by_row[j] = vol_by_ref.get(sym, 0.0)
-            except Exception as exc:
-                print(f"Vol% load skipped: {exc}")
-        else:
-            print("Loading 63-day Vol% for US ETF table...")
-            try:
+                    vol[j] = vol_by_ref.get(sym, 0.0)
+            else:
+                print("Loading 63-day Vol% for US ETF table...")
                 from momentum.etf.us_liquid_screener import _fetch_metrics
 
                 vol_metrics = _fetch_metrics(
@@ -329,9 +380,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 )
                 for j, sym in enumerate(indices):
                     if sym in vol_metrics:
-                        etf_vol_by_row[j] = vol_metrics[sym][1]
-            except Exception as exc:
-                print(f"Vol% load skipped: {exc}")
+                        vol[j] = vol_metrics[sym][1]
+            return vol
+
+        try:
+            etf_vol_by_row.update(
+                _busy.run_threaded(_load_vol, "Loading volatility data…")
+            )
+        except Exception as exc:
+            print(f"Vol% load skipped: {exc}")
 
     _etf_daily_close: dict[str, pd.Series] = {}
 
@@ -341,81 +398,93 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             return
         if force:
             _etf_daily_close.clear()
-        from datetime import timedelta
-
-        from utils.nse_bhavcopy import today_ist
-
-        end_d = today_ist()
-        start_d = (_rrg_index[0].date() if len(_rrg_index) else end_d) - timedelta(
-            days=400
+        profile_msgs = {
+            "india": "Downloading NSE ETF daily EOD…",
+            "stock": "Downloading NSE stock daily EOD…",
+            "us": "Downloading US ETF daily EOD (Yahoo)…",
+        }
+        msg = profile_msgs.get(
+            config.etf_recommend_profile, "Downloading daily EOD…"
         )
-        if config.etf_recommend_profile == "india":
-            from utils.nse_bhavcopy import load_nse_cm_histories_range
 
-            syms = {
-                (index_metadata["ref_label"][j] or indices[j])
-                .strip()
-                .upper()
-                .replace(".NS", "")
-                for j in range(len(indices))
-            }
-            syms.discard("")
-            print(
-                f"Loading NSE ETF daily CM (bhavcopy) for "
-                f"{len(syms)} symbol(s)..."
+        def _download_daily() -> dict[str, pd.Series]:
+            from datetime import timedelta
+
+            from utils.nse_bhavcopy import today_ist
+
+            out: dict[str, pd.Series] = {}
+            end_d = today_ist()
+            start_d = (_rrg_index[0].date() if len(_rrg_index) else end_d) - timedelta(
+                days=400
             )
-            batch = load_nse_cm_histories_range(
-                sorted(syms),
-                start_d,
-                end_d,
-                min_points=5,
-                quiet=True,
-                asset_label="ETF symbol",
-                freq="day",
-            )
+            if config.etf_recommend_profile == "india":
+                from utils.nse_bhavcopy import load_nse_cm_histories_range
+
+                syms = {
+                    (index_metadata["ref_label"][j] or indices[j])
+                    .strip()
+                    .upper()
+                    .replace(".NS", "")
+                    for j in range(len(indices))
+                }
+                syms.discard("")
+                print(
+                    f"Loading NSE ETF daily CM (bhavcopy) for "
+                    f"{len(syms)} symbol(s)..."
+                )
+                batch = load_nse_cm_histories_range(
+                    sorted(syms),
+                    start_d,
+                    end_d,
+                    min_points=5,
+                    quiet=True,
+                    asset_label="ETF symbol",
+                    freq="day",
+                )
+            elif config.etf_recommend_profile == "stock":
+                from utils.nse_bhavcopy import load_nse_cm_histories_range
+
+                syms = {
+                    indices[j].strip().upper().replace(".NS", "")
+                    for j in range(len(indices))
+                }
+                syms.discard("")
+                print(
+                    f"Loading NSE stock daily CM (bhavcopy) for "
+                    f"{len(syms)} symbol(s)..."
+                )
+                batch = load_nse_cm_histories_range(
+                    sorted(syms),
+                    start_d,
+                    end_d,
+                    min_points=5,
+                    quiet=True,
+                    asset_label="equity symbol",
+                    freq="day",
+                )
+            else:
+                from utils.yahoo_weekly import load_yahoo_histories_range
+
+                tickers = list(dict.fromkeys([*indices, config.benchmark_nse]))
+                print(
+                    f"Loading Yahoo daily for {len(tickers)} US ticker(s) "
+                    f"(incl. benchmark {config.benchmark_nse})..."
+                )
+                batch = load_yahoo_histories_range(
+                    tickers,
+                    start_d,
+                    end_d,
+                    min_points=5,
+                    quiet=True,
+                    freq="day",
+                )
             for sym, series in batch.items():
                 if len(series):
-                    _etf_daily_close[sym] = series.sort_index()
-        elif config.etf_recommend_profile == "stock":
-            from utils.nse_bhavcopy import load_nse_cm_histories_range
+                    out[sym] = series.sort_index()
+            return out
 
-            syms = {
-                indices[j].strip().upper().replace(".NS", "")
-                for j in range(len(indices))
-            }
-            syms.discard("")
-            print(
-                f"Loading NSE stock daily CM (bhavcopy) for "
-                f"{len(syms)} symbol(s)..."
-            )
-            batch = load_nse_cm_histories_range(
-                sorted(syms),
-                start_d,
-                end_d,
-                min_points=5,
-                quiet=True,
-                asset_label="equity symbol",
-                freq="day",
-            )
-            for sym, series in batch.items():
-                if len(series):
-                    _etf_daily_close[sym] = series.sort_index()
-        else:
-            from utils.yahoo_weekly import load_yahoo_histories_range
-
-            tickers = [t for t in indices if t != config.benchmark_nse]
-            print(f"Loading daily prices for {len(tickers)} ticker(s)...")
-            batch = load_yahoo_histories_range(
-                tickers,
-                start_d,
-                end_d,
-                min_points=5,
-                quiet=True,
-                freq="day",
-            )
-            for sym, series in batch.items():
-                if len(series):
-                    _etf_daily_close[sym] = series.sort_index()
+        loaded = _busy.run_threaded(_download_daily, msg)
+        _etf_daily_close.update(loaded)
 
     if config.etf_table_extras or config.exit_below_9ema:
         _load_etf_daily_close_data()
@@ -434,15 +503,6 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             rsr_tickers[i] = rsr
             rsr_roc_tickers[i] = rsr_roc
             rsm_tickers[i] = rsm
-
-    root = tk.Tk()
-    root.withdraw()
-    root.title(config.window_title)
-    root.geometry('1600x900' if use_right_extras else ('1400x900' if config.top_movers_panel else '1100x900'))
-    root.minsize(1280 if use_right_extras else (1280 if config.top_movers_panel else 900), 650)
-    root.resizable(True, True)
-    root.columnconfigure(0, weight=1)
-    root.rowconfigure(0, weight=1)
 
     main_pane = ttk.PanedWindow(root, orient=tk.VERTICAL)
     main_pane.grid(row=0, column=0, sticky='nsew')
@@ -774,6 +834,13 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         date_value_label.config(text=format_date_label(end_date_idx))
         redraw_chart()
 
+    def step_to_latest():
+        nonlocal end_date_idx
+        end_date_idx = _date_slider_max_idx()
+        date_scale.set(end_date_idx)
+        date_value_label.config(text=format_date_label(end_date_idx))
+        redraw_chart()
+
     week_nav_frame = tk.Frame(controls_frame)
     week_nav_frame.pack(side=tk.LEFT, padx=(0, 12), anchor='n')
     prev_week_button = ttk.Button(
@@ -781,7 +848,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     )
     prev_week_button.pack(side=tk.TOP, fill=tk.X, pady=(0, 2))
     next_week_button = ttk.Button(week_nav_frame, text='Next Week', command=step_next_week)
-    next_week_button.pack(side=tk.TOP, fill=tk.X)
+    next_week_button.pack(side=tk.TOP, fill=tk.X, pady=(0, 2))
+    ttk.Button(week_nav_frame, text='Latest', command=step_to_latest).pack(
+        side=tk.TOP, fill=tk.X
+    )
 
     def _sync_select_all_checkbox():
         if not checkbox_vars:
@@ -845,6 +915,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     max_hold_rank_var = tk.IntVar(value=config.max_hold_rank)
     portfolio_n_var: tk.IntVar | None = tk.IntVar(value=config.etf_recommend_count)
     pick_auto_show_var = tk.BooleanVar(value=True)
+    preview_today_picks_var = tk.BooleanVar(value=False)
+    preview_today_cb = None
     _pick_label_to_key: dict[str, str] = {}
 
     def _portfolio_top_n() -> int:
@@ -915,10 +987,16 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             )
 
         _pick_label_to_key = {label: key for key, label in PICK_STRATEGIES.items()}
-        pick_strategy_var.set(PICK_STRATEGIES.get(config.pick_strategy, PICK_STRATEGIES["recommend"]))
+        pick_strategy_var.set(
+            PICK_STRATEGIES.get(
+                config.pick_strategy, PICK_STRATEGIES["leading_improved"]
+            )
+        )
 
         def _pick_strategy_key() -> str:
-            return _pick_label_to_key.get(pick_strategy_var.get(), "recommend")
+            return _pick_label_to_key.get(
+                pick_strategy_var.get(), config.pick_strategy
+            )
 
         def _clear_pick_cache() -> None:
             _pick_holdings_cache.clear()
@@ -979,6 +1057,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             variable=pick_auto_show_var,
         )
         pick_auto_show_cb.pack(side=tk.LEFT, padx=(0, 8))
+        preview_today_cb = ttk.Checkbutton(
+            pick_row,
+            text="Preview today's picks",
+            variable=preview_today_picks_var,
+        )
+        preview_today_cb.pack(side=tk.LEFT, padx=(0, 8))
     else:
         def _pick_strategy_key() -> str:
             return "recommend"
@@ -995,7 +1079,19 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         max_rank_spin = None
         hold_rank_cb = None
         pick_auto_show_cb = None
+        preview_today_cb = None
         portfolio_n_var = None
+
+    def _sync_preview_pick_ui() -> None:
+        if preview_today_cb is None:
+            return
+        if bar_unit == "week" and config.preview_today_picks:
+            preview_today_cb.pack(side=tk.LEFT, padx=(0, 8))
+        else:
+            if preview_today_picks_var.get():
+                preview_today_picks_var.set(False)
+            preview_today_cb.pack_forget()
+        _sync_recommend_panel_visibility()
 
     if config.backtest_enabled:
         def open_backtest():
@@ -1119,6 +1215,14 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         date_row, text=_date_range_hint_text(), anchor='w', fg='gray', font=('Arial', 9)
     )
     date_range_label.pack(side=tk.LEFT, padx=(4, 0))
+    preview_status_label = tk.Label(
+        date_row,
+        text='',
+        anchor='w',
+        fg='#1b5e20',
+        font=('Arial', 9, 'bold'),
+    )
+    preview_status_label.pack(side=tk.LEFT, padx=(8, 0))
 
     calc_row = tk.Frame(controls_frame)
     calc_row.pack(side=tk.TOP, fill=tk.X, pady=(2, 0))
@@ -1141,6 +1245,19 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         end_i = int(date_scale.get())
         tail_n = int(float(tail_scale.get()))
         unit_plural = 'days' if bar_unit == 'day' else 'weeks'
+        if _preview_today_enabled():
+            ctx = _preview_ranking_context()
+            if ctx is not None:
+                preview_end, preview_start = ctx[0], ctx[1]
+                tail_d = _preview_tail_trading_days()
+                calc_context_label.config(
+                    text=(
+                        f'Preview = Day unit @ {rrg_format_date(preview_end)}: '
+                        f'Chg% {rrg_format_date(preview_start)}→'
+                        f'{rrg_format_date(preview_end)} (Tail {tail_d})'
+                    )
+                )
+                return
         if end_i < tail_n:
             calc_context_label.config(
                 text=(
@@ -1458,7 +1575,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     ).pack(fill=tk.X, anchor='w', padx=(8, 0), pady=(1, 0))
 
     recommend_panel = None
+    recommend_title_label: tk.Label | None = None
     recommend_dates_label = None
+    recommend_rec_canvas: tk.Canvas | None = None
     recommend_row_widgets: list[dict[str, tk.Label]] = []
     recommend_copy_grid: dict | None = None
     recommend_exits_label: tk.Label | None = None
@@ -1467,12 +1586,12 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     movers_pick_copy_grid: dict | None = None
 
     def _build_recommend_panel(parent: tk.Frame, *, pack_mode: str | None) -> None:
-        nonlocal recommend_panel, recommend_dates_label, recommend_copy_grid
-        nonlocal recommend_exits_label
+        nonlocal recommend_panel, recommend_title_label, recommend_dates_label
+        nonlocal recommend_copy_grid, recommend_exits_label, recommend_rec_canvas
         recommend_panel = tk.Frame(
             parent,
-            padx=6,
-            pady=4,
+            padx=4,
+            pady=2,
             relief=tk.GROOVE,
             borderwidth=1,
         )
@@ -1485,32 +1604,30 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 side=tk.LEFT, anchor='nw', fill=tk.BOTH, expand=True
             )
 
-        tk.Label(
+        recommend_title_label = tk.Label(
             recommend_panel,
-            text=config.etf_recommend_title,
+            text="Preview today's Top N (daily)",
             font=('Arial', 10, 'bold'),
             anchor='w',
-        ).pack(fill=tk.X)
+        )
+        recommend_title_label.pack(fill=tk.X)
         recommend_dates_label = tk.Label(
             recommend_panel,
-            text="Leading/Improving · Rank Δ>0 · momentum+reliability score",
-            font=('Arial', 9),
+            text="",
+            font=('Arial', 8),
             anchor='w',
             fg='gray',
             justify=tk.LEFT,
         )
-        recommend_dates_label.pack(fill=tk.X, pady=(0, 4))
+        recommend_dates_label.pack(fill=tk.X, pady=(0, 2))
 
-        rec_scroll_x = tk.Scrollbar(recommend_panel, orient=tk.HORIZONTAL)
         rec_canvas = tk.Canvas(
             recommend_panel,
             highlightthickness=0,
-            height=24 * (_PORTFOLIO_N_MAX + 1) + 8,
-            xscrollcommand=rec_scroll_x.set,
+            height=22 * 2 + 4,
         )
-        rec_scroll_x.config(command=rec_canvas.xview)
-        rec_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-        rec_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        recommend_rec_canvas = rec_canvas
+        rec_canvas.pack(side=tk.TOP, fill=tk.X)
 
         rec_table = tk.Frame(rec_canvas)
         _rec_table_win = rec_canvas.create_window((0, 0), window=rec_table, anchor='nw')
@@ -1528,20 +1645,14 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
         _rec_col_specs: tuple[tuple[str, str, str, int], ...] = (
             ('rank', '#', 'e', 22),
-            ('ticker', 'Ticker', 'w', 82),
+            ('ticker', 'Ticker', 'w', 78),
             ('name', 'Name', 'w', 110),
-            ('vol', 'Vol%', 'e', 36),
             ('rank_delta', 'Rank Δ', 'e', 44),
             ('change', 'Chg%', 'e', 48),
-            ('quadrant', 'Quad', 'w', 76),
-            ('size', 'Size', 'w', 58),
-            ('reason', 'Reason', 'w', 380),
         )
         rec_header_cells: list[tk.Label] = []
         for col, (_key, header, anchor, min_px) in enumerate(_rec_col_specs):
-            rec_table.columnconfigure(
-                col, minsize=min_px, weight=1 if _key == 'reason' else 0
-            )
+            rec_table.columnconfigure(col, minsize=min_px, weight=0)
             hdr = tk.Label(
                 rec_table,
                 text=header,
@@ -1549,20 +1660,17 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 anchor=anchor,
                 relief=tk.RIDGE,
             )
-            hdr.grid(row=0, column=col, sticky='ew', padx=2, pady=1)
+            hdr.grid(row=0, column=col, sticky='ew', padx=1, pady=0)
             rec_header_cells.append(hdr)
 
         rec_body_cells: list[list[tk.Label]] = []
         for slot in range(_PORTFOLIO_N_MAX):
             widgets: dict[str, tk.Label] = {}
-            grid_row = slot + 1
             row_cells: list[tk.Label] = []
             for col, (key, _header, anchor, _min_px) in enumerate(_rec_col_specs):
-                font = ('Arial', 8) if key == 'reason' else ('Arial', 9)
                 lbl = tk.Label(
-                    rec_table, font=font, anchor=anchor, relief=tk.RIDGE
+                    rec_table, font=('Arial', 9), anchor=anchor, relief=tk.RIDGE
                 )
-                lbl.grid(row=grid_row, column=col, sticky='ew', padx=2, pady=1)
                 widgets[key] = lbl
                 row_cells.append(lbl)
             recommend_row_widgets.append(widgets)
@@ -1571,15 +1679,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         tc = TableRegionCopy.for_window(root)
         recommend_copy_grid = tc.register_grid([rec_header_cells, *rec_body_cells])
 
-        recommend_exits_label = tk.Label(
-            recommend_panel,
-            text="",
-            font=("Arial", 8),
-            anchor="nw",
-            fg="#5d4037",
-            justify=tk.LEFT,
-            wraplength=520,
-        )
+        recommend_exits_label = None
 
     if use_right_extras and side_content is not None:
         _bind_side_mousewheel(
@@ -1598,11 +1698,35 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     scroll_wrap.columnconfigure(0, weight=1)
     scroll_wrap.rowconfigure(1, weight=1)
 
-    if config.etf_table_extras and not use_right_extras:
-        _build_recommend_panel(scroll_wrap, pack_mode=None)
-        recommend_panel.grid(
-            row=2, column=0, columnspan=2, sticky='ew', padx=4, pady=(4, 2)
+    def _sync_recommend_panel_visibility() -> None:
+        """3rd table: Week + Preview only; hidden on Day unit."""
+        if recommend_panel is None:
+            return
+        show = (
+            bar_unit == "week"
+            and config.preview_today_picks
+            and preview_today_picks_var.get()
         )
+        if use_right_extras:
+            if show:
+                recommend_panel.pack(
+                    side=tk.TOP, anchor='nw', fill=tk.X, pady=(4, 0)
+                )
+            else:
+                recommend_panel.pack_forget()
+        elif show:
+            recommend_panel.grid(
+                row=2, column=0, columnspan=2, sticky='ew', padx=4, pady=(4, 2)
+            )
+        else:
+            recommend_panel.grid_remove()
+
+    if config.etf_table_extras and use_right_extras and side_content is not None:
+        _build_recommend_panel(side_content, pack_mode='top')
+        recommend_panel.pack_forget()
+    elif config.etf_table_extras and not use_right_extras:
+        _build_recommend_panel(scroll_wrap, pack_mode=None)
+        recommend_panel.grid_remove()
         scroll_wrap.rowconfigure(2, weight=0)
 
     _HEADER_ROW_PX = 40
@@ -1997,6 +2121,644 @@ def run_rrg_app(config: RrgAppConfig) -> None:
 
         return ranked_row_indices(len(indices), change_pct_fn)
 
+    def _preview_today_enabled() -> bool:
+        return (
+            bar_unit == "week"
+            and config.preview_today_picks
+            and preview_today_picks_var.get()
+        )
+
+    def _preview_data_stale() -> bool:
+        weekly_end = (
+            pd.Timestamp(_rrg_index[-1]).normalize().date()
+            if len(_rrg_index)
+            else None
+        )
+        max_daily = None
+        for series in _etf_daily_close.values():
+            if series is not None and len(series):
+                d = pd.Timestamp(series.index[-1]).normalize().date()
+                if max_daily is None or d > max_daily:
+                    max_daily = d
+        day_hist = _history_cache.get("day", {})
+        bench = day_hist.get(config.benchmark_nse, pd.Series(dtype=float))
+        if len(bench):
+            d = pd.Timestamp(bench.index[-1]).normalize().date()
+            if max_daily is None or d > max_daily:
+                max_daily = d
+        if not _etf_daily_close and not len(bench):
+            return True
+        if weekly_end is not None and (max_daily is None or max_daily <= weekly_end):
+            return True
+        return False
+
+    def _invalidate_daily_pick_rrg() -> None:
+        nonlocal _daily_pick_rrg_cache
+        _daily_pick_rrg_cache = None
+
+    def _refresh_preview_market_data() -> None:
+        """Refresh daily prices for preview (US Yahoo / India & stock NSE CM)."""
+        profile = config.etf_recommend_profile
+        print(f"RRG: refreshing daily EOD for preview ({profile})...")
+        with _busy.busy("Refreshing daily preview data…"):
+            _history_cache.pop("day", None)
+            _invalidate_daily_pick_rrg()
+            _load_etf_daily_close_data(force=True)
+            _histories_for_unit("day")
+
+    def _ensure_preview_day_histories() -> bool:
+        """Load/refresh daily EOD for preview (US / India ETF / stock)."""
+        if _preview_data_stale():
+            _refresh_preview_market_data()
+        elif "day" not in _history_cache:
+            _histories_for_unit("day")
+        return len(_preview_daily_calendar()) >= 2
+
+    def _daily_benchmark_calendar() -> pd.DatetimeIndex:
+        bench = (
+            _histories_for_unit("day")
+            .get(config.benchmark_nse, pd.Series(dtype=float))
+            .dropna()
+            .sort_index()
+        )
+        return pd.DatetimeIndex(bench.index)
+
+    def _preview_daily_calendar() -> pd.DatetimeIndex:
+        """Latest trading dates from benchmark, universe day bars, and CM/Yahoo daily."""
+        dates: set[pd.Timestamp] = set()
+        day_hist = _history_cache.get("day", {})
+        bench = day_hist.get(config.benchmark_nse, pd.Series(dtype=float))
+        if len(bench):
+            dates.update(pd.DatetimeIndex(bench.dropna().index))
+        for name in indices:
+            series = day_hist.get(name, pd.Series(dtype=float))
+            if len(series):
+                dates.update(pd.DatetimeIndex(series.dropna().index))
+        for series in _etf_daily_close.values():
+            if series is not None and len(series):
+                dates.update(pd.DatetimeIndex(series.dropna().index))
+        if not dates:
+            return pd.DatetimeIndex([])
+        return pd.DatetimeIndex(sorted(dates))
+
+    def _daily_price_for_row(row_idx: int) -> pd.Series:
+        """Daily close series for preview ranking (CM/Yahoo preferred for tradables)."""
+        name = indices[row_idx]
+        if name == config.benchmark_nse:
+            bench = _history_cache.get("day", {}).get(
+                config.benchmark_nse, pd.Series(dtype=float)
+            )
+            if len(bench):
+                return bench
+            if name in _etf_daily_close and len(_etf_daily_close[name]):
+                return _etf_daily_close[name]
+        if config.etf_recommend_profile == "india":
+            ref = (
+                (index_metadata["ref_label"][row_idx] or name)
+                .strip()
+                .upper()
+                .replace(".NS", "")
+            )
+            if ref in _etf_daily_close and len(_etf_daily_close[ref]):
+                return _etf_daily_close[ref]
+        elif config.etf_recommend_profile == "stock":
+            sym = name.strip().upper().replace(".NS", "")
+            if sym in _etf_daily_close and len(_etf_daily_close[sym]):
+                return _etf_daily_close[sym]
+        else:
+            if name in _etf_daily_close and len(_etf_daily_close[name]):
+                return _etf_daily_close[name]
+        return _histories_for_unit("day").get(name, pd.Series(dtype=float))
+
+    def _preview_live_close_map() -> dict[str, float] | None:
+        return live_close_for_panel(
+            config.etf_recommend_profile,
+            etf_daily_close=_etf_daily_close,
+            at_latest_bar=True,
+        )
+
+    def _preview_row_mark_price(row_idx: int, end_ts: pd.Timestamp) -> float | None:
+        series = _daily_price_for_row(row_idx)
+        if not len(series):
+            return None
+        mark = pd.Timestamp(end_ts).normalize()
+        last_bar = pd.Timestamp(series.index[-1]).normalize()
+        live = _preview_live_close_map()
+        if live:
+            if config.etf_recommend_profile == "india":
+                key = (
+                    (index_metadata["ref_label"][row_idx] or indices[row_idx])
+                    .strip()
+                    .upper()
+                    .replace(".NS", "")
+                )
+            elif config.etf_recommend_profile == "stock":
+                key = indices[row_idx].strip().upper().replace(".NS", "")
+            else:
+                key = indices[row_idx]
+            px = live.get(key)
+            if px and mark > last_bar:
+                return float(px)
+        try:
+            return float(series_at(series, end_ts))
+        except (KeyError, TypeError, ValueError, IndexError):
+            return None
+
+    def _preview_tail_change_pct(row_idx: int, start_ts, end_ts) -> float:
+        series = _daily_price_for_row(row_idx)
+        if not len(series):
+            return float("-inf")
+        try:
+            p_start = float(series_at(series, start_ts))
+            p_end = _preview_row_mark_price(row_idx, end_ts)
+            if p_end is None or p_start == 0:
+                return float("-inf")
+            return (p_end - p_start) / p_start * 100
+        except (KeyError, TypeError, ValueError, IndexError):
+            return float("-inf")
+
+    def _update_preview_status_label() -> None:
+        if preview_status_label is None:
+            return
+        if not preview_today_picks_var.get() or bar_unit != "week":
+            preview_status_label.config(text='')
+            return
+        if not _ensure_preview_day_histories():
+            preview_status_label.config(
+                text='Preview ON — daily data unavailable',
+                fg='#b71c1c',
+            )
+            return
+        cal = _preview_daily_calendar()
+        if len(cal) < 2:
+            preview_status_label.config(
+                text='Preview ON — daily data unavailable',
+                fg='#b71c1c',
+            )
+            return
+        end_ts = pd.Timestamp(cal[-1])
+        slider_ts = pd.Timestamp(_rrg_index[int(date_scale.get())])
+        extra = ''
+        if end_ts.normalize() > slider_ts.normalize():
+            extra = f' (newer than weekly {rrg_format_date(slider_ts)})'
+        preview_status_label.config(
+            text=f'PREVIEW · daily as of {rrg_format_date(end_ts)}{extra}',
+            fg='#1b5e20',
+        )
+
+    def _trading_days_back(
+        cal: pd.DatetimeIndex, end_ts: pd.Timestamp, n_days: int
+    ) -> pd.Timestamp:
+        if not len(cal) or n_days < 0:
+            return pd.Timestamp(end_ts)
+        sub = cal[cal <= pd.Timestamp(end_ts)]
+        if not len(sub):
+            return pd.Timestamp(end_ts)
+        idx = len(sub) - 1 - n_days
+        if idx < 0:
+            return pd.Timestamp(sub[0])
+        return pd.Timestamp(sub[idx])
+
+    def _preview_tail_trading_days() -> int:
+        """Match Day unit: Tail 1 = 1 trading day (not week×5)."""
+        return max(1, tail)
+
+    def _daily_pick_calendar() -> pd.DatetimeIndex:
+        """Same bar dates as Day-unit slider (for preview ↔ day sync)."""
+        if bar_unit == "day" and len(_rrg_index):
+            return _rrg_index
+        if not _ensure_preview_day_histories():
+            return pd.DatetimeIndex([])
+        from momentum.rrg_core import rrg_build_slider_date_index
+
+        day_hist = _histories_for_unit("day")
+        bench = day_hist.get(config.benchmark_nse, pd.Series(dtype=float))
+        if not len(bench.dropna()):
+            return pd.DatetimeIndex([])
+        sources = [
+            _daily_price_for_row(j).dropna().sort_index()
+            for j in range(len(indices))
+        ]
+        return rrg_build_slider_date_index(
+            bench.dropna().sort_index(),
+            analysis_period=period,
+            window=window,
+            unit="day",
+            daily_sources=[s for s in sources if len(s)],
+        )
+
+    def _ensure_daily_pick_rrg() -> tuple[list, list] | None:
+        """Daily RSR/RSM (Day unit). On week unit builds overlay for preview."""
+        nonlocal _daily_pick_rrg_cache
+        if bar_unit == "day":
+            return rsr_tickers, rsm_tickers
+        if not _ensure_preview_day_histories():
+            return None
+        day_hist = _histories_for_unit("day")
+        bench = day_hist.get(config.benchmark_nse, pd.Series(dtype=float))
+        if bench is None or not len(bench.dropna()):
+            return None
+        bench = bench.dropna().sort_index()
+        eff = rrg_effective_window(window, "day")
+        cal = _daily_pick_calendar()
+        stamp = (len(indices), eff, pd.Timestamp(cal[-1]) if len(cal) else None, tail)
+        if _daily_pick_rrg_cache is not None and _daily_pick_rrg_cache[0] == stamp:
+            return _daily_pick_rrg_cache[1], _daily_pick_rrg_cache[2]
+        daily_rsr: list = []
+        daily_rsm: list = []
+        empty = pd.Series(dtype=float)
+        for j in range(len(indices)):
+            series = _daily_price_for_row(j).dropna().sort_index()
+            if len(series) <= eff:
+                daily_rsr.append(empty)
+                daily_rsm.append(empty)
+                continue
+            rsr, _, rsm = compute(series, bench, eff)
+            daily_rsr.append(rsr if rsr is not None else empty)
+            daily_rsm.append(rsm if rsm is not None else empty)
+        _daily_pick_rrg_cache = (stamp, daily_rsr, daily_rsm)
+        return daily_rsr, daily_rsm
+
+    def _daily_rsr_rsm_for_panel() -> tuple[list, list]:
+        """Daily RSR/RSM for Day unit + preview (India / US / stock)."""
+        pack = _ensure_daily_pick_rrg()
+        if pack is not None:
+            return pack
+        return rsr_tickers, rsm_tickers
+
+    def _daily_tail_change_at(row_idx: int, start_ts, end_ts) -> float:
+        if bar_unit == "day":
+            return _tail_change_pct(row_idx, start_ts, end_ts)
+        return _preview_tail_change_pct(row_idx, start_ts, end_ts)
+
+    def _daily_pick_context_at(as_of_ts: pd.Timestamp) -> tuple | None:
+        """Ranking context for Day Tail N at ``as_of`` (preview + day unit)."""
+        cal = _daily_pick_calendar()
+        tail_n = max(1, tail)
+        if len(cal) <= tail_n:
+            return None
+        as_of = pd.Timestamp(as_of_ts).normalize()
+        sub = cal[cal <= as_of]
+        if len(sub) <= tail_n:
+            return None
+        end_ts = pd.Timestamp(sub[-1])
+        start_ts = _trading_days_back(cal, end_ts, tail_n)
+        prev_end_ts = start_ts
+        prev_start_ts = _trading_days_back(cal, prev_end_ts, tail_n)
+
+        def chg(j: int, s, e) -> float:
+            return _daily_tail_change_at(j, s, e)
+
+        ranked = sorted(
+            range(len(indices)),
+            key=lambda j: chg(j, start_ts, end_ts),
+            reverse=True,
+        )
+        curr_ranks = rank_by_tail_change(
+            len(indices), lambda j: chg(j, start_ts, end_ts)
+        )
+        prev_ranks = rank_by_tail_change(
+            len(indices), lambda j: chg(j, prev_start_ts, prev_end_ts)
+        )
+        rank_delta_by_row: dict[int, str] = {}
+        for j in ranked:
+            rank_delta_by_row[j] = format_rank_delta(
+                curr_ranks.get(j, len(indices)),
+                prev_ranks.get(j),
+            )
+        return (
+            end_ts,
+            start_ts,
+            ranked,
+            rank_delta_by_row,
+            curr_ranks,
+            prev_ranks,
+        )
+
+    def _daily_prev_holdings_for_pick(end_ts: pd.Timestamp) -> list[str]:
+        if not hold_until_rank_exit_var.get() or bar_unit != "day":
+            return []
+        idx = int(_rrg_index.get_indexer([pd.Timestamp(end_ts).normalize()], method="ffill")[0])
+        if idx <= tail or not _portfolio_cache_enabled():
+            return []
+        if idx - 1 not in _active_holdings_cache:
+            _warm_pick_holdings_cache(idx - 1)
+        if exit_below_9ema_var.get():
+            return list(_active_holdings_cache.get(idx - 1, []))
+        return list(_pick_holdings_cache.get(idx - 1, []))
+
+    def _daily_top_n_picks_at(as_of_ts: pd.Timestamp):
+        """
+        Day-unit Top N at ``as_of`` (strategy + 9 EMA slots).
+        Shared by Day slider and Week+Preview 3rd table.
+        """
+        ctx = _daily_pick_context_at(as_of_ts)
+        if ctx is None:
+            return None
+        end_ts, start_ts, ranked, rank_delta_by_row, curr_ranks, prev_ranks = ctx
+        rrg_pack = _ensure_daily_pick_rrg()
+        if rrg_pack is None:
+            return None
+        daily_rsr, daily_rsm = rrg_pack
+        picks = _compute_picks_at_week(
+            -1,
+            ranked,
+            end_ts,
+            start_ts,
+            rank_delta_by_row,
+            curr_ranks,
+            prev_ranks,
+            prev_holdings=_daily_prev_holdings_for_pick(end_ts),
+            write_cache=False,
+            change_pct_fn=lambda j: _daily_tail_change_at(j, start_ts, end_ts),
+            rsr_series_by_row=daily_rsr,
+            rsm_series_by_row=daily_rsm,
+        )
+        if not picks:
+            return []
+        rebal_strategy = _rebal_tickers_table_order(picks, ranked)
+        if exit_below_9ema_var.get():
+            slots, _ = _rebal_slots_after_9ema(rebal_strategy, end_ts)
+        else:
+            slots = list(rebal_strategy)
+        by_ticker = {p.ticker: p for p in picks}
+        n_port = _portfolio_top_n()
+        out = [by_ticker[t] for t in slots if t and t in by_ticker]
+        return out[:n_port]
+
+    def _daily_strategy_shortfall_hint(
+        end_ts,
+        start_ts,
+        ranked: list[int],
+        rank_delta_by_row: dict[int, str],
+        curr_ranks: dict[int, int],
+        prev_ranks: dict[int, int],
+        daily_rsr: list,
+        daily_rsm: list,
+        picked_n: int,
+    ) -> str:
+        """Why daily preview has fewer than Portfolio N strategy picks."""
+        strategy = _pick_strategy_key()
+        top_n = _portfolio_top_n()
+        max_rank = int(max_hold_rank_var.get())
+
+        def _row_change_pct(j: int) -> float:
+            return _daily_tail_change_at(j, start_ts, end_ts)
+
+        if config.etf_recommend_profile == "india":
+            from momentum.etf.india_rrg_pick_strategies import (
+                IndiaPickContext,
+                pick_shortfall_hint,
+            )
+
+            vol_by_ref = {
+                (index_metadata["ref_label"][j] or indices[j])
+                .upper()
+                .replace(".NS", ""): etf_vol_by_row.get(j, 0.0)
+                for j in range(len(indices))
+            }
+            ctx = IndiaPickContext(
+                ranked_row_indices=ranked,
+                indices=indices,
+                ref_labels=index_metadata["ref_label"],
+                display_labels=index_metadata["display"],
+                vol_by_ref=vol_by_ref,
+                end_ts=end_ts,
+                rsr_series_by_row=daily_rsr,
+                rsm_series_by_row=daily_rsm,
+                rank_delta_by_row=rank_delta_by_row,
+                change_pct_fn=_row_change_pct,
+                series_at_fn=series_at,
+                curr_ranks=curr_ranks,
+                prev_ranks=prev_ranks,
+                top_n=top_n,
+                prev_holdings=[],
+                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                max_hold_rank=max_rank,
+            )
+            return pick_shortfall_hint(strategy, ctx, picked_n)
+
+        if config.etf_recommend_profile == "stock":
+            from momentum.stock.stock_rrg_pick_strategies import (
+                StockPickContext,
+                pick_shortfall_hint,
+            )
+
+            vol_by_ref = {
+                indices[j].upper().replace(".NS", ""): etf_vol_by_row.get(j, 0.0)
+                for j in range(len(indices))
+            }
+            ctx = StockPickContext(
+                ranked_row_indices=ranked,
+                indices=indices,
+                ref_labels=index_metadata["ref_label"],
+                display_labels=index_metadata["display"],
+                vol_by_ref=vol_by_ref,
+                end_ts=end_ts,
+                rsr_series_by_row=daily_rsr,
+                rsm_series_by_row=daily_rsm,
+                rank_delta_by_row=rank_delta_by_row,
+                change_pct_fn=_row_change_pct,
+                series_at_fn=series_at,
+                curr_ranks=curr_ranks,
+                prev_ranks=prev_ranks,
+                top_n=top_n,
+                prev_holdings=[],
+                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                max_hold_rank=max_rank,
+                benchmark=config.benchmark_nse,
+            )
+            return pick_shortfall_hint(strategy, ctx, picked_n)
+
+        from momentum.etf.us_rrg_pick_strategies import (
+            UsPickContext,
+            pick_shortfall_hint,
+        )
+
+        vol_by_ticker = {
+            indices[j]: etf_vol_by_row.get(j, 0.0) for j in range(len(indices))
+        }
+        ctx = UsPickContext(
+            ranked_row_indices=ranked,
+            indices=indices,
+            display_labels=index_metadata["display"],
+            vol_by_ticker=vol_by_ticker,
+            end_ts=end_ts,
+            rsr_series_by_row=daily_rsr,
+            rsm_series_by_row=daily_rsm,
+            rank_delta_by_row=rank_delta_by_row,
+            change_pct_fn=_row_change_pct,
+            series_at_fn=series_at,
+            curr_ranks=curr_ranks,
+            prev_ranks=prev_ranks,
+            top_n=top_n,
+            prev_holdings=[],
+            hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+            max_hold_rank=max_rank,
+        )
+        return pick_shortfall_hint(strategy, ctx, picked_n)
+
+    def _daily_preview_table_picks_at(
+        as_of_ts: pd.Timestamp,
+    ) -> tuple[list | None, str]:
+        """
+        Preview table rows: strategy picks plus 9 EMA skip labels.
+        Day unit Top N still uses ``_daily_top_n_picks_at`` (entered slots only).
+        """
+        from dataclasses import replace
+
+        ctx = _daily_pick_context_at(as_of_ts)
+        if ctx is None:
+            return None, ""
+        end_ts, start_ts, ranked, rank_delta_by_row, curr_ranks, prev_ranks = ctx
+        rrg_pack = _ensure_daily_pick_rrg()
+        if rrg_pack is None:
+            return None, ""
+        daily_rsr, daily_rsm = rrg_pack
+        strategy_picks = _compute_picks_at_week(
+            -1,
+            ranked,
+            end_ts,
+            start_ts,
+            rank_delta_by_row,
+            curr_ranks,
+            prev_ranks,
+            prev_holdings=_daily_prev_holdings_for_pick(end_ts),
+            write_cache=False,
+            change_pct_fn=lambda j: _daily_tail_change_at(j, start_ts, end_ts),
+            rsr_series_by_row=daily_rsr,
+            rsm_series_by_row=daily_rsm,
+        )
+        n_port = _portfolio_top_n()
+        ema_lbl = rrg_format_date(end_ts)
+        if not strategy_picks:
+            hint = _daily_strategy_shortfall_hint(
+                end_ts,
+                start_ts,
+                ranked,
+                rank_delta_by_row,
+                curr_ranks,
+                prev_ranks,
+                daily_rsr,
+                daily_rsm,
+                0,
+            )
+            return [], hint
+
+        rebal_strategy = _rebal_tickers_table_order(strategy_picks, ranked)
+        if exit_below_9ema_var.get():
+            slots, dropped = _rebal_slots_after_9ema(rebal_strategy, end_ts)
+        else:
+            slots = list(rebal_strategy)
+            dropped = []
+        by_ticker = {p.ticker: p for p in strategy_picks}
+        display: list = []
+        for i in range(min(n_port, len(rebal_strategy))):
+            strat = rebal_strategy[i]
+            if strat not in by_ticker:
+                continue
+            slot = slots[i] if i < len(slots) else ""
+            pick = by_ticker[strat]
+            if slot:
+                display.append(pick)
+            elif exit_below_9ema_var.get() and strat in dropped:
+                display.append(
+                    replace(pick, name=f"{pick.name} · 9 EMA @ {ema_lbl}")
+                )
+        entered = sum(1 for t in slots[:n_port] if t)
+        footnote = ""
+        if not display:
+            footnote = _daily_strategy_shortfall_hint(
+                end_ts,
+                start_ts,
+                ranked,
+                rank_delta_by_row,
+                curr_ranks,
+                prev_ranks,
+                daily_rsr,
+                daily_rsm,
+                0,
+            )
+        elif exit_below_9ema_var.get() and entered < len(display):
+            skipped = len(display) - entered
+            footnote = (
+                f"{entered}/{n_port} above 9 EMA — {skipped} skipped @ {ema_lbl}"
+            )
+        return display[:n_port], footnote
+
+    def _preview_panel_state(
+        ctx: tuple | None = None,
+    ) -> tuple[list | None, str] | None:
+        """Preview table 3 rows and optional footnote."""
+        end_ts = ctx[0] if ctx is not None else _preview_latest_daily_ts()
+        if end_ts is None:
+            return None
+        return _daily_preview_table_picks_at(end_ts)
+
+    def _day_tail_pick_context(end_date_idx_local: int) -> tuple | None:
+        """Ranking context at a day-bar index (Day unit Tail N)."""
+        if end_date_idx_local < tail or end_date_idx_local >= len(_rrg_index):
+            return None
+        end_ts = _rrg_index[end_date_idx_local]
+        start_ts = _rrg_index[end_date_idx_local - tail]
+        curr_ranks = _rank_by_row(end_date_idx_local)
+        prev_ranks = (
+            _rank_by_row(end_date_idx_local - 1)
+            if end_date_idx_local > tail
+            else {}
+        )
+        ranked = _ranked_rows_at(end_date_idx_local)
+        rank_delta_by_row: dict[int, str] = {}
+        for j in ranked:
+            rank_delta_by_row[j] = format_rank_delta(
+                curr_ranks.get(j, len(indices)),
+                prev_ranks.get(j),
+            )
+        return (
+            end_ts,
+            start_ts,
+            ranked,
+            rank_delta_by_row,
+            curr_ranks,
+            prev_ranks,
+        )
+
+    def _day_tail_picks(end_date_idx_local: int):
+        ctx = _day_tail_pick_context(end_date_idx_local)
+        if ctx is None:
+            return None
+        end_ts, start_ts, ranked, rank_delta_by_row, curr_ranks, prev_ranks = ctx
+        return _strategy_picks_for_week(
+            end_date_idx_local,
+            ranked,
+            end_ts,
+            start_ts,
+            rank_delta_by_row,
+            curr_ranks,
+            prev_ranks,
+        )
+
+    def _preview_latest_daily_ts() -> pd.Timestamp | None:
+        cal = _daily_pick_calendar()
+        if not len(cal):
+            return None
+        return pd.Timestamp(cal[-1])
+
+    def _preview_ranking_context() -> tuple | None:
+        """Daily rankings as of latest day-bar (same calendar as Day unit)."""
+        latest = _preview_latest_daily_ts()
+        if latest is None:
+            return None
+        return _daily_pick_context_at(latest)
+
+    def _preview_today_picks(ctx: tuple | None = None):
+        """Preview table rows at latest daily bar (includes 9 EMA skip labels)."""
+        state = _preview_panel_state(ctx)
+        if state is None:
+            return None
+        picks, _footnote = state
+        return picks
+
     def _row_index_for_ticker(ticker: str) -> int | None:
         bare = ticker.strip().upper().replace(".NS", "")
         etf_j: int | None = None
@@ -2026,6 +2788,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         """Top N tickers in main-table momentum rank order (same as ★ rows)."""
         by_row = {p.row_idx: p.ticker for p in picks}
         return [by_row[j] for j in ranked if j in by_row]
+
+    def _prior_day_top_n_portfolio(end_date_idx_local: int) -> list[str]:
+        """Prior trading day's Top N (Day unit Was column; all profiles)."""
+        prev_idx = end_date_idx_local - 1
+        if prev_idx < tail or prev_idx < _date_slider_min_idx():
+            return []
+        _ensure_etf_daily_close()
+        picks = _daily_top_n_picks_at(_rrg_index[prev_idx])
+        return [p.ticker for p in picks] if picks else []
 
     def _prior_week_top_n_portfolio(end_date_idx_local: int) -> list[str]:
         """Prior week's Top N list in ★ order (must match that week's Top N column)."""
@@ -2085,6 +2856,37 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             tail,
         )
 
+    def _portfolio_panel_week_idx() -> int:
+        """
+        Weekly bar for Was / Top N tables.
+
+        Week + Preview ON: when daily EOD is newer than the slider, use the
+        weekly bar that contains the latest daily date (e.g. 08-06 → 05-06).
+        """
+        slider_idx = int(date_scale.get())
+        if bar_unit != "week" or not _preview_today_enabled():
+            return slider_idx
+        latest = _preview_latest_daily_ts()
+        if latest is None or not len(_rrg_index):
+            return slider_idx
+        slider_ts = pd.Timestamp(_rrg_index[slider_idx])
+        if latest.normalize() <= slider_ts.normalize():
+            return slider_idx
+        pos = int(_rrg_index.get_indexer([latest.normalize()], method="ffill")[0])
+        if pos < 0:
+            return slider_idx
+        return max(tail, min(pos, len(_rrg_index) - 1))
+
+    def _portfolio_panel_as_of_ts() -> pd.Timestamp:
+        """P/L as-of: latest daily when preview is newer than the weekly slider."""
+        slider_idx = int(date_scale.get())
+        as_of = pd.Timestamp(_rrg_index[slider_idx])
+        if bar_unit == "week" and _preview_today_enabled():
+            latest = _preview_latest_daily_ts()
+            if latest is not None and latest.normalize() > as_of.normalize():
+                return pd.Timestamp(latest)
+        return as_of
+
     def _panel_week_picks(end_date_idx_local: int):
         """Strategy picks at hold-week rebalance (same as portfolio Top N panel)."""
         panel_rebal_idx = _panel_rebal_idx(end_date_idx_local)
@@ -2127,29 +2929,78 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         """Portfolio Was vs Now: prior holdings, rebalance picks, exits with P&L."""
         if not config.top_movers_panel or movers_dates_label is None:
             return
-        end_date_idx_local = int(date_scale.get())
-        panel_rebal_idx = _panel_rebal_idx(end_date_idx_local)
-        panel_end_idx = min(panel_rebal_idx + 1, len(_rrg_index) - 1)
-        panel_rebal_ts = _rrg_index[panel_rebal_idx]
-        panel_end_ts = _rrg_index[panel_end_idx]
-        prev_panel_idx = panel_rebal_idx - 1 if panel_rebal_idx > tail else None
-
-        panel_start_ts = _rrg_index[panel_rebal_idx - tail]
-        panel_curr_ranks = _rank_by_row(panel_rebal_idx)
-        panel_prev_ranks = (
-            _rank_by_row(prev_panel_idx) if prev_panel_idx is not None else {}
+        end_date_idx_local = (
+            _portfolio_panel_week_idx() if bar_unit == "week" else int(date_scale.get())
         )
-        panel_ranked = _ranked_rows_at(panel_rebal_idx)
-        panel_rank_delta: dict[int, str] = {}
-        for j in panel_ranked:
-            panel_rank_delta[j] = format_rank_delta(
-                panel_curr_ranks.get(j, len(indices)),
-                panel_prev_ranks.get(j),
+        if bar_unit == "day":
+            _ensure_etf_daily_close()
+        day_unit_picks = False
+        if bar_unit == "day":
+            current_idx = end_date_idx_local
+            prev_panel_idx = current_idx - 1 if current_idx > tail else None
+            panel_rebal_idx = current_idx
+            panel_end_idx = current_idx
+            panel_rebal_ts = _rrg_index[current_idx]
+            panel_end_ts = _rrg_index[current_idx]
+            panel_start_ts = (
+                _rrg_index[current_idx - tail]
+                if current_idx >= tail
+                else panel_rebal_ts
             )
-
-        if _portfolio_cache_enabled():
-            _warm_pick_holdings_cache(panel_rebal_idx)
-        panel_picks = _panel_week_picks(end_date_idx_local)
+            panel_curr_ranks = {}
+            panel_prev_ranks = {}
+            panel_ranked = []
+            panel_rank_delta = {}
+            panel_picks = None
+            pick_column_picks = []
+            pick_column_ranked = []
+            pick_column_rebal_ts = panel_rebal_ts
+            pick_column_start_ts = panel_start_ts
+            pick_column_rank_delta = {}
+            pick_column_curr_ranks = {}
+            pick_column_prev_ranks = {}
+            as_of = _rrg_index[current_idx]
+            day_ctx = _daily_pick_context_at(as_of)
+            day_picks = _daily_top_n_picks_at(as_of)
+            if day_ctx is not None:
+                (
+                    pick_column_rebal_ts,
+                    pick_column_start_ts,
+                    pick_column_ranked,
+                    pick_column_rank_delta,
+                    pick_column_curr_ranks,
+                    pick_column_prev_ranks,
+                ) = day_ctx
+                pick_column_picks = day_picks or []
+                day_unit_picks = True
+        else:
+            panel_rebal_idx = _panel_rebal_idx(end_date_idx_local)
+            panel_end_idx = min(panel_rebal_idx + 1, len(_rrg_index) - 1)
+            panel_rebal_ts = _rrg_index[panel_rebal_idx]
+            panel_end_ts = _rrg_index[panel_end_idx]
+            prev_panel_idx = panel_rebal_idx - 1 if panel_rebal_idx > tail else None
+            panel_start_ts = _rrg_index[panel_rebal_idx - tail]
+            panel_curr_ranks = _rank_by_row(panel_rebal_idx)
+            panel_prev_ranks = (
+                _rank_by_row(prev_panel_idx) if prev_panel_idx is not None else {}
+            )
+            panel_ranked = _ranked_rows_at(panel_rebal_idx)
+            panel_rank_delta: dict[int, str] = {}
+            for j in panel_ranked:
+                panel_rank_delta[j] = format_rank_delta(
+                    panel_curr_ranks.get(j, len(indices)),
+                    panel_prev_ranks.get(j),
+                )
+            if _portfolio_cache_enabled():
+                _warm_pick_holdings_cache(panel_rebal_idx)
+            panel_picks = _panel_week_picks(end_date_idx_local)
+            pick_column_picks = panel_picks
+            pick_column_ranked = panel_ranked
+            pick_column_rebal_ts = panel_rebal_ts
+            pick_column_start_ts = panel_start_ts
+            pick_column_rank_delta = panel_rank_delta
+            pick_column_curr_ranks = panel_curr_ranks
+            pick_column_prev_ranks = panel_prev_ranks
 
         if config.etf_recommend_profile == "us":
             from momentum.etf.us_rrg_pick_strategies import pick_strategy_label
@@ -2158,16 +3009,30 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         else:
             from momentum.etf.india_rrg_pick_strategies import pick_strategy_label
 
-        prev_portfolio = (
-            _prior_week_top_n_portfolio(panel_rebal_idx)
-            if panel_rebal_idx > tail
-            else []
+        if bar_unit == "day":
+            prev_portfolio = _prior_day_top_n_portfolio(end_date_idx_local)
+        else:
+            prev_portfolio = (
+                _prior_week_top_n_portfolio(panel_rebal_idx)
+                if panel_rebal_idx > tail
+                else []
+            )
+        rebal_strategy = _rebal_tickers_table_order(
+            pick_column_picks, pick_column_ranked
         )
-        rebal_strategy = _rebal_tickers_table_order(panel_picks, panel_ranked)
-        if panel_rebal_idx in _pick_holdings_cache:
+        use_weekly_pick_cache = (
+            bar_unit != "day"
+            and pick_column_picks is panel_picks
+            and panel_rebal_idx in _pick_holdings_cache
+        )
+        if day_unit_picks:
+            rebal_tickers = [p.ticker for p in pick_column_picks]
+        elif use_weekly_pick_cache:
             rebal_tickers = list(_pick_holdings_cache[panel_rebal_idx])
         elif exit_below_9ema_var.get():
-            rebal_tickers, _ = _rebal_slots_after_9ema(rebal_strategy, panel_rebal_ts)
+            rebal_tickers, _ = _rebal_slots_after_9ema(
+                rebal_strategy, pick_column_rebal_ts
+            )
         else:
             rebal_tickers = list(rebal_strategy)
         from momentum.rrg_portfolio_exits import (
@@ -2175,16 +3040,20 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         )
 
         exit_slices: list[tuple] = []
-        if prev_panel_idx is not None and prev_panel_idx >= tail:
-            exit_slices.append(
-                (
-                    _rrg_index[prev_panel_idx],
-                    _week_exits_cache.get(prev_panel_idx, []),
+        if bar_unit == "day":
+            if panel_rebal_idx >= tail:
+                exit_slices.append((panel_rebal_ts, []))
+        else:
+            if prev_panel_idx is not None and prev_panel_idx >= tail:
+                exit_slices.append(
+                    (
+                        _rrg_index[prev_panel_idx],
+                        _week_exits_cache.get(prev_panel_idx, []),
+                    )
                 )
+            exit_slices.append(
+                (panel_rebal_ts, _week_exits_cache.get(panel_rebal_idx, []))
             )
-        exit_slices.append(
-            (panel_rebal_ts, _week_exits_cache.get(panel_rebal_idx, []))
-        )
         prev_rebal_ts = (
             _rrg_index[prev_panel_idx] if prev_panel_idx is not None else None
         )
@@ -2214,10 +3083,15 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             movers_was_header_cells[PORTFOLIO_PANEL_WAS_COL].config(
                 text=portfolio_panel_was_header(was_label)
             )
-        rebalance_label = format_date_label(panel_rebal_idx)
+        rebalance_label = (
+            rrg_format_date(_rrg_index[end_date_idx_local])
+            if bar_unit == "day"
+            else format_date_label(panel_rebal_idx)
+        )
+        pick_header_label = rebalance_label
         if movers_pick_header_cells:
             movers_pick_header_cells[PORTFOLIO_PANEL_REBAL_COL].config(
-                text=portfolio_panel_pick_header(rebalance_label)
+                text=portfolio_panel_pick_header(pick_header_label)
             )
         subtitle = pick_strategy_subtitle(
             _pick_strategy_key(),
@@ -2238,6 +3112,23 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         rebal_n = len([t for t in rebal_tickers if t])
         pick_shortfall = ""
         if config.etf_table_extras and rebal_n < n_port:
+            rsr_for_hint, rsm_for_hint = (
+                _daily_rsr_rsm_for_panel()
+                if bar_unit == "day"
+                else (rsr_tickers, rsm_tickers)
+            )
+
+            def _hint_change_pct(j: int) -> float:
+                return (
+                    _daily_tail_change_at(
+                        j, pick_column_start_ts, pick_column_rebal_ts
+                    )
+                    if bar_unit == "day"
+                    else _tail_change_pct(
+                        j, pick_column_start_ts, pick_column_rebal_ts
+                    )
+                )
+
             if config.etf_recommend_profile == "india":
                 from momentum.etf.india_rrg_pick_strategies import (
                     IndiaPickContext,
@@ -2253,21 +3144,19 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 pick_shortfall = pick_shortfall_hint(
                     _pick_strategy_key(),
                     IndiaPickContext(
-                        ranked_row_indices=panel_ranked,
+                        ranked_row_indices=pick_column_ranked,
                         indices=indices,
                         ref_labels=index_metadata["ref_label"],
                         display_labels=index_metadata["display"],
                         vol_by_ref=vol_by_ref,
-                        end_ts=panel_rebal_ts,
-                        rsr_series_by_row=rsr_tickers,
-                        rsm_series_by_row=rsm_tickers,
-                        rank_delta_by_row=panel_rank_delta,
-                        change_pct_fn=lambda j: _tail_change_pct(
-                            j, panel_start_ts, panel_rebal_ts
-                        ),
+                        end_ts=pick_column_rebal_ts,
+                        rsr_series_by_row=rsr_for_hint,
+                        rsm_series_by_row=rsm_for_hint,
+                        rank_delta_by_row=pick_column_rank_delta,
+                        change_pct_fn=_hint_change_pct,
                         series_at_fn=series_at,
-                        curr_ranks=panel_curr_ranks,
-                        prev_ranks=panel_prev_ranks,
+                        curr_ranks=pick_column_curr_ranks,
+                        prev_ranks=pick_column_prev_ranks,
                         top_n=n_port,
                         prev_holdings=prev_portfolio,
                         hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
@@ -2288,21 +3177,19 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 pick_shortfall = pick_shortfall_hint(
                     _pick_strategy_key(),
                     StockPickContext(
-                        ranked_row_indices=panel_ranked,
+                        ranked_row_indices=pick_column_ranked,
                         indices=indices,
                         ref_labels=index_metadata["ref_label"],
                         display_labels=index_metadata["display"],
                         vol_by_ref=vol_by_ref,
-                        end_ts=panel_rebal_ts,
-                        rsr_series_by_row=rsr_tickers,
-                        rsm_series_by_row=rsm_tickers,
-                        rank_delta_by_row=panel_rank_delta,
-                        change_pct_fn=lambda j: _tail_change_pct(
-                            j, panel_start_ts, panel_rebal_ts
-                        ),
+                        end_ts=pick_column_rebal_ts,
+                        rsr_series_by_row=rsr_for_hint,
+                        rsm_series_by_row=rsm_for_hint,
+                        rank_delta_by_row=pick_column_rank_delta,
+                        change_pct_fn=_hint_change_pct,
                         series_at_fn=series_at,
-                        curr_ranks=panel_curr_ranks,
-                        prev_ranks=panel_prev_ranks,
+                        curr_ranks=pick_column_curr_ranks,
+                        prev_ranks=pick_column_prev_ranks,
                         top_n=n_port,
                         prev_holdings=prev_portfolio,
                         hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
@@ -2324,20 +3211,18 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 pick_shortfall = pick_shortfall_hint(
                     _pick_strategy_key(),
                     UsPickContext(
-                        ranked_row_indices=panel_ranked,
+                        ranked_row_indices=pick_column_ranked,
                         indices=indices,
                         display_labels=index_metadata["display"],
                         vol_by_ticker=vol_by_ticker,
-                        end_ts=panel_rebal_ts,
-                        rsr_series_by_row=rsr_tickers,
-                        rsm_series_by_row=rsm_tickers,
-                        rank_delta_by_row=panel_rank_delta,
-                        change_pct_fn=lambda j: _tail_change_pct(
-                            j, panel_start_ts, panel_rebal_ts
-                        ),
+                        end_ts=pick_column_rebal_ts,
+                        rsr_series_by_row=rsr_for_hint,
+                        rsm_series_by_row=rsm_for_hint,
+                        rank_delta_by_row=pick_column_rank_delta,
+                        change_pct_fn=_hint_change_pct,
                         series_at_fn=series_at,
-                        curr_ranks=panel_curr_ranks,
-                        prev_ranks=panel_prev_ranks,
+                        curr_ranks=pick_column_curr_ranks,
+                        prev_ranks=pick_column_prev_ranks,
                         top_n=n_port,
                         prev_holdings=prev_portfolio,
                         hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
@@ -2345,7 +3230,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     ),
                     rebal_n,
                 )
-        was_week = prev_panel_idx if prev_panel_idx is not None else panel_rebal_idx
+        was_week = (
+            prev_panel_idx
+            if prev_panel_idx is not None
+            else (end_date_idx_local - 1 if bar_unit == "day" else panel_rebal_idx)
+        )
 
         def _prices_for_pnl(sym: str) -> tuple[pd.Series, pd.Series | None]:
             weekly, daily = _etf_price_series(sym)
@@ -2367,21 +3256,44 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             j = _row_index_for_ticker(ticker)
             if j is None:
                 return None
-            return panel_curr_ranks.get(j)
+            ranks = (
+                pick_column_curr_ranks if bar_unit == "day" else panel_curr_ranks
+            )
+            return ranks.get(j)
 
-        as_of_ts = _rrg_index[end_date_idx_local]
+        as_of_ts = _portfolio_panel_as_of_ts()
+        slider_idx = int(date_scale.get())
         live_close = live_close_for_panel(
             config.etf_recommend_profile,
             etf_daily_close=_etf_daily_close,
-            at_latest_bar=end_date_idx_local >= _date_slider_max_idx(),
+            at_latest_bar=(
+                slider_idx >= _date_slider_max_idx()
+                or (
+                    bar_unit == "week"
+                    and _preview_today_enabled()
+                    and _preview_latest_daily_ts() is not None
+                )
+            ),
         )
         rebal_slots = pad_rebal_slots(rebal_tickers, n_port)
+
+        end_prev_holdings = (
+            list(prev_portfolio)
+            if bar_unit == "day"
+            else _end_prev_week_holdings(prev_panel_idx)
+        )
+
+        def _us_rebal_name_detail(ticker: str) -> str:
+            j = _row_index_for_ticker(ticker)
+            if j is None:
+                return ""
+            return index_metadata["display"][j] or ""
 
         panel_rows, panel_totals = build_portfolio_panel(
             prev_portfolio=prev_portfolio,
             rebal_strategy=rebal_strategy,
             rebal_tickers=rebal_slots,
-            end_prev_week_holdings=_end_prev_week_holdings(prev_panel_idx),
+            end_prev_week_holdings=end_prev_holdings,
             panel_exits=week_exits,
             rebalance_ts=panel_rebal_ts,
             prev_rebalance_ts=prev_rebal_ts,
@@ -2391,10 +3303,18 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             was_rank_for_ticker=_was_rank,
             curr_rank_for_ticker=_curr_rank,
             exit_below_9ema=bool(exit_below_9ema_var.get()),
-            mid_week_9ema=_mid_week_9ema_cache.get(panel_rebal_idx, []),
+            mid_week_9ema=(
+                [] if bar_unit == "day" else _mid_week_9ema_cache.get(panel_rebal_idx, [])
+            ),
             live_close_by_ticker=live_close,
             portfolio_slots=n_port,
+            rebal_detail_for_ticker=(
+                _us_rebal_name_detail
+                if config.etf_recommend_profile == "us"
+                else None
+            ),
         )
+        panel_mode = "day" if bar_unit == "day" else "week"
         movers_dates_label.config(
             text=portfolio_panel_dates_line(
                 rebalance_label=rebalance_label,
@@ -2404,7 +3324,17 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 pick_shortfall=pick_shortfall,
                 exit_below_9ema=bool(exit_below_9ema_var.get()),
                 subtitle=subtitle,
-                exits_through_label=format_date_label(panel_end_idx),
+                exits_through_label=(
+                    rebalance_label
+                    if bar_unit == "day"
+                    else (
+                        rrg_format_date(_preview_latest_daily_ts())
+                        if _preview_today_enabled()
+                        and _preview_latest_daily_ts() is not None
+                        else format_date_label(panel_end_idx)
+                    )
+                ),
+                mode=panel_mode,
             )
         )
         if movers_totals_label is not None:
@@ -2412,6 +3342,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 text=portfolio_panel_totals_line(
                     panel_totals,
                     live_pick=bool(live_close),
+                    mode=panel_mode,
                 )
             )
         n_slots = len(movers_row_widgets)
@@ -2499,11 +3430,22 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         prev_ranks: dict[int, int],
         *,
         prev_holdings: list[str] | None = None,
+        write_cache: bool = True,
+        change_pct_fn: Callable[[int], float] | None = None,
+        rsr_series_by_row: list | None = None,
+        rsm_series_by_row: list | None = None,
     ):
         strategy = _pick_strategy_key()
         max_rank = int(max_hold_rank_var.get())
         top_n = _portfolio_top_n()
         holdings = list(prev_holdings or [])
+        rsr_rows = rsr_series_by_row if rsr_series_by_row is not None else rsr_tickers
+        rsm_rows = rsm_series_by_row if rsm_series_by_row is not None else rsm_tickers
+
+        def _row_change_pct(j: int) -> float:
+            if change_pct_fn is not None:
+                return change_pct_fn(j)
+            return _tail_change_pct(j, start_ts, end_ts)
 
         if config.etf_recommend_profile == "india":
             from momentum.etf.india_rrg_pick_strategies import (
@@ -2524,10 +3466,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 display_labels=index_metadata["display"],
                 vol_by_ref=vol_by_ref,
                 end_ts=end_ts,
-                rsr_series_by_row=rsr_tickers,
-                rsm_series_by_row=rsm_tickers,
+                rsr_series_by_row=rsr_rows,
+                rsm_series_by_row=rsm_rows,
                 rank_delta_by_row=rank_delta_by_row,
-                change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
+                change_pct_fn=_row_change_pct,
                 series_at_fn=series_at,
                 curr_ranks=curr_ranks,
                 prev_ranks=prev_ranks,
@@ -2536,11 +3478,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
                 max_hold_rank=max_rank,
             )
-            return _filter_picks_by_tradable_ref(
+            picks = _filter_picks_by_tradable_ref(
                 pick_india_portfolio(strategy, ctx), end_ts
             )
 
-        if config.etf_recommend_profile == "stock":
+        elif config.etf_recommend_profile == "stock":
             from momentum.stock.stock_rrg_pick_strategies import (
                 StockPickContext,
                 pick_stock_portfolio,
@@ -2557,10 +3499,10 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 display_labels=index_metadata["display"],
                 vol_by_ref=vol_by_ref,
                 end_ts=end_ts,
-                rsr_series_by_row=rsr_tickers,
-                rsm_series_by_row=rsm_tickers,
+                rsr_series_by_row=rsr_rows,
+                rsm_series_by_row=rsm_rows,
                 rank_delta_by_row=rank_delta_by_row,
-                change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
+                change_pct_fn=_row_change_pct,
                 series_at_fn=series_at,
                 curr_ranks=curr_ranks,
                 prev_ranks=prev_ranks,
@@ -2570,34 +3512,75 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 max_hold_rank=max_rank,
                 benchmark=config.benchmark_nse,
             )
-            return pick_stock_portfolio(strategy, ctx)
+            picks = pick_stock_portfolio(strategy, ctx)
 
-        from momentum.etf.us_rrg_pick_strategies import UsPickContext, pick_us_portfolio
+        else:
+            from momentum.etf.us_rrg_pick_strategies import (
+                UsPickContext,
+                pick_us_portfolio,
+            )
 
-        vol_by_ticker = {
-            indices[j]: etf_vol_by_row.get(j, 0.0) for j in range(len(indices))
-        }
-        ctx = UsPickContext(
-            ranked_row_indices=ranked,
-            indices=indices,
-            display_labels=index_metadata["display"],
-            vol_by_ticker=vol_by_ticker,
-            end_ts=end_ts,
-            rsr_series_by_row=rsr_tickers,
-            rsm_series_by_row=rsm_tickers,
-            rank_delta_by_row=rank_delta_by_row,
-            change_pct_fn=lambda j: _tail_change_pct(j, start_ts, end_ts),
-            series_at_fn=series_at,
-            curr_ranks=curr_ranks,
-            prev_ranks=prev_ranks,
-            top_n=top_n,
-            prev_holdings=holdings,
-            hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
-            max_hold_rank=max_rank,
-        )
-        return _filter_picks_by_tradable_ref(
-            pick_us_portfolio(strategy, ctx), end_ts
-        )
+            vol_by_ticker = {
+                indices[j]: etf_vol_by_row.get(j, 0.0) for j in range(len(indices))
+            }
+            ctx = UsPickContext(
+                ranked_row_indices=ranked,
+                indices=indices,
+                display_labels=index_metadata["display"],
+                vol_by_ticker=vol_by_ticker,
+                end_ts=end_ts,
+                rsr_series_by_row=rsr_rows,
+                rsm_series_by_row=rsm_rows,
+                rank_delta_by_row=rank_delta_by_row,
+                change_pct_fn=_row_change_pct,
+                series_at_fn=series_at,
+                curr_ranks=curr_ranks,
+                prev_ranks=prev_ranks,
+                top_n=top_n,
+                prev_holdings=holdings,
+                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+                max_hold_rank=max_rank,
+            )
+            picks = _filter_picks_by_tradable_ref(
+                pick_us_portfolio(strategy, ctx), end_ts
+            )
+
+        if write_cache and end_date_idx_local >= 0:
+            prev_pick = (
+                _prior_week_top_n_portfolio(end_date_idx_local)
+                if end_date_idx_local > tail
+                else []
+            )
+            if _portfolio_cache_enabled():
+                stale = [k for k in _pick_holdings_cache if k > end_date_idx_local]
+                for k in stale:
+                    del _pick_holdings_cache[k]
+                    _active_holdings_cache.pop(k, None)
+                    _week_exits_cache.pop(k, None)
+                    _mid_week_9ema_cache.pop(k, None)
+            rebal_strategy = _rebal_tickers_table_order(picks, ranked)
+            rebal_slots, dropped_pick = _rebal_slots_after_9ema(rebal_strategy, end_ts)
+            _pick_holdings_cache[end_date_idx_local] = rebal_slots
+            held_enter = [t for t in rebal_slots if t]
+            next_ts = (
+                _rrg_index[end_date_idx_local + 1]
+                if end_date_idx_local + 1 < len(_rrg_index)
+                else None
+            )
+            end_active, dropped_was, mid = _apply_9ema_week_path(
+                held_enter, end_ts, next_ts, prev_holdings=prev_pick or None
+            )
+            _active_holdings_cache[end_date_idx_local] = end_active
+            _week_exits_cache[end_date_idx_local] = _build_live_week_exits(
+                prev_pick,
+                held_enter,
+                curr_ranks,
+                end_ts,
+                _merge_dropped_tickers(dropped_pick, dropped_was),
+                mid,
+            )
+            _mid_week_9ema_cache[end_date_idx_local] = list(mid)
+        return picks
 
     def _ref_price_weekly_for_picks() -> dict[str, pd.Series]:
         """Weekly ref/ticker closes used to validate picks (bhavcopy or Yahoo)."""
@@ -2607,6 +3590,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             _ensure_etf_daily_close()
             return weekly_map_from_daily(_etf_daily_close)
         if config.etf_recommend_profile == "us":
+            _ensure_etf_daily_close()
+            if _etf_daily_close:
+                return weekly_map_from_daily(_etf_daily_close)
             return {
                 indices[j]: indices_data[indices[j]]
                 for j in range(len(indices))
@@ -2863,7 +3849,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                     prev_holdings = list(
                         _pick_holdings_cache.get(end_date_idx_local - 1, [])
                     )
-        picks = _compute_picks_at_week(
+        return _compute_picks_at_week(
             end_date_idx_local,
             ranked,
             end_ts,
@@ -2873,41 +3859,6 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             prev_ranks,
             prev_holdings=prev_holdings,
         )
-        prev_pick = (
-            _prior_week_top_n_portfolio(end_date_idx_local)
-            if end_date_idx_local > tail
-            else []
-        )
-        if _portfolio_cache_enabled():
-            stale = [k for k in _pick_holdings_cache if k > end_date_idx_local]
-            for k in stale:
-                del _pick_holdings_cache[k]
-                _active_holdings_cache.pop(k, None)
-                _week_exits_cache.pop(k, None)
-                _mid_week_9ema_cache.pop(k, None)
-        rebal_strategy = _rebal_tickers_table_order(picks, ranked)
-        rebal_slots, dropped_pick = _rebal_slots_after_9ema(rebal_strategy, end_ts)
-        _pick_holdings_cache[end_date_idx_local] = rebal_slots
-        held_enter = [t for t in rebal_slots if t]
-        next_ts = (
-            _rrg_index[end_date_idx_local + 1]
-            if end_date_idx_local + 1 < len(_rrg_index)
-            else None
-        )
-        end_active, dropped_was, mid = _apply_9ema_week_path(
-            held_enter, end_ts, next_ts, prev_holdings=prev_pick or None
-        )
-        _active_holdings_cache[end_date_idx_local] = end_active
-        _week_exits_cache[end_date_idx_local] = _build_live_week_exits(
-            prev_pick,
-            held_enter,
-            curr_ranks,
-            end_ts,
-            _merge_dropped_tickers(dropped_pick, dropped_was),
-            mid,
-        )
-        _mid_week_9ema_cache[end_date_idx_local] = list(mid)
-        return picks
 
     def refresh_recommendations_panel(
         ranked: list[int],
@@ -2920,63 +3871,87 @@ def run_rrg_app(config: RrgAppConfig) -> None:
     ):
         if not config.etf_table_extras or not recommend_row_widgets:
             return
+        if not _preview_today_enabled():
+            _sync_recommend_panel_visibility()
+            return
+        _sync_recommend_panel_visibility()
+        preview_footnote = ""
+        if picks is None:
+            state = _preview_panel_state(_preview_ranking_context())
+            if state is None:
+                picks = []
+            else:
+                picks, preview_footnote = state
+        if picks is None:
+            picks = []
         curr_ranks = curr_ranks or {}
         prev_ranks = prev_ranks or {}
-        if picks is None:
-            picks = _strategy_picks_for_week(
-                int(date_scale.get()),
-                ranked,
-                end_ts,
-                start_ts,
-                rank_delta_by_row,
-                curr_ranks,
-                prev_ranks,
-            )
         if config.etf_recommend_profile == "india":
-            from momentum.etf.india_rrg_recommendations import (
-                format_vol_pct,
-                recommendation_row_bg,
-            )
+            from momentum.etf.india_rrg_recommendations import recommendation_row_bg
         elif config.etf_recommend_profile == "stock":
-            from momentum.stock.stock_rrg_recommendations import (
-                format_vol_pct,
-                recommendation_row_bg,
-            )
+            from momentum.stock.stock_rrg_recommendations import recommendation_row_bg
         else:
-            from momentum.etf.us_rrg_recommendations import (
-                format_vol_pct,
-                recommendation_row_bg,
-            )
-        if recommend_dates_label is not None:
-            if config.etf_recommend_profile == "us":
-                from momentum.etf.us_rrg_pick_strategies import pick_strategy_subtitle
-            elif config.etf_recommend_profile == "stock":
-                from momentum.stock.stock_rrg_pick_strategies import pick_strategy_subtitle
-            else:
-                from momentum.etf.india_rrg_pick_strategies import pick_strategy_subtitle
+            from momentum.etf.us_rrg_recommendations import recommendation_row_bg
+        n_port = _portfolio_top_n()
+        if config.etf_recommend_profile == "us":
+            from momentum.etf.us_rrg_pick_strategies import pick_strategy_label
+        elif config.etf_recommend_profile == "stock":
+            from momentum.stock.stock_rrg_pick_strategies import pick_strategy_label
+        else:
+            from momentum.etf.india_rrg_pick_strategies import pick_strategy_label
 
-            end_l = format_date_label(int(date_scale.get()))
-            subtitle = pick_strategy_subtitle(
-                _pick_strategy_key(),
-                hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
-                max_hold_rank=int(max_hold_rank_var.get()),
-                exit_below_9ema=bool(exit_below_9ema_var.get()),
+        strategy_lbl = pick_strategy_label(
+            _pick_strategy_key(),
+            hold_until_rank_exit=bool(hold_until_rank_exit_var.get()),
+            exit_below_9ema=bool(exit_below_9ema_var.get()),
+        )
+        ctx = _preview_ranking_context()
+        if ctx is not None:
+            preview_end = rrg_format_date(ctx[0])
+            preview_start = rrg_format_date(ctx[1])
+            tail_d = _preview_tail_trading_days()
+            rebal_lbl = format_date_label(
+                _panel_rebal_idx(_portfolio_panel_week_idx())
             )
-            recommend_dates_label.config(
-                text=f"Date: {end_l}  ·  {subtitle}"
+            if recommend_title_label is not None:
+                recommend_title_label.config(
+                    text=(
+                        f"Preview Top {n_port} = Day unit Top N @ {preview_end} "
+                        f"(Tail {tail_d})"
+                    )
+                )
+            dates_txt = (
+                f"{strategy_lbl}  ·  Chg% {preview_start}→{preview_end}  ·  "
+                f"same as Day slider @ {preview_end}  ·  "
+                f"weekly rebalance {rebal_lbl} above"
             )
+            if preview_footnote:
+                dates_txt = f"{dates_txt}  ·  {preview_footnote}"
+            if recommend_dates_label is not None:
+                recommend_dates_label.config(text=dates_txt)
+        else:
+            if recommend_title_label is not None:
+                recommend_title_label.config(
+                    text=f"Preview Top {n_port} — daily data unavailable"
+                )
+            if recommend_dates_label is not None:
+                recommend_dates_label.config(text=strategy_lbl)
+
+        n_show = min(len(picks), n_port)
+        row_h = 22
         for slot, widgets in enumerate(recommend_row_widgets):
-            if slot >= _portfolio_top_n() or slot >= len(picks):
+            if slot >= n_show:
                 for w in widgets.values():
                     w.config(text='', bg=root.cget('bg'), fg='black')
+                    w.grid_remove()
                 continue
             pick = picks[slot]
             bg = recommendation_row_bg(pick.quadrant)
             fg = rrg_row_fg_color(bg)
+            grid_row = slot + 1
             widgets['rank'].config(text=str(pick.pick_rank), bg=bg, fg=fg)
             widgets['ticker'].config(text=pick.ticker, bg=bg, fg=fg)
             widgets['name'].config(text=pick.name, bg=bg, fg=fg)
-            widgets['vol'].config(text=format_vol_pct(pick.vol_pct), bg=bg, fg=fg)
             rd_fg = _rank_delta_fg(pick.rank_delta)
             widgets['rank_delta'].config(
                 text=pick.rank_delta, bg=bg, fg=rd_fg if fg == 'black' else 'white'
@@ -2984,12 +3959,16 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             widgets['change'].config(
                 text=format_change_pct(pick.change_pct), bg=bg, fg=fg
             )
-            widgets['quadrant'].config(text=pick.quadrant, bg=bg, fg=fg)
-            widgets['size'].config(text=pick.size_hint, bg=bg, fg=fg)
-            widgets['reason'].config(text=pick.reason, bg=bg, fg=fg)
+            for col, key in enumerate(
+                ('rank', 'ticker', 'name', 'rank_delta', 'change')
+            ):
+                widgets[key].grid(
+                    row=grid_row, column=col, sticky='ew', padx=1, pady=0
+                )
+        if recommend_rec_canvas is not None:
+            recommend_rec_canvas.config(height=row_h * (n_show + 1) + 4)
         if recommend_copy_grid is not None:
             TableRegionCopy.for_window(root).sync_styles(recommend_copy_grid)
-        _refresh_exits_display(int(date_scale.get()))
         if _sync_side_scroll is not None:
             root.after_idle(_sync_side_scroll)
 
@@ -3011,38 +3990,57 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         end_date_idx_local = int(date_scale.get())
         end_ts = _rrg_index[end_date_idx_local]
         start_ts = _rrg_index[end_date_idx_local - tail]
+        preview_ctx = _preview_ranking_context() if _preview_today_enabled() else None
 
-        curr_ranks = _rank_by_row(end_date_idx_local)
-        prev_ranks = (
-            _rank_by_row(end_date_idx_local - 1)
-            if end_date_idx_local > tail
-            else {}
-        )
-
-        ranked = sorted(
-            range(len(indices)),
-            key=lambda j: _tail_change_pct(j, start_ts, end_ts),
-            reverse=True,
-        )
-
-        rank_delta_texts: list[str] = []
-        rank_delta_by_row: dict[int, str] = {}
-        for j in ranked:
-            text = format_rank_delta(
-                curr_ranks.get(j, len(indices)),
-                prev_ranks.get(j),
-            )
-            rank_delta_texts.append(text)
-            rank_delta_by_row[j] = text
-
-        if _portfolio_cache_enabled():
-            _warm_pick_holdings_cache(end_date_idx_local)
-
-        # Table ★ marks portfolio Top N picks (rebalance week), not next slider bar.
-        if config.top_movers_panel:
-            picks = _panel_week_picks(end_date_idx_local)
+        if preview_ctx is not None:
+            (
+                end_ts,
+                start_ts,
+                ranked,
+                rank_delta_by_row,
+                curr_ranks,
+                prev_ranks,
+            ) = preview_ctx
+            rank_delta_texts = [rank_delta_by_row[j] for j in ranked]
         else:
-            picks = _strategy_picks_for_week(
+            curr_ranks = _rank_by_row(end_date_idx_local)
+            prev_ranks = (
+                _rank_by_row(end_date_idx_local - 1)
+                if end_date_idx_local > tail
+                else {}
+            )
+
+            ranked = sorted(
+                range(len(indices)),
+                key=lambda j: _tail_change_pct(j, start_ts, end_ts),
+                reverse=True,
+            )
+
+            rank_delta_texts = []
+            rank_delta_by_row = {}
+            for j in ranked:
+                text = format_rank_delta(
+                    curr_ranks.get(j, len(indices)),
+                    prev_ranks.get(j),
+                )
+                rank_delta_texts.append(text)
+                rank_delta_by_row[j] = text
+
+        panel_week_idx = (
+            _portfolio_panel_week_idx() if bar_unit == "week" else end_date_idx_local
+        )
+        if _portfolio_cache_enabled() and bar_unit != "day":
+            _warm_pick_holdings_cache(panel_week_idx)
+
+        # ★ / graph: week = rebalance picks; day = Day-unit Tail N picks.
+        if bar_unit == "day":
+            rebalance_picks = (
+                _daily_top_n_picks_at(_rrg_index[end_date_idx_local]) or []
+            )
+        elif config.top_movers_panel:
+            rebalance_picks = _panel_week_picks(panel_week_idx)
+        else:
+            rebalance_picks = _strategy_picks_for_week(
                 end_date_idx_local,
                 ranked,
                 end_ts,
@@ -3051,8 +4049,13 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 curr_ranks,
                 prev_ranks,
             )
+        preview_picks = (
+            _preview_today_picks(preview_ctx)
+            if _preview_today_enabled()
+            else None
+        )
         _current_pick_row_indices.clear()
-        _current_pick_row_indices.update(p.row_idx for p in picks)
+        _current_pick_row_indices.update(p.row_idx for p in rebalance_picks)
 
         if config.etf_table_extras and pick_auto_show_var.get():
             for j in _current_pick_row_indices:
@@ -3066,11 +4069,16 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         for display_row, j in enumerate(ranked):
             w = table_widgets[j]
             index_name = indices[j]
-            chg = _tail_change_pct(j, start_ts, end_ts)
-            try:
-                price = round(series_at(indices_data[index_name], end_ts), 2)
-            except (KeyError, TypeError, ValueError, IndexError):
-                price = ''
+            if preview_ctx is not None:
+                chg = _daily_tail_change_at(j, start_ts, end_ts)
+                px = _preview_row_mark_price(j, end_ts)
+                price = round(px, 2) if px is not None else ''
+            else:
+                chg = _tail_change_pct(j, start_ts, end_ts)
+                try:
+                    price = round(series_at(indices_data[index_name], end_ts), 2)
+                except (KeyError, TypeError, ValueError, IndexError):
+                    price = ''
             try:
                 rsr_val = series_at(rsr_tickers[j], end_ts)
                 rsm_val = series_at(rsm_tickers[j], end_ts)
@@ -3162,7 +4170,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         _update_table_column_widths(end_ts, start_ts, rank_delta_texts)
         refresh_top_movers_panel(
             ranked,
-            picks=picks,
+            picks=rebalance_picks,
             end_ts=end_ts,
             start_ts=start_ts,
             rank_delta_by_row=rank_delta_by_row,
@@ -3176,8 +4184,9 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             rank_delta_by_row,
             curr_ranks,
             prev_ranks,
-            picks=picks,
+            picks=preview_picks,
         )
+        _update_preview_status_label()
 
     checkbox_vars = []
     table_widgets = []
@@ -3358,7 +4367,14 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         if preserve_calendar_end and end_date_idx is not None and len(_rrg_index):
             prev_end_ts = _rrg_index[end_date_idx]
 
+        if bar_unit == "day":
+            _history_cache.pop("day", None)
+            _invalidate_daily_pick_rrg()
+            _load_etf_daily_close_data(force=True)
+
         _apply_price_histories(_histories_for_unit(bar_unit))
+        if bar_unit == "day":
+            _invalidate_daily_pick_rrg()
         rs_tickers.clear()
         rsr_tickers.clear()
         rsr_roc_tickers.clear()
@@ -3391,15 +4407,22 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         date_min = _date_slider_min_idx()
         date_max = _date_slider_max_idx()
         date_scale.config(from_=date_min, to=date_max)
-        end_date_idx = _resolve_end_date_idx(prev_end_ts, date_min, date_max)
+        if bar_unit == "day":
+            end_date_idx = date_max
+        else:
+            end_date_idx = _resolve_end_date_idx(prev_end_ts, date_min, date_max)
         date_scale.set(end_date_idx)
         date_value_label.config(text=format_date_label(end_date_idx))
         date_range_label.config(text=_date_range_hint_text())
         update_calc_context_label()
         _ensure_plot_slots()
+        slider_last = (
+            rrg_format_date(_rrg_index[-1]) if len(_rrg_index) else "n/a"
+        )
         print(
             f"RRG bar unit: {bar_unit} — {len(indices)} rows, "
-            f"{len(_rrg_index)} dates on slider, end {format_date_label(end_date_idx)}"
+            f"{len(_rrg_index)} dates on slider, end {format_date_label(end_date_idx)} "
+            f"(latest bar {slider_last})"
         )
 
     def _reload_us_universe() -> None:
@@ -3419,9 +4442,8 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             return
 
         print(f"RRG: switching US ETF universe to {mode}...")
-        root.config(cursor='watch')
-        root.update_idletasks()
         try:
+            _busy.show(f"Switching to {mode} universe…")
             new_cfg = build_us_rrg_config(
                 mode,
                 period=period,
@@ -3456,6 +4478,14 @@ def run_rrg_app(config: RrgAppConfig) -> None:
                 if end_date_idx is not None and len(_rrg_index)
                 else None
             )
+            was_near_latest = (
+                end_date_idx is not None
+                and len(_rrg_index) > 0
+                and end_date_idx >= len(_rrg_index) - 2
+            )
+
+            if bar_unit == "day":
+                _load_etf_daily_close_data(force=True)
 
             _apply_price_histories(_histories_for_unit(bar_unit))
             rs_tickers.clear()
@@ -3494,7 +4524,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             date_min = _date_slider_min_idx()
             date_max = _date_slider_max_idx()
             date_scale.config(from_=date_min, to=date_max)
-            end_date_idx = _resolve_end_date_idx(prev_end_ts, date_min, date_max)
+            end_date_idx = (
+                date_max
+                if bar_unit == "day" and was_near_latest
+                else _resolve_end_date_idx(prev_end_ts, date_min, date_max)
+            )
             date_scale.set(end_date_idx)
             date_value_label.config(text=format_date_label(end_date_idx))
             date_range_label.config(text=_date_range_hint_text())
@@ -3533,7 +4567,7 @@ def run_rrg_app(config: RrgAppConfig) -> None:
             us_universe_var.set(US_UNIVERSE_LABELS.get(prev_mode, us_universe_var.get()))
             messagebox.showerror("Universe switch failed", str(exc), parent=root)
         finally:
-            root.config(cursor='')
+            _busy.hide()
 
     def on_bar_unit_change(_event=None):
         nonlocal bar_unit
@@ -3541,17 +4575,16 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         if selected == bar_unit:
             return
         print(f"RRG: loading {selected} bar data...")
-        root.config(cursor='watch')
-        root.update_idletasks()
-        try:
+        unit_lbl = "daily" if selected == "day" else "weekly"
+        with _busy.busy(f"Loading {unit_lbl} bar data…"):
             bar_unit = selected
             _clear_pick_cache()
-            _rebuild_rrg_for_bar_unit()
+            _sync_preview_pick_ui()
+            jump_latest = selected == "day"
+            _rebuild_rrg_for_bar_unit(preserve_calendar_end=not jump_latest)
             update_nav_button_labels()
             redraw_chart()
             root.update_idletasks()
-        finally:
-            root.config(cursor='')
 
     bar_unit_combo.bind('<<ComboboxSelected>>', on_bar_unit_change)
     if us_universe_combo is not None:
@@ -3666,6 +4699,21 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         root.quit()
         root.destroy()
 
+    def _on_preview_toggle(*_) -> None:
+        if not config.preview_today_picks:
+            return
+        if preview_today_picks_var.get() and bar_unit == "week":
+            with _busy.busy("Loading preview data…"):
+                _clear_pick_cache()
+                _sync_recommend_panel_visibility()
+                _update_preview_status_label()
+                redraw_chart()
+        else:
+            _clear_pick_cache()
+            _sync_recommend_panel_visibility()
+            _update_preview_status_label()
+            redraw_chart()
+
     root.protocol('WM_DELETE_WINDOW', on_close)
     install_copy_support(root)
     if config.etf_table_extras:
@@ -3686,9 +4734,11 @@ def run_rrg_app(config: RrgAppConfig) -> None:
         if hold_rank_cb is not None:
             hold_rank_cb.config(command=_on_pick_controls_change)
         _toggle_max_hold_rank_ui()
+        _sync_preview_pick_ui()
+    if config.preview_today_picks and preview_today_cb is not None:
+        preview_today_picks_var.trace_add("write", _on_preview_toggle)
     if _sync_side_scroll is not None:
         root.after_idle(_sync_side_scroll)
     redraw_chart()
     root.update_idletasks()
-    root.deiconify()
     root.mainloop()
