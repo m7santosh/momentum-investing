@@ -1,7 +1,7 @@
-"""RRG for US ETFs — expanded universe (core us.py + ADV$ discoveries).
+"""RRG for US ETFs — same canonical list as ``RRGIndicatorUsEtfs3m`` (us.py).
 
-Same UI as RRGIndicatorUsEtfs3m.py with expanded universe pre-selected.
-Use RRGIndicatorUsEtfs3m.py --universe core|expanded to switch in-app.
+Runs optional ADV$ screen before launch (``--screen-only``). Universe is always
+``momentum/etf/universes/us.py``; no extra discovery tickers.
 
 Examples:
     python momentum/etf/RRGIndicatorUsEtfsLiquid3m.py
@@ -26,7 +26,7 @@ from momentum.etf.us_liquid_rrg_config import (  # noqa: E402
 )
 from momentum.etf.us_liquid_screener import format_screen_table  # noqa: E402
 from momentum.etf.us_rrg_universe_modes import (  # noqa: E402
-    US_UNIVERSE_EXPANDED,
+    US_UNIVERSE_CORE,
     build_us_rrg_config,
 )
 from momentum.rrg_app import run_rrg_app  # noqa: E402
@@ -35,7 +35,7 @@ from momentum.rrg_core import RRG_WINDOW_ETF  # noqa: E402
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="RRG — core us.py ETFs plus ADV$-screened discoveries (3m)",
+        description="RRG — US ETFs from us.py (optional ADV$ metrics table)",
     )
     parser.add_argument(
         "--window",
@@ -50,24 +50,21 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_MIN_ADV,
         metavar="USD",
-        help=f"Min ADV$ for *new* discoveries (core us.py always kept; default: {DEFAULT_MIN_ADV:,.0f})",
+        help=f"Min ADV$ for metrics table (default: {DEFAULT_MIN_ADV:,.0f})",
     )
     parser.add_argument(
         "--vol-percentile",
         type=float,
         default=DEFAULT_VOL_PERCENTILE,
-        help=(
-            "Optional vol cap for discoveries only (100=off, default). "
-            "Core us.py ignores vol filter."
-        ),
+        help="Optional vol cap for metrics (100=off, default)",
     )
     parser.add_argument(
         "--categories",
         "-c",
         nargs="+",
-        choices=["sector", "country", "thematic", "core", "all"],
+        choices=["core", "all"],
         default=["all"],
-        help="Categories for discovery scan (default: all; core us.py always included)",
+        help="Kept for CLI compatibility (always us.py)",
     )
     parser.add_argument(
         "--adv-days",
@@ -84,7 +81,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--screen-only",
         action="store_true",
-        help="Print universe table and exit",
+        help="Print us.py universe ADV table and exit",
     )
     return parser.parse_args()
 
@@ -100,7 +97,7 @@ def main() -> None:
         return
 
     cfg = build_us_rrg_config(
-        US_UNIVERSE_EXPANDED,
+        US_UNIVERSE_CORE,
         period=US_ETF_LIQUID_RRG_PERIOD,
         rrg_window=args.window,
         min_adv=args.min_adv,

@@ -43,8 +43,7 @@ MIN_HISTORY_SESSIONS = LB_3M
 TOP_N = 10
 OUT_FILENAME = "momentum_us_rs_etfs.xlsx"
 
-# Universe: edit tickers in momentum/etf/universes/us.py
-from momentum.etf.universes.us import tickers
+from momentum.etf.universes import us_universe
 
 
 def get_data(ticker: str, start_date, end_date):
@@ -119,7 +118,7 @@ def collect_us_etf_rows(
     bench_adj: pd.Series, start_date: datetime, end_date: datetime
 ) -> list[dict]:
     summary: list[dict] = []
-    for ticker in tickers:
+    for ticker in us_universe.TICKERS:
         try:
             df = get_data(ticker, start_date, end_date)
             if len(df) == 0:
@@ -166,6 +165,7 @@ def collect_us_etf_rows(
 
 
 def main() -> None:
+    us_universe.ensure_loaded()
     end_date = datetime.today()
     start_date = end_date - timedelta(days=365 * 2)
 

@@ -65,9 +65,8 @@ def build_liquid_rrg_config(
         else "ADV$ discovery (vol filter off)"
     )
     summary = (
-        f"RRG expanded universe: {len(row_ids)} US ETFs "
-        f"({len(pool.ALWAYS_INCLUDE)} core us.py + ADV$ >= ${adv_m:.1f}M discoveries; "
-        f"{vol_note}; categories: {cat_text}; benchmark {benchmark})"
+        f"RRG universe: {len(row_ids)} US ETFs from us.py "
+        f"(benchmark {benchmark}; ADV metrics: >= ${adv_m:.1f}M, {vol_note})"
     )
 
     def row_ref_label(row_id: str) -> str:
@@ -128,11 +127,11 @@ def build_liquid_rrg_config(
 
     def count_summary(kind_list: list[str]) -> str:
         n_etf = sum(1 for k in kind_list if k == "etf")
-        return f"{n_etf} US ETFs (core us.py + liquid discoveries)"
+        return f"{n_etf} US ETFs (us.py)"
 
     return RrgAppConfig(
         window_title=(
-            f"RRG — US ETFs expanded (3m · {rrg_window}w · core us.py + ADV>=${adv_m:.0f}M)"
+            f"RRG — US ETFs (3m · {rrg_window}w · us.py · {len(row_ids)} ETFs)"
         ),
         benchmark_nse=benchmark,
         rows=rows,
@@ -164,7 +163,7 @@ def build_liquid_rrg_config(
         etf_recommend_count=7,
         backtest_enabled=True,
         backtest_profile="us",
-        backtest_universe_mode="expanded",
+        backtest_universe_mode="core",
         backtest_min_adv=min_adv,
         backtest_vol_percentile=vol_percentile,
         backtest_categories=tuple(

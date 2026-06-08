@@ -34,18 +34,11 @@ from momentum.etf.us_rrg_pick_strategies import (  # noqa: E402
     pick_strategy_label,
     pick_us_portfolio,
 )
-from momentum.etf.us_rrg_universe import RRG_BENCHMARK_YAHOO  # noqa: E402
+from momentum.etf import us_rrg_universe as rrg  # noqa: E402
+from momentum.etf.universes import us_universe  # noqa: E402
 from momentum.etf.us_liquid_rrg_config import (  # noqa: E402
     DEFAULT_MIN_ADV,
     DEFAULT_VOL_PERCENTILE,
-    parse_categories,
-)
-from momentum.etf.us_liquid_rrg_universe import build_universe  # noqa: E402
-from momentum.etf.us_liquid_screener import screen_us_etfs  # noqa: E402
-from momentum.etf.us_rrg_universe import (  # noqa: E402
-    RRG_ROW_BY_ID,
-    RRG_ROWS,
-    row_display_label,
 )
 from momentum.rrg_core import (  # noqa: E402
     compute_rrg_indicators,
@@ -103,7 +96,7 @@ class UsRrgBacktestConfig:
     rrg_window: int = 10
     initial_capital: float = 100_000.0
     vol_days: int = 63
-    universe_mode: str = "expanded"  # "core" (us.py only) | "expanded" | "main_table"
+    universe_mode: str = "core"  # "core" | "expanded" (both us.py) | "main_table"
     universe_row_ids: tuple[str, ...] | None = None  # exact main-app table tickers
     min_adv_usd: float = DEFAULT_MIN_ADV
     vol_percentile: float = DEFAULT_VOL_PERCENTILE
@@ -144,7 +137,7 @@ class UsRrgBacktestEngine:
     _last_pick_ctx: UsPickContext | None = None
     _entry_prices: dict[str, float] = field(default_factory=dict)
     _loaded: bool = False
-    _benchmark: str = RRG_BENCHMARK_YAHOO
+    _benchmark: str = rrg.RRG_BENCHMARK_YAHOO
     _load_tickers: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -152,60 +145,38 @@ class UsRrgBacktestEngine:
 
     def _resolve_universe(self) -> None:
         """Build row list: main-app tickers, core us.py, or expanded liquid screen."""
+        us_universe.ensure_loaded()
         cfg = self.config
         if cfg.universe_row_ids:
             self._row_ids = list(dict.fromkeys(cfg.universe_row_ids))
             self._display_labels = [
-                row_display_label(rid) if rid in RRG_ROW_BY_ID else rid
+                rrg.row_display_label(rid) if rid in rrg.RRG_ROW_BY_ID else rid
                 for rid in self._row_ids
             ]
             self._load_tickers = list(
-                dict.fromkeys([*self._row_ids, RRG_BENCHMARK_YAHOO])
+                dict.fromkeys([*self._row_ids, rrg.RRG_BENCHMARK_YAHOO])
             )
-            self._benchmark = RRG_BENCHMARK_YAHOO
+            self._benchmark = rrg.RRG_BENCHMARK_YAHOO
             self._log(
                 f"Universe: {len(self._row_ids)} ETFs (same as main RRG table)"
             )
             return
 
         mode = (cfg.universe_mode or "core").strip().lower()
-        if mode == "core":
-            self._row_ids = [r.row_id for r in RRG_ROWS]
-            self._display_labels = [row_display_label(r.row_id) for r in RRG_ROWS]
+        if mode in ("core", "expanded"):
+            self._row_ids = [r.row_id for r in rrg.RRG_ROWS]
+            self._display_labels = [
+                rrg.row_display_label(r.row_id) for r in rrg.RRG_ROWS
+            ]
             self._load_tickers = list(
-                dict.fromkeys([*self._row_ids, RRG_BENCHMARK_YAHOO])
+                dict.fromkeys([*self._row_ids, rrg.RRG_BENCHMARK_YAHOO])
             )
-            self._benchmark = RRG_BENCHMARK_YAHOO
-            self._log(
-                f"Universe: {len(self._row_ids)} core US ETFs (us.py only)"
-            )
+            self._benchmark = rrg.RRG_BENCHMARK_YAHOO
+            self._log(f"Universe: {len(self._row_ids)} US ETFs (us.py)")
             return
 
-        self._log(
-            "Screening expanded universe (core us.py + liquid ADV$ discoveries)..."
-        )
-        screened = screen_us_etfs(
-            categories=parse_categories(cfg.screen_categories),
-            min_adv_usd=cfg.min_adv_usd,
-            vol_percentile=cfg.vol_percentile,
-            adv_days=cfg.adv_days,
-            vol_days=cfg.vol_days,
-            quiet=True,
-        )
-        if not screened:
-            raise RuntimeError(
-                "Empty expanded universe — lower min ADV$ or check Yahoo data"
-            )
-        uni = build_universe(screened)
-        self._row_ids = list(uni["row_ids"])
-        self._display_labels = [uni["labels"].get(rid, rid) for rid in self._row_ids]
-        self._load_tickers = list(uni["load_tickers"])
-        self._benchmark = uni["benchmark"]
-        n_core = sum(1 for s in screened if s.pinned)
-        n_disc = len(self._row_ids) - n_core
-        self._log(
-            f"Universe: {len(self._row_ids)} ETFs "
-            f"({n_core} core us.py + {n_disc} liquid discoveries)"
+        raise ValueError(
+            f"Unknown universe_mode {cfg.universe_mode!r}; use core, expanded, or main_table"
         )
 
     def _load_rrg_weekly_histories(
@@ -1078,7 +1049,7 @@ class UsRrgBacktestEngine:
 
 
 def compute_metrics(
-    df: pd.DataFrame, capital: float, *, benchmark: str = RRG_BENCHMARK_YAHOO
+    df: pd.DataFrame, capital: float, *, benchmark: str = rrg.RRG_BENCHMARK_YAHOO
 ) -> dict:
     from momentum.rrg_core import rrg_format_date
 
@@ -1223,15 +1194,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--universe",
         choices=("core", "expanded"),
-        default="expanded",
-        help="core = us.py only; expanded = core + liquid ADV$ discoveries (default)",
+        default="core",
+        help="core or expanded — both use us.py ETF list (default: core)",
     )
     parser.add_argument(
         "--min-adv",
         type=float,
         default=DEFAULT_MIN_ADV,
         metavar="USD",
-        help=f"Min ADV$ for liquid discoveries (default: {DEFAULT_MIN_ADV:,.0f})",
+        help=f"Min ADV$ for metrics when expanded (default: {DEFAULT_MIN_ADV:,.0f})",
     )
     parser.add_argument(
         "--vol-percentile",

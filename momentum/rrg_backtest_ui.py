@@ -282,7 +282,7 @@ def open_rrg_backtest(
             DEFAULT_VOL_PERCENTILE,
         )
 
-        bt_extra.setdefault("universe_mode", "expanded")
+        bt_extra.setdefault("universe_mode", "core")
         bt_extra.setdefault("min_adv_usd", DEFAULT_MIN_ADV)
         bt_extra.setdefault("vol_percentile", DEFAULT_VOL_PERCENTILE)
         bt_extra.setdefault("screen_categories", ("all",))
@@ -412,6 +412,7 @@ def open_rrg_backtest(
         from momentum.etf.us_rrg_universe_modes import (
             US_UNIVERSE_DROPDOWN_VALUES,
             US_UNIVERSE_LABELS,
+            US_UNIVERSE_SWITCHABLE,
             normalize_us_universe_mode,
         )
 
@@ -419,7 +420,7 @@ def open_rrg_backtest(
             label: key for key, label in US_UNIVERSE_LABELS.items()
         }
         init_mode = normalize_us_universe_mode(
-            str(bt_extra.get("universe_mode", "expanded"))
+            str(bt_extra.get("universe_mode", "core"))
         )
         us_universe_var.set(
             US_UNIVERSE_LABELS.get(init_mode, US_UNIVERSE_DROPDOWN_VALUES[0])
@@ -427,13 +428,18 @@ def open_rrg_backtest(
         uni_row = tk.Frame(params)
         uni_row.grid(row=params_row, column=0, columnspan=12, sticky="w", pady=(6, 0))
         tk.Label(uni_row, text="ETF universe:").pack(side=tk.LEFT)
-        ttk.Combobox(
-            uni_row,
-            textvariable=us_universe_var,
-            values=list(US_UNIVERSE_DROPDOWN_VALUES),
-            width=36,
-            state="readonly",
-        ).pack(side=tk.LEFT, padx=(4, 0))
+        if US_UNIVERSE_SWITCHABLE:
+            ttk.Combobox(
+                uni_row,
+                textvariable=us_universe_var,
+                values=list(US_UNIVERSE_DROPDOWN_VALUES),
+                width=36,
+                state="readonly",
+            ).pack(side=tk.LEFT, padx=(4, 0))
+        else:
+            tk.Label(uni_row, text=US_UNIVERSE_DROPDOWN_VALUES[0]).pack(
+                side=tk.LEFT, padx=(4, 0)
+            )
         _pack_portfolio_fill(uni_row)
         params_row += 1
 
@@ -715,7 +721,7 @@ def open_rrg_backtest(
         df.attrs["top_n"] = int(top_n_var.get())
         if profile == "us" and engine is not None:
             df.attrs["universe_mode"] = getattr(
-                engine.config, "universe_mode", "expanded"
+                engine.config, "universe_mode", "core"
             )
             df.attrs["universe_size"] = len(getattr(engine, "_row_ids", ()))
         if profile in ("india", "us", "stock") and _pick_label_to_key:
@@ -1299,7 +1305,7 @@ def launch_standalone_rrg_backtest(
             DEFAULT_VOL_PERCENTILE,
         )
 
-        init_mode = "expanded"
+        init_mode = "core"
         if backtest_extra and backtest_extra.get("universe_mode"):
             init_mode = normalize_us_universe_mode(str(backtest_extra["universe_mode"]))
         us_extra = {

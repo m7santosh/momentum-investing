@@ -1,4 +1,4 @@
-"""Screen US ETF candidates by ADV$; optional vol cap. Core us.py tickers always pass."""
+"""ADV$/vol metrics for the canonical us.py ETF list (no extra discovery tickers)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from momentum.etf.universes import us_universe as us_core
 from momentum.etf.universes import us_liquid_candidates as pool
 from utils.nse_bhavcopy import today_ist
 
@@ -24,20 +25,9 @@ class ScreenedEtf:
 
 
 def _candidate_tickers(categories: set[str]) -> list[str]:
-    if "all" in categories:
-        categories = set(pool.ALL_CATEGORIES)
-    out: list[str] = []
-    seen: set[str] = set()
-    for sym in pool.tickers:
-        cat = pool.ETF_CATEGORY.get(sym, "")
-        if cat in categories and sym not in seen:
-            seen.add(sym)
-            out.append(sym)
-    for sym in pool.ALWAYS_INCLUDE:
-        if sym not in seen:
-            seen.add(sym)
-            out.append(sym)
-    return out
+    """Always the canonical ``us.py`` list (category filter kept for CLI compat)."""
+    _ = categories
+    return list(us_core.TICKERS)
 
 
 def _extract_close_volume(raw: pd.DataFrame, ticker: str) -> tuple[pd.Series, pd.Series] | None:
@@ -172,14 +162,14 @@ def screen_us_etfs(
     always_include: frozenset[str] | None = None,
     quiet: bool = False,
 ) -> list[ScreenedEtf]:
-    """Return core us.py ETFs plus ADV$ discoveries (optional vol cap).
+    """Return all ``us.py`` ETFs with ADV$/vol metrics (optional vol cap).
 
     ``vol_percentile=100`` disables the vol filter (ADV$ only).
-    ``always_include`` defaults to ``us_liquid_candidates.ALWAYS_INCLUDE`` (us.py).
+    ``always_include`` defaults to ``us.py`` tickers; every symbol is kept.
     """
     cats = categories or set(pool.ALL_CATEGORIES)
     tickers = _candidate_tickers(cats)
-    pinned = always_include if always_include is not None else pool.ALWAYS_INCLUDE
+    pinned = always_include if always_include is not None else frozenset(us_core.TICKERS)
     if not tickers:
         return []
 
@@ -187,9 +177,8 @@ def screen_us_etfs(
     if not quiet:
         vol_msg = f"vol <= p{vol_percentile:.0f}" if apply_vol else "vol filter off"
         print(
-            f"Screening {len(tickers)} US ETF candidates "
-            f"({len(pinned)} core from us.py always kept; "
-            f"categories: {sorted(cats)}, min ADV$ {min_adv_usd:,.0f}, {vol_msg})..."
+            f"Screening {len(tickers)} US ETFs from us.py "
+            f"(min ADV$ {min_adv_usd:,.0f} for metrics only; {vol_msg})..."
         )
 
     metrics = _fetch_metrics(
@@ -239,34 +228,17 @@ def screen_us_etfs(
             )
         )
 
-    passed.sort(
-        key=lambda r: (
-            0 if r.pinned else 1,
-            r.category,
-            -r.adv_usd,
-            r.ticker,
-        )
-    )
+    order = {sym: i for i, sym in enumerate(us_core.TICKERS)}
+    passed.sort(key=lambda r: order.get(r.ticker, len(order)))
 
     if not quiet:
-        n_core = sum(1 for r in passed if r.pinned)
-        n_new = len(passed) - n_core
         if apply_vol and vol_cutoff is not None:
             print(
-                f"  Universe: {len(passed)} ETFs "
-                f"({n_core} core us.py + {n_new} ADV$/vol discoveries, vol <= {vol_cutoff:.1f}%)"
+                f"  Universe: {len(passed)} ETFs from us.py "
+                f"(vol <= {vol_cutoff:.1f}% when filter on)"
             )
         else:
-            print(
-                f"  Universe: {len(passed)} ETFs "
-                f"({n_core} core us.py + {n_new} ADV$ discoveries)"
-            )
-        by_cat: dict[str, int] = {}
-        for row in passed:
-            by_cat[row.category] = by_cat.get(row.category, 0) + 1
-        for cat in pool.ALL_CATEGORIES:
-            if cat in by_cat:
-                print(f"    {cat}: {by_cat[cat]}")
+            print(f"  Universe: {len(passed)} ETFs from us.py")
 
     return passed
 
@@ -285,5 +257,5 @@ def format_screen_table(rows: list[ScreenedEtf]) -> str:
         lines.append(
             f"{pin} {r.ticker:<7} {r.category:<10} {adv_s} {vol_s}  {r.label}"
         )
-    lines.append("* = core us.py (always in RRG)")
+    lines.append("* = us.py canonical list")
     return "\n".join(lines)

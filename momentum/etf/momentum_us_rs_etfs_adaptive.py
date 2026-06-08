@@ -26,7 +26,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from momentum.etf.universes.us import tickers
+from momentum.etf.universes import us_universe
 from utils.output_paths import FINAL_RESULT_ETF_DIR
 
 BENCHMARK_TICKER = "^GSPC"
@@ -154,7 +154,7 @@ def _collect_etf_rows(
     bench_adj: pd.Series, start_date: datetime, end_date: datetime
 ) -> list[dict]:
     summary: list[dict] = []
-    for ticker in tickers:
+    for ticker in us_universe.TICKERS:
         try:
             df = get_data(ticker, start_date, end_date)
             if len(df) == 0:
@@ -223,6 +223,7 @@ def _weight_label() -> str:
 
 
 def main() -> None:
+    us_universe.ensure_loaded()
     end_date = datetime.today()
     start_date = end_date - timedelta(days=365 * 2)
 

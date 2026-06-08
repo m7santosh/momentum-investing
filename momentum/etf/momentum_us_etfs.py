@@ -25,7 +25,10 @@ from utils.output_paths import FINAL_RESULT_ETF_DIR
 ETF_EMA_9 = 9
 
 # Universe: edit tickers in momentum/etf/universes/us.py
-from momentum.etf.universes.us import tickers
+from momentum.etf.universes import us_universe
+
+us_universe.ensure_loaded()
+tickers = us_universe.TICKERS
 
 
 def get_data(ticker, start_date, end_date):

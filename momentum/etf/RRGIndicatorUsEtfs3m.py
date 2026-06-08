@@ -1,6 +1,6 @@
 """RRG for US ETFs vs S&P 500 — fixed 3-month analysis (swing / tactical).
 
-Universe dropdown: Core (61 ETFs, us.py) or Expanded (core + liquid ADV$).
+Universe: canonical us.py ETF list (no core/expanded switch in UI).
 
 Examples:
     python momentum/etf/RRGIndicatorUsEtfs3m.py
@@ -48,7 +48,7 @@ def _parse_args() -> argparse.Namespace:
         "-u",
         choices=(US_UNIVERSE_CORE, US_UNIVERSE_EXPANDED),
         default=US_UNIVERSE_CORE,
-        help="ETF universe: core us.py (~61) or expanded liquid screen (default: core)",
+        help="Kept for CLI compat; core and expanded both load us.py (default: core)",
     )
     return parser.parse_args()
 

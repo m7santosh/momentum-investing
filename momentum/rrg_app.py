@@ -116,7 +116,7 @@ class RrgAppConfig:
     backtest_enabled: bool = False
     backtest_profile: str = "india"  # "india" | "us" | "stock"
     backtest_universe_key: str = "quality"
-    backtest_universe_mode: str = "expanded"  # US: "core" | "expanded"
+    backtest_universe_mode: str = "core"  # US: "core" | "expanded" (both use us.py)
     backtest_min_adv: float = 10_000_000.0
     backtest_vol_percentile: float = 100.0
     backtest_categories: tuple[str, ...] = ("all",)

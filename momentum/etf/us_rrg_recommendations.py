@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from momentum.etf.universes import us as _us_core
+from momentum.etf.universes import us_universe as _us_core
 from momentum.rrg_core import RRG_COLOR_IMPROVING, RRG_COLOR_LEADING, get_status
 
 # Near-duplicate products only — countries stay separate (EWY + EWT both allowed).
@@ -26,7 +26,8 @@ FRONTIER_TICKERS: frozenset[str] = frozenset(
     {"ARGT", "TUR", "GREK", "FM", "KSA", "ECH", "VNM", "EPOL", "EWW"}
 )
 
-CORE_US_TICKERS: frozenset[str] = frozenset(_us_core.tickers)
+def _core_us_tickers() -> frozenset[str]:
+    return frozenset(_us_core.TICKERS)
 
 SATELLITE_VOL_PCT = 35.0
 LOW_VOL_PCT = 22.0
@@ -100,7 +101,7 @@ def _score_candidate(
     if change_pct > 0:
         score += min(change_pct, 28.0) * 0.55
 
-    if ticker in CORE_US_TICKERS:
+    if ticker in _core_us_tickers():
         score += 10.0
     if vol > 0:
         if vol < LOW_VOL_PCT:
@@ -115,7 +116,7 @@ def _score_candidate(
         score += 4.0
 
     tags: list[str] = []
-    if ticker in CORE_US_TICKERS:
+    if ticker in _core_us_tickers():
         tags.append("Core us.py")
     if ticker in FRONTIER_TICKERS:
         tags.append("Frontier — size down")
