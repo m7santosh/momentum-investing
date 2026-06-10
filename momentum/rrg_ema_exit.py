@@ -56,6 +56,55 @@ def _weekly_price_series(
     return None
 
 
+def _entry_price_for_stop(
+    sym: str,
+    p_rebal: float,
+    entry_prices: dict[str, float] | None,
+) -> float:
+    if not entry_prices:
+        return p_rebal
+    bare = _bare_symbol(sym)
+    for key in (sym, bare):
+        px = entry_prices.get(key)
+        if px is not None and px > 0:
+            return float(px)
+    return p_rebal
+
+
+def split_holdings_at_stop_loss(
+    holdings: list[str],
+    mark_series: dict[str, pd.Series],
+    entry_prices: dict[str, float],
+    as_of: pd.Timestamp,
+    stop_loss_pct: float,
+) -> tuple[list[str], list[str]]:
+    """Drop holdings at/through ``as_of`` that are at or below stop from cost basis."""
+    if stop_loss_pct <= 0 or not holdings:
+        return list(holdings), []
+    stop_mult = 1.0 - stop_loss_pct / 100.0
+    kept: list[str] = []
+    dropped: list[str] = []
+    for sym in holdings:
+        p_stop = _entry_price_for_stop(sym, 0.0, entry_prices)
+        if p_stop <= 0:
+            kept.append(sym)
+            continue
+        series = _daily_close_series(mark_series, sym)
+        if series is None:
+            kept.append(sym)
+            continue
+        sliced = series.loc[:as_of]
+        if sliced.empty:
+            kept.append(sym)
+            continue
+        mark = float(sliced.iloc[-1])
+        if mark <= p_stop * stop_mult:
+            dropped.append(sym)
+        else:
+            kept.append(sym)
+    return kept, dropped
+
+
 def split_holdings_below_9ema(
     holdings: list[str],
     daily_close: dict[str, pd.Series],
@@ -200,8 +249,9 @@ def first_stop_loss_exit_day(
 
 
 def _first_intraweek_exit_day(
-    daily: pd.Series,
-    p_entry: float,
+    daily_9ema: pd.Series,
+    daily_stop: pd.Series,
+    p_stop_entry: float,
     decision_date: pd.Timestamp,
     period_end: pd.Timestamp,
     *,
@@ -212,12 +262,12 @@ def _first_intraweek_exit_day(
     """Earliest mid-week exit day and rule tag (``9ema`` | ``stop_loss``)."""
     candidates: list[tuple[pd.Timestamp, str]] = []
     if exit_below_9ema:
-        ema_day = first_9ema_exit_day(daily, decision_date, period_end)
+        ema_day = first_9ema_exit_day(daily_9ema, decision_date, period_end)
         if ema_day is not None:
             candidates.append((ema_day, "9ema"))
     if exit_stop_loss:
         sl_day = first_stop_loss_exit_day(
-            daily, p_entry, decision_date, period_end, stop_loss_pct
+            daily_stop, p_stop_entry, decision_date, period_end, stop_loss_pct
         )
         if sl_day is not None:
             candidates.append((sl_day, "stop_loss"))
@@ -239,6 +289,8 @@ def simulate_week_with_exits(
     exit_stop_loss: bool = False,
     stop_loss_pct: float = 5.0,
     through_date: pd.Timestamp | None = None,
+    entry_prices: dict[str, float] | None = None,
+    daily_adj: dict[str, pd.Series] | None = None,
 ) -> tuple[
     list[float],
     list[str],
@@ -296,9 +348,15 @@ def simulate_week_with_exits(
             per_slot.append({"sym": sym, "ret": 0.0})
             continue
 
+        p_stop = _entry_price_for_stop(sym, p_entry, entry_prices)
+        daily_stop = _daily_close_series(daily_adj, sym) if daily_adj else daily
+        if daily_stop is None or daily_stop.empty:
+            daily_stop = daily
+
         exit_day, rule = _first_intraweek_exit_day(
             daily,
-            p_entry,
+            daily_stop,
+            p_stop,
             decision_date,
             period_end,
             exit_below_9ema=exit_below_9ema,

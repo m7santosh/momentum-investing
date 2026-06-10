@@ -52,6 +52,7 @@ tickers = [
     'INFRAIETF.NS',
     'ITBEES.NS',
     'LIQUIDCASE.NS',
+    "LTGILTBEES.NS",
     'MAFANG.NS',
     'MAHKTECH.NS',
     'METALIETF.NS',

@@ -1,4 +1,4 @@
-"""Tkinter backtest UI for India ETF momentum rankers."""
+"""Tkinter backtest UI for US ETF momentum rankers."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from backtest.etf.backtest_etf_momentum import (  # noqa: E402
+from backtest.etf.backtest_us_etf_momentum import (  # noqa: E402
     REBALANCE_ALIASES,
     REBALANCE_LABELS,
     STRATEGY_KEYS,
@@ -34,7 +34,7 @@ from momentum.rrg_backtest_positions import (  # noqa: E402
 from momentum.rrg_backtest_ui import backtest_cum_pl_pct, backtest_drawdown_pct_series  # noqa: E402
 from momentum.rrg_core import rrg_config_date_str, rrg_format_date, rrg_parse_user_date  # noqa: E402
 from momentum.rrg_ui_copy import install_copy_support  # noqa: E402
-from utils.nse_bhavcopy import today_ist  # noqa: E402
+from datetime import date  # noqa: E402
 
 
 def _make_kv_tree(
@@ -119,10 +119,10 @@ def _apply_strategy_defaults(
     rebalance_var.set(REBALANCE_LABELS.get(defaults["rebalance_period"], "Weekly"))
 
 
-def open_etf_momentum_backtest(
+def open_us_etf_momentum_backtest(
     parent: tk.Misc,
     *,
-    initial_strategy: str = "momentum_rs_etfs",
+    initial_strategy: str = "momentum_us_rs_etfs",
     initial_start: str | None = None,
     initial_end: str | None = None,
 ) -> tk.Toplevel:
@@ -130,7 +130,7 @@ def open_etf_momentum_backtest(
         initial_strategy = STRATEGY_KEYS[0]
 
     win = tk.Toplevel(parent)
-    win.title("ETF Momentum Backtest")
+    win.title("US ETF Momentum Backtest")
     win.geometry("1140x820")
     win.minsize(940, 600)
     win.lift()
@@ -156,14 +156,14 @@ def open_etf_momentum_backtest(
     strategy_combo.grid(row=0, column=1, **_pad)
 
     tk.Label(params, text="Start:").grid(row=0, column=2, sticky="w")
-    start_default = initial_start or f"{today_ist().year}-01-01"
+    start_default = initial_start or f"{date.today().year}-01-01"
     start_var = tk.StringVar(value=rrg_format_date(start_default))
     start_entry = tk.Entry(params, textvariable=start_var, width=11)
     start_entry.grid(row=0, column=3, **_pad)
 
     tk.Label(params, text="End:").grid(row=0, column=4, sticky="w")
     end_var = tk.StringVar(
-        value=rrg_format_date(initial_end) if initial_end else rrg_format_date(today_ist())
+        value=rrg_format_date(initial_end) if initial_end else rrg_format_date(date.today())
     )
     end_entry = tk.Entry(params, textvariable=end_var, width=11)
     end_entry.grid(row=0, column=5, **_pad)
@@ -179,7 +179,7 @@ def open_etf_momentum_backtest(
     ).grid(row=0, column=7, **_pad)
 
     tk.Label(params, text="Portfolio:").grid(row=0, column=8, sticky="w")
-    portfolio_var = tk.IntVar(value=5)
+    portfolio_var = tk.IntVar(value=strategy_defaults(initial_strategy)["portfolio_size"])
     ttk.Spinbox(params, from_=1, to=30, width=4, textvariable=portfolio_var).grid(
         row=0, column=9, **_pad
     )
@@ -830,7 +830,7 @@ def open_etf_momentum_backtest(
 def main() -> int:
     root = tk.Tk()
     root.withdraw()
-    open_etf_momentum_backtest(root)
+    open_us_etf_momentum_backtest(root)
     root.mainloop()
     return 0
 

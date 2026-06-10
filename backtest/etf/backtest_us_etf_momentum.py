@@ -1,16 +1,16 @@
 """
-Walk-forward backtest engine for India NSE ETF momentum rankers.
+Walk-forward backtest engine for US ETF momentum rankers.
 
 Strategies (mirror live scanners):
-  - momentum_etfs.py           — abs momentum (1W/2W/1M)
-  - momentum_rs_etfs.py        — abs + RS blended (1W–3M)
-  - momentum_rs_etfs_adaptive.py — weighted RS (1W/2W/1M)
+  - momentum_us_etfs.py           — abs momentum (2W/1M/3M)
+  - momentum_us_rs_etfs.py        — abs + RS blended (2W/1M/3M)
+  - momentum_us_rs_etfs_adaptive.py — weighted RS (1W/2W/1M)
 
-Used by momentum/etf_momentum_backtest_ui.py and optional CLI.
+Used by momentum/etf_us_momentum_backtest_ui.py and optional CLI.
 
 Examples:
-    python backtest/etf/backtest_etf_momentum.py --strategy momentum_rs_etfs
-    python momentum/etf_momentum_backtest_ui.py
+    python backtest/etf/backtest_us_etf_momentum.py --strategy momentum_us_rs_etfs
+    python momentum/etf_us_momentum_backtest_ui.py
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,7 +30,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from momentum.etf.etf_momentum_engine import (  # noqa: E402
+from momentum.etf.etf_us_momentum_engine import (  # noqa: E402
     BENCH_EMA_FAST,
     BENCH_EMA_SLOW,
     BENCHMARK_TICKER,
@@ -39,20 +40,16 @@ from momentum.etf.etf_momentum_engine import (  # noqa: E402
     LB_2W,
     LB_3M,
     LB_52W,
-    MIN_ADTV_NEW_ETF_CRORES,
     MIN_HISTORY_SESSIONS,
     PROXIMITY_OF_52W_HIGH,
-    RETURN_SUFFIXES,
+    RETURN_SUFFIXES_LONG,
     RS_RANK_COLS,
+    W_ABS_LONG,
     W_RS_ADAPTIVE,
-    W_RS_BLEND,
-    _avg_adtv_crores,
-    _passes_established_trend_gate,
-    _symbol_display,
     _weighted_excess_return,
     classify_ema_regime,
 )
-from momentum.etf.universes.india import tickers as ETF_TICKERS  # noqa: E402
+from momentum.etf.universes import us_universe  # noqa: E402
 from momentum.rrg_core import rrg_config_date_str  # noqa: E402
 from momentum.rrg_ema_exit import (  # noqa: E402
     _daily_close_series,
@@ -62,19 +59,27 @@ from momentum.rrg_ema_exit import (  # noqa: E402
     split_holdings_below_9ema,
 )
 from momentum.rrg_portfolio_fill import equal_weight_port_return  # noqa: E402
-from utils.nse_bhavcopy import today_ist  # noqa: E402
 
 STRATEGY_KEYS = (
-    "momentum_etfs",
-    "momentum_rs_etfs",
-    "momentum_rs_etfs_adaptive",
+    "momentum_us_etfs",
+    "momentum_us_rs_etfs",
+    "momentum_us_rs_etfs_adaptive",
 )
 
 STRATEGY_LABELS: dict[str, str] = {
-    "momentum_etfs": "Abs Momentum",
-    "momentum_rs_etfs": "RS Blended",
-    "momentum_rs_etfs_adaptive": "RS Adaptive",
+    "momentum_us_etfs": "Abs Momentum",
+    "momentum_us_rs_etfs": "RS Blended",
+    "momentum_us_rs_etfs_adaptive": "RS Adaptive",
 }
+
+
+def _symbol_display(yahoo_ticker: str) -> str:
+    return yahoo_ticker
+
+
+def _etf_tickers() -> list[str]:
+    us_universe.ensure_loaded()
+    return list(us_universe.TICKERS)
 
 REBALANCE_ALIASES = {
     "bi-weekly": "biweekly",
@@ -98,9 +103,14 @@ PERIODS_PER_YEAR = {
 
 MIN_HISTORY = LB_52W + LB_3M + 30
 
-EXCEL_TO_YAHOO: dict[str, str] = {
-    _symbol_display(sym): sym for sym in ETF_TICKERS
-}
+_SYMBOL_MAP: dict[str, str] | None = None
+
+
+def _get_symbol_map() -> dict[str, str]:
+    global _SYMBOL_MAP
+    if _SYMBOL_MAP is None:
+        _SYMBOL_MAP = {sym: sym for sym in _etf_tickers()}
+    return _SYMBOL_MAP
 
 
 def normalize_backtest_date(value: str) -> str:
@@ -167,7 +177,7 @@ def _download_adj_vol_close(
 
 def strategy_defaults(strategy_key: str) -> dict[str, Any]:
     return {
-        "portfolio_size": 5,
+        "portfolio_size": 7,
         "exit_rank_threshold": 10,
         "benchmark_ticker": BENCHMARK_TICKER,
         "proximity_of_52w_high": PROXIMITY_OF_52W_HIGH,
@@ -183,12 +193,12 @@ def _rank_abs_at_date(
     proximity_of_52w_high: float,
 ) -> pd.DataFrame:
     summary: list[dict] = []
-    for yahoo_sym in ETF_TICKERS:
+    for yahoo_sym in _etf_tickers():
         if yahoo_sym not in etf_adj:
             continue
         adj = etf_adj[yahoo_sym].loc[:as_of]
         n = len(adj)
-        if n < LB_1M:
+        if n < LB_3M:
             continue
 
         ema200 = adj.ewm(span=EMA_SPAN, adjust=False).mean().iloc[-1]
@@ -200,20 +210,23 @@ def _rank_abs_at_date(
         summary.append(
             {
                 "Symbol": _symbol_display(yahoo_sym),
-                "Return_1M": (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100,
                 "Return_2W": (adj.iloc[-1] / adj.iloc[-LB_2W] - 1) * 100,
-                "Return_1W": (adj.iloc[-1] / adj.iloc[-LB_1W] - 1) * 100,
+                "Return_1M": (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100,
+                "Return_3M": (adj.iloc[-1] / adj.iloc[-LB_3M] - 1) * 100,
             }
         )
 
     if not summary:
         return pd.DataFrame()
 
+    w2w, w1m, w3m = W_ABS_LONG
     df = pd.DataFrame(summary)
-    df["Rank_1M"] = df["Return_1M"].rank(ascending=False)
     df["Rank_2W"] = df["Return_2W"].rank(ascending=False)
-    df["Rank_1W"] = df["Return_1W"].rank(ascending=False)
-    df["Final_Rank"] = 0.4 * df["Rank_1W"] + 0.4 * df["Rank_2W"] + 0.2 * df["Rank_1M"]
+    df["Rank_1M"] = df["Return_1M"].rank(ascending=False)
+    df["Rank_3M"] = df["Return_3M"].rank(ascending=False)
+    df["Final_Rank"] = (
+        w2w * df["Rank_2W"] + w1m * df["Rank_1M"] + w3m * df["Rank_3M"]
+    )
     out = df.sort_values("Final_Rank").reset_index(drop=True)
     out["Rank_Position"] = np.arange(1, len(out) + 1)
     return out
@@ -232,26 +245,17 @@ def _collect_rs_rows_at_date(
         return pd.DataFrame()
 
     rows: list[dict] = []
-    for yahoo_sym in ETF_TICKERS:
+    for yahoo_sym in _etf_tickers():
         if yahoo_sym not in etf_adj:
             continue
         adj = etf_adj[yahoo_sym].loc[:as_of]
         if len(adj) < MIN_HISTORY_SESSIONS:
             continue
-
-        if len(adj) >= LB_52W:
-            ema200 = float(adj.ewm(span=EMA_SPAN, adjust=False).mean().iloc[-1])
-            high_52w = float(adj.iloc[-LB_52W:].max())
-            last = float(adj.iloc[-1])
-            if last < ema200 or last < high_52w * proximity_of_52w_high:
-                continue
-        else:
-            vol_s = etf_vol.get(yahoo_sym)
-            if vol_s is None:
-                continue
-            vol = vol_s.reindex(adj.index).fillna(0.0)
-            if _avg_adtv_crores(adj, vol) < MIN_ADTV_NEW_ETF_CRORES:
-                continue
+        ema200 = float(adj.ewm(span=EMA_SPAN, adjust=False).mean().iloc[-1])
+        high_52w = float(adj.iloc[-min(LB_52W, len(adj)) :].max())
+        last = float(adj.iloc[-1])
+        if last < ema200 or last < high_52w * proximity_of_52w_high:
+            continue
 
         ret_1w = (adj.iloc[-1] / adj.iloc[-LB_1W] - 1) * 100
         ret_2w = (adj.iloc[-1] / adj.iloc[-LB_2W] - 1) * 100
@@ -278,10 +282,10 @@ def _collect_rs_rows_at_date(
                 "Return_2W": ret_2w,
                 "Return_1M": ret_1m,
                 "Return_3M": ret_3m,
-                "RS_1W_vs_N500": rs_1w,
-                "RS_2W_vs_N500": rs_2w,
-                "RS_1M_vs_N500": rs_1m,
-                "RS_3M_vs_N500": rs_3m,
+                "RS_1W_vs_SP500": rs_1w,
+                "RS_2W_vs_SP500": rs_2w,
+                "RS_1M_vs_SP500": rs_1m,
+                "RS_3M_vs_SP500": rs_3m,
             }
         )
 
@@ -302,30 +306,21 @@ def _rank_rs_blended_at_date(
     if df.empty:
         return df
 
-    w1w, w2w, w1m, w3m = W_RS_BLEND
-    for suf in RETURN_SUFFIXES:
+    w2w, w1m, w3m = W_ABS_LONG
+    for suf in RETURN_SUFFIXES_LONG:
         df[f"Rank_{suf}"] = df[f"Return_{suf}"].rank(ascending=False)
-    for suf in RETURN_SUFFIXES:
-        df[f"Rank_RS_{suf}"] = df[f"RS_{suf}_vs_N500"].rank(
+        df[f"Rank_RS_{suf}"] = df[f"RS_{suf}_vs_SP500"].rank(
             ascending=False, na_option="bottom"
         )
 
-    df["Abs_Score"] = (
-        w1w * df["Rank_1W"]
-        + w2w * df["Rank_2W"]
-        + w1m * df["Rank_1M"]
-        + w3m * df["Rank_3M"]
+    abs_rank_score = (
+        w2w * df["Rank_2W"] + w1m * df["Rank_1M"] + w3m * df["Rank_3M"]
     )
-    df["RS_Score"] = (
-        w1w * df["Rank_RS_1W"]
-        + w2w * df["Rank_RS_2W"]
-        + w1m * df["Rank_RS_1M"]
-        + w3m * df["Rank_RS_3M"]
+    rs_rank_score = (
+        w2w * df["Rank_RS_2W"] + w1m * df["Rank_RS_1M"] + w3m * df["Rank_RS_3M"]
     )
-    df["Abs_Momentum_Rank"] = df["Abs_Score"].rank(ascending=True)
-    df["Relative_Strength_Rank"] = df["RS_Score"].rank(ascending=True)
-    df["Blended_Rank"] = (df["Abs_Momentum_Rank"] + df["Relative_Strength_Rank"]) / 2
-    out = df.sort_values("Blended_Rank").reset_index(drop=True)
+    df["Final_Rank"] = (abs_rank_score + rs_rank_score) / 2
+    out = df.sort_values("Final_Rank").reset_index(drop=True)
     out["Rank_Position"] = np.arange(1, len(out) + 1)
     return out
 
@@ -363,11 +358,11 @@ def rank_at_date(
     *,
     proximity_of_52w_high: float,
 ) -> pd.DataFrame:
-    if strategy_key == "momentum_etfs":
+    if strategy_key == "momentum_us_etfs":
         return _rank_abs_at_date(
             etf_adj, as_of, proximity_of_52w_high=proximity_of_52w_high
         )
-    if strategy_key == "momentum_rs_etfs":
+    if strategy_key == "momentum_us_rs_etfs":
         return _rank_rs_blended_at_date(
             etf_adj,
             etf_vol,
@@ -375,7 +370,7 @@ def rank_at_date(
             as_of,
             proximity_of_52w_high=proximity_of_52w_high,
         )
-    if strategy_key == "momentum_rs_etfs_adaptive":
+    if strategy_key == "momentum_us_rs_etfs_adaptive":
         return _rank_rs_adaptive_at_date(
             etf_adj,
             etf_vol,
@@ -498,7 +493,7 @@ class EtfMomentumBacktestConfig:
     backtest_start: str
     backtest_end: str
     rebalance_period: str = "weekly"
-    portfolio_size: int = 5
+    portfolio_size: int = 7
     exit_rank_threshold: int = 10
     exit_rank_enabled: bool = False
     benchmark_ticker: str = BENCHMARK_TICKER
@@ -602,7 +597,7 @@ class EtfMomentumBacktestEngine:
         for sym_excel in holdings:
             if sym_excel in self._entry_prices:
                 continue
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
+            yh = _get_symbol_map().get(sym_excel)
             if not yh:
                 continue
             px = self._adj_price(self._etf_adj, yh, rebal_date)
@@ -629,7 +624,7 @@ class EtfMomentumBacktestEngine:
         cfg = self.config
         rows: list[dict[str, Any]] = []
         for sym_excel in dropped:
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
+            yh = _get_symbol_map().get(sym_excel)
             entry = self._entry_prices.get(sym_excel)
             exit_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
             if entry is None:
@@ -660,7 +655,7 @@ class EtfMomentumBacktestEngine:
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for sym_excel in dropped:
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
+            yh = _get_symbol_map().get(sym_excel)
             entry = self._entry_prices.get(sym_excel)
             exit_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
             if entry is None:
@@ -688,7 +683,7 @@ class EtfMomentumBacktestEngine:
         cfg = self.config
         rows: list[dict[str, Any]] = []
         for sym_excel, exit_day in mid_week_9ema:
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
+            yh = _get_symbol_map().get(sym_excel)
             entry = self._entry_prices.get(sym_excel)
             rebal_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
             if entry is None:
@@ -707,7 +702,7 @@ class EtfMomentumBacktestEngine:
             )
             self._entry_prices.pop(sym_excel, None)
         for sym_excel, exit_day in mid_week_stop_loss:
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
+            yh = _get_symbol_map().get(sym_excel)
             entry = self._entry_prices.get(sym_excel)
             rebal_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
             if entry is None:
@@ -764,7 +759,7 @@ class EtfMomentumBacktestEngine:
         period_rets: list[float] = []
         end_holdings: list[str] = []
         for sym_excel in holdings:
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
+            yh = _get_symbol_map().get(sym_excel)
             if not yh or yh not in self._etf_adj:
                 period_rets.append(0.0)
                 end_holdings.append(sym_excel)
@@ -810,7 +805,7 @@ class EtfMomentumBacktestEngine:
         rows: list[dict[str, Any]] = []
 
         for sym_excel in sorted(prev_set - set(holdings_at_rebal)):
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
+            yh = _get_symbol_map().get(sym_excel)
             entry = self._entry_prices.get(sym_excel)
             exit_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
             if entry is None:
@@ -840,7 +835,7 @@ class EtfMomentumBacktestEngine:
         rows.extend(intraweek_exits)
 
         for sym_excel in end_holdings:
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
+            yh = _get_symbol_map().get(sym_excel)
             rebal_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
             mark_px = self._adj_price(self._etf_adj, yh, next_date) if yh else None
             entry_orig = self._entry_prices.get(sym_excel, rebal_px)
@@ -865,9 +860,11 @@ class EtfMomentumBacktestEngine:
 
     def load_data(self) -> None:
         cfg = self.config
-        self._log(f"Downloading {len(ETF_TICKERS)} ETFs …")
+        tickers = _etf_tickers()
+        _get_symbol_map()
+        self._log(f"Downloading {len(tickers)} ETFs …")
         self._etf_adj, self._etf_vol, self._etf_close = _download_adj_vol_close(
-            list(ETF_TICKERS), cfg.backtest_start, cfg.backtest_end
+            tickers, cfg.backtest_start, cfg.backtest_end
         )
         self._log(f"  {len(self._etf_adj)} ETFs loaded")
 
@@ -1203,13 +1200,13 @@ def run_backtest_cli(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Backtest India ETF momentum rankers")
+    parser = argparse.ArgumentParser(description="Backtest US ETF momentum rankers")
     parser.add_argument(
         "--strategy",
-        default="momentum_rs_etfs",
+        default="momentum_us_rs_etfs",
         choices=list(STRATEGY_KEYS),
     )
-    parser.add_argument("--start", default=f"{today_ist().year}-01-01")
+    parser.add_argument("--start", default=f"{date.today().year}-01-01")
     parser.add_argument("--end", default=None)
     parser.add_argument(
         "--rebalance",
@@ -1250,7 +1247,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    end = args.end or today_ist().strftime("%Y-%m-%d")
+    end = args.end or date.today().strftime("%Y-%m-%d")
     metrics = run_backtest_cli(
         strategy_key=args.strategy,
         backtest_start=args.start,
