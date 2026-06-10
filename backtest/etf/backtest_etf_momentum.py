@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -52,14 +53,19 @@ from momentum.etf.etf_momentum_engine import (  # noqa: E402
     _weighted_excess_return,
     classify_ema_regime,
 )
-from momentum.etf.universes.india import tickers as ETF_TICKERS  # noqa: E402
+from momentum.etf.universes.india import (  # noqa: E402
+    DEFAULT_PARK_SLOT_ETF,
+    PARK_SLOT_ETFS,
+    is_park_slot_symbol,
+    overlap_bucket_for,
+    tickers as ETF_TICKERS,
+)
 from momentum.rrg_core import rrg_config_date_str  # noqa: E402
 from momentum.rrg_ema_exit import (  # noqa: E402
     _daily_close_series,
     close_below_9ema,
     simulate_week_with_exits,
     split_holdings_at_stop_loss,
-    split_holdings_below_9ema,
 )
 from momentum.rrg_portfolio_fill import equal_weight_port_return  # noqa: E402
 from utils.nse_bhavcopy import today_ist  # noqa: E402
@@ -168,12 +174,94 @@ def _download_adj_vol_close(
 def strategy_defaults(strategy_key: str) -> dict[str, Any]:
     return {
         "portfolio_size": 5,
+        "entry_rank_depth": 5,
         "exit_rank_threshold": 10,
         "benchmark_ticker": BENCHMARK_TICKER,
         "proximity_of_52w_high": PROXIMITY_OF_52W_HIGH,
         "rebalance_period": "weekly",
         "use_regime_filter": False,
+        "park_empty_slots": True,
+        "park_slot_etf": DEFAULT_PARK_SLOT_ETF,
     }
+
+
+def _strip_park_slots(holdings: list[str]) -> list[str]:
+    return [sym for sym in holdings if not is_park_slot_symbol(sym)]
+
+
+def _pad_holdings_with_park(
+    momentum_holdings: list[str],
+    top_n: int,
+    park_etf: str,
+) -> tuple[list[str], int]:
+    """Append park ETF slots so len == top_n; returns (padded list, park slot count)."""
+    if not momentum_holdings or top_n <= 0:
+        return list(momentum_holdings), 0
+    park = park_etf.strip().upper().replace(".NS", "")
+    result = list(momentum_holdings)
+    n_park = max(0, top_n - len(result))
+    result.extend([park] * n_park)
+    return result[:top_n], n_park
+
+
+def _alloc_slot_count(
+    *,
+    portfolio_size: int,
+    holdings_at_rebal: list[str],
+    park_slot_count: int,
+) -> int:
+    """Equal-weight slots for budget and returns (park pads to portfolio_size)."""
+    if park_slot_count > 0:
+        return portfolio_size
+    return max(len(holdings_at_rebal), 1) if holdings_at_rebal else 0
+
+
+def _format_holdings_label(holdings: list[str]) -> str:
+    if not holdings:
+        return "CASH"
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for sym in holdings:
+        if sym not in counts:
+            order.append(sym)
+            counts[sym] = 0
+        counts[sym] += 1
+    parts: list[str] = []
+    for sym in order:
+        n = counts[sym]
+        parts.append(f"{sym}×{n}" if n > 1 else sym)
+    return ", ".join(parts)
+
+
+def _slot_quantity(slot_budget: float, unit_price: float | None) -> int | None:
+    """Whole shares only (NSE does not allow fractional units)."""
+    if unit_price is None or unit_price <= 0 or slot_budget <= 0:
+        return None
+    qty = int(slot_budget // unit_price)
+    return qty if qty > 0 else None
+
+
+def _apply_slot_allocation(
+    row: dict[str, Any],
+    *,
+    slot_budget: float,
+    portfolio_value: float,
+    unit_price: float | None,
+) -> None:
+    qty = _slot_quantity(slot_budget, unit_price)
+    if qty is None:
+        row["alloc_qty"] = 0
+        row["alloc_amount"] = 0.0
+        row["alloc_pct"] = 0.0
+        return
+    actual_amt = round(qty * unit_price, 2)
+    row["alloc_qty"] = qty
+    row["alloc_amount"] = actual_amt
+    row["alloc_pct"] = (
+        round((actual_amt / portfolio_value) * 100.0, 2)
+        if portfolio_value > 0
+        else 0.0
+    )
 
 
 def _rank_abs_at_date(
@@ -427,6 +515,31 @@ def _above_9ema_at_rebal(
     return not close_below_9ema(close, as_of)
 
 
+def _overlap_winners(
+    ranked_df: pd.DataFrame,
+    rank_map: dict[str, int],
+    *,
+    retained_set: set[str],
+    max_entry_rank: int,
+    above_9ema: Callable[[str], bool],
+) -> set[str]:
+    """Best-ranked eligible symbol per overlap bucket (rank order)."""
+    winners: set[str] = set()
+    used_buckets: set[frozenset[str]] = set()
+    for sym in ranked_df["Symbol"]:
+        if not above_9ema(sym):
+            continue
+        if sym not in retained_set and rank_map[sym] > max_entry_rank:
+            continue
+        bucket = overlap_bucket_for(sym)
+        if bucket is not None and bucket in used_buckets:
+            continue
+        winners.add(sym)
+        if bucket is not None:
+            used_buckets.add(bucket)
+    return winners
+
+
 def _select_holdings(
     ranked_df: pd.DataFrame,
     prev_holdings: list[str],
@@ -434,7 +547,9 @@ def _select_holdings(
     worst_rank_held: int,
     *,
     exit_rank_enabled: bool = False,
+    exit_below_9ema: bool = False,
     entry_above_9ema: bool = True,
+    entry_rank_depth: int | None = None,
     daily_close: dict[str, pd.Series] | None = None,
     as_of: pd.Timestamp | None = None,
 ) -> list[str]:
@@ -442,28 +557,47 @@ def _select_holdings(
         return []
 
     rank_map = dict(zip(ranked_df["Symbol"], ranked_df["Rank_Position"]))
+    max_entry_rank = entry_rank_depth if entry_rank_depth is not None else top_n
+    need_9ema = bool(exit_below_9ema or entry_above_9ema)
+
+    def _above_9ema(sym: str) -> bool:
+        if not need_9ema:
+            return True
+        if daily_close is None or as_of is None:
+            raise ValueError("9 EMA filter requires daily_close and as_of")
+        return _above_9ema_at_rebal(sym, daily_close, as_of)
+
     if exit_rank_enabled:
         retained = [
-            sym for sym in prev_holdings if sym in rank_map and rank_map[sym] <= worst_rank_held
+            sym
+            for sym in prev_holdings
+            if sym in rank_map and rank_map[sym] <= worst_rank_held and _above_9ema(sym)
         ]
     else:
-        retained = [sym for sym in prev_holdings if sym in rank_map]
+        retained = [sym for sym in prev_holdings if sym in rank_map and _above_9ema(sym)]
     retained_set = set(retained)
-    retained.sort(key=lambda s: rank_map[s])
-    result = list(retained)
+    winners = _overlap_winners(
+        ranked_df,
+        rank_map,
+        retained_set=retained_set,
+        max_entry_rank=max_entry_rank,
+        above_9ema=_above_9ema,
+    )
+
+    result = [sym for sym in retained if sym in winners]
+    result.sort(key=lambda s: rank_map[s])
     slots_left = top_n - len(result)
     if slots_left <= 0:
         return result[:top_n]
 
     for sym in ranked_df["Symbol"]:
-        if sym in retained_set:
+        if sym in retained_set or sym in result:
             continue
-        if entry_above_9ema:
-            if daily_close is None or as_of is None:
-                raise ValueError("entry_above_9ema requires daily_close and as_of")
-            if not _above_9ema_at_rebal(sym, daily_close, as_of):
-                continue
-        elif rank_map[sym] > top_n:
+        if sym not in winners:
+            continue
+        if not _above_9ema(sym):
+            continue
+        if rank_map[sym] > max_entry_rank:
             continue
         result.append(sym)
         slots_left -= 1
@@ -492,6 +626,86 @@ def _exit_reason(
     return "Exit"
 
 
+_REGIME_CASH_REASON = "Trend_Down — cash when Trend_Down (regime filter)"
+
+
+def _regime_cash_skip_rows(
+    ranked_df: pd.DataFrame,
+    top_n: int,
+    *,
+    exclude: set[str],
+) -> list[dict[str, Any]]:
+    if ranked_df.empty:
+        return []
+    rows: list[dict[str, Any]] = []
+    for sym in ranked_df.sort_values("Rank_Position")["Symbol"].head(top_n):
+        if sym in exclude:
+            continue
+        rank_pos = int(ranked_df.loc[ranked_df["Symbol"] == sym, "Rank_Position"].iloc[0])
+        rows.append(
+            {
+                "ticker": sym,
+                "status": "Skipped",
+                "entry": None,
+                "exit": None,
+                "exit_date": None,
+                "exit_reason": f"{_REGIME_CASH_REASON} (rank {rank_pos})",
+                "pl_pct": None,
+            }
+        )
+    return rows
+
+
+def _overlap_exit_reason(
+    sym: str,
+    *,
+    rank_map: dict[str, int],
+    ranked_symbols: list[str],
+) -> str | None:
+    bucket = overlap_bucket_for(sym)
+    if bucket is None:
+        return None
+    sym_rank = rank_map.get(sym, 9999)
+    for peer in ranked_symbols:
+        if peer == sym or overlap_bucket_for(peer) != bucket:
+            continue
+        peer_rank = rank_map.get(peer, 9999)
+        if peer_rank < sym_rank:
+            return f"Overlap group — {peer} ranks higher (rank {peer_rank})"
+    return None
+
+
+def _rebalance_exit_reason(
+    sym: str,
+    *,
+    rank_map: dict[str, int],
+    holdings: list[str],
+    ranked_symbols: list[str],
+    top_n: int,
+    exit_rank_threshold: int,
+    exit_rank_enabled: bool,
+    exit_below_9ema: bool,
+    daily_close: dict[str, pd.Series] | None,
+    as_of: pd.Timestamp | None,
+) -> str:
+    if exit_below_9ema and daily_close is not None and as_of is not None:
+        if not _above_9ema_at_rebal(sym, daily_close, as_of):
+            return "Close below 9 EMA at rebalance"
+    overlap_reason = _overlap_exit_reason(
+        sym, rank_map=rank_map, ranked_symbols=ranked_symbols
+    )
+    if overlap_reason is not None and sym not in holdings:
+        return overlap_reason
+    return _exit_reason(
+        sym,
+        rank_map=rank_map,
+        holdings=holdings,
+        top_n=top_n,
+        exit_rank_threshold=exit_rank_threshold,
+        exit_rank_enabled=exit_rank_enabled,
+    )
+
+
 @dataclass
 class EtfMomentumBacktestConfig:
     strategy_key: str
@@ -499,6 +713,7 @@ class EtfMomentumBacktestConfig:
     backtest_end: str
     rebalance_period: str = "weekly"
     portfolio_size: int = 5
+    entry_rank_depth: int = 5
     exit_rank_threshold: int = 10
     exit_rank_enabled: bool = False
     benchmark_ticker: str = BENCHMARK_TICKER
@@ -506,9 +721,11 @@ class EtfMomentumBacktestConfig:
     initial_capital: float = 100_000.0
     use_regime_filter: bool = False
     exit_below_9ema: bool = True
-    entry_above_9ema: bool = True
+    entry_above_9ema: bool = False
     exit_stop_loss: bool = False
     stop_loss_pct: float = 5.0
+    park_empty_slots: bool = True
+    park_slot_etf: str = DEFAULT_PARK_SLOT_ETF
 
 
 def _intraweek_exits_enabled(cfg: EtfMomentumBacktestConfig) -> bool:
@@ -566,6 +783,7 @@ class EtfMomentumBacktestEngine:
         df.attrs["strategy_key"] = self.config.strategy_key
         df.attrs["rebalance_period"] = self.config.rebalance_period
         df.attrs["portfolio_size"] = self.config.portfolio_size
+        df.attrs["entry_rank_depth"] = self.config.entry_rank_depth
         df.attrs["benchmark_ticker"] = self.config.benchmark_ticker
         df.attrs["exit_rank_enabled"] = self.config.exit_rank_enabled
         df.attrs["use_regime_filter"] = self.config.use_regime_filter
@@ -573,6 +791,8 @@ class EtfMomentumBacktestEngine:
         df.attrs["entry_above_9ema"] = self.config.entry_above_9ema
         df.attrs["exit_stop_loss"] = self.config.exit_stop_loss
         df.attrs["stop_loss_pct"] = self.config.stop_loss_pct
+        df.attrs["park_empty_slots"] = self.config.park_empty_slots
+        df.attrs["park_slot_etf"] = self.config.park_slot_etf
         return df
 
     def reset_run(self) -> None:
@@ -648,18 +868,56 @@ class EtfMomentumBacktestEngine:
                         else f"Stop loss ({cfg.stop_loss_pct:g}%) at rebalance"
                     ),
                     "pl_pct": self._pl_pct(entry, exit_px),
+                    "period_pl_pct": self._pl_pct(exit_px, exit_px),
                 }
             )
             self._entry_prices.pop(sym_excel, None)
         return rows
 
-    def _rebal_9ema_exit_rows(
+    def _build_period_position_rows(
         self,
-        dropped: list[str],
+        *,
         rebal_date: pd.Timestamp,
+        next_date: pd.Timestamp,
+        prev_holdings: list[str],
+        holdings_at_rebal: list[str],
+        end_holdings: list[str],
+        intraweek_exits: list[dict[str, Any]],
+        rebal_sl_exits: list[dict[str, Any]],
+        ranked_df: pd.DataFrame,
+        top_n: int,
+        exit_rank_threshold: int,
+        exit_rank_enabled: bool,
+        exit_below_9ema: bool,
+        daily_close: dict[str, pd.Series] | None,
+        regime_cash: bool = False,
+        portfolio_value_at_rebal: float = 0.0,
+        momentum_holdings_at_rebal: list[str] | None = None,
+        park_slot_count: int = 0,
+        park_slot_etf: str = DEFAULT_PARK_SLOT_ETF,
     ) -> list[dict[str, Any]]:
+        prev_set = set(prev_holdings)
+        momentum_at_rebal = momentum_holdings_at_rebal or _strip_park_slots(
+            holdings_at_rebal
+        )
+        alloc_slots = _alloc_slot_count(
+            portfolio_size=top_n,
+            holdings_at_rebal=holdings_at_rebal,
+            park_slot_count=park_slot_count,
+        )
+        slot_alloc_amt = (
+            (portfolio_value_at_rebal / alloc_slots) if alloc_slots > 0 else 0.0
+        )
+        park_sym = park_slot_etf.strip().upper().replace(".NS", "")
+        rank_map = (
+            dict(zip(ranked_df["Symbol"], ranked_df["Rank_Position"]))
+            if not ranked_df.empty
+            else {}
+        )
+        ranked_symbols = ranked_df["Symbol"].tolist() if not ranked_df.empty else []
         rows: list[dict[str, Any]] = []
-        for sym_excel in dropped:
+
+        for sym_excel in sorted(prev_set - set(holdings_at_rebal)):
             yh = EXCEL_TO_YAHOO.get(sym_excel)
             entry = self._entry_prices.get(sym_excel)
             exit_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
@@ -672,11 +930,106 @@ class EtfMomentumBacktestEngine:
                     "entry": entry,
                     "exit": exit_px,
                     "exit_date": rebal_date,
-                    "exit_reason": "Close below 9 EMA at rebalance",
+                    "exit_reason": (
+                        _REGIME_CASH_REASON
+                        if regime_cash
+                        else _rebalance_exit_reason(
+                            sym_excel,
+                            rank_map=rank_map,
+                            holdings=holdings_at_rebal,
+                            ranked_symbols=ranked_symbols,
+                            top_n=top_n,
+                            exit_rank_threshold=exit_rank_threshold,
+                            exit_rank_enabled=exit_rank_enabled,
+                            exit_below_9ema=exit_below_9ema,
+                            daily_close=daily_close,
+                            as_of=rebal_date,
+                        )
+                    ),
                     "pl_pct": self._pl_pct(entry, exit_px),
+                    "period_pl_pct": self._pl_pct(exit_px, exit_px),
                 }
             )
+            _apply_slot_allocation(
+                rows[-1],
+                slot_budget=slot_alloc_amt,
+                portfolio_value=portfolio_value_at_rebal,
+                unit_price=exit_px or entry,
+            )
             self._entry_prices.pop(sym_excel, None)
+
+        rows.extend(rebal_sl_exits)
+        for row in rows:
+            if "alloc_amount" not in row:
+                price = row.get("entry") or row.get("exit")
+                _apply_slot_allocation(
+                    row,
+                    slot_budget=slot_alloc_amt,
+                    portfolio_value=portfolio_value_at_rebal,
+                    unit_price=price,
+                )
+        for row in intraweek_exits:
+            price = row.get("entry") or row.get("exit")
+            _apply_slot_allocation(
+                row,
+                slot_budget=slot_alloc_amt,
+                portfolio_value=portfolio_value_at_rebal,
+                unit_price=price,
+            )
+        rows.extend(intraweek_exits)
+
+        momentum_counts = Counter(momentum_at_rebal)
+        seen_end: Counter[str] = Counter()
+        for sym_excel in end_holdings:
+            yh = EXCEL_TO_YAHOO.get(sym_excel)
+            rebal_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
+            mark_px = self._adj_price(self._etf_adj, yh, next_date) if yh else None
+            entry_orig = self._entry_prices.get(sym_excel, rebal_px)
+            bare = sym_excel.strip().upper().replace(".NS", "")
+            seen_end[sym_excel] += 1
+            is_park_fill = (
+                park_slot_count > 0
+                and bare == park_sym
+                and seen_end[sym_excel] > momentum_counts.get(sym_excel, 0)
+            )
+            if is_park_fill:
+                status = "Park"
+                reason = f"Empty slot — park in {park_sym}"
+            elif sym_excel not in prev_set:
+                status = "New"
+                rank_pos = rank_map.get(sym_excel)
+                reason = (
+                    f"Open (rank {rank_pos})" if rank_pos is not None else "Open"
+                )
+            else:
+                status = "Held"
+                rank_pos = rank_map.get(sym_excel)
+                reason = (
+                    f"Open (rank {rank_pos})" if rank_pos is not None else "Open"
+                )
+            rows.append(
+                {
+                    "ticker": sym_excel,
+                    "status": status,
+                    "entry": entry_orig,
+                    "exit": mark_px,
+                    "exit_date": None,
+                    "exit_reason": reason,
+                    "pl_pct": self._pl_pct(entry_orig, mark_px),
+                    "period_pl_pct": self._pl_pct(rebal_px, mark_px),
+                }
+            )
+            _apply_slot_allocation(
+                rows[-1],
+                slot_budget=slot_alloc_amt,
+                portfolio_value=portfolio_value_at_rebal,
+                unit_price=rebal_px or entry_orig,
+            )
+
+        if regime_cash:
+            shown = {str(r["ticker"]) for r in rows}
+            rows.extend(_regime_cash_skip_rows(ranked_df, top_n, exclude=shown))
+
         return rows
 
     def _intraweek_exit_rows(
@@ -703,6 +1056,7 @@ class EtfMomentumBacktestEngine:
                     "exit_date": exit_day,
                     "exit_reason": "Close below 9 EMA (mid-period)",
                     "pl_pct": self._pl_pct(entry, exit_px),
+                    "period_pl_pct": self._pl_pct(rebal_px, exit_px),
                 }
             )
             self._entry_prices.pop(sym_excel, None)
@@ -727,6 +1081,7 @@ class EtfMomentumBacktestEngine:
                         else f"Stop loss ({cfg.stop_loss_pct:g}%)"
                     ),
                     "pl_pct": self._pl_pct(entry, exit_px),
+                    "period_pl_pct": self._pl_pct(rebal_px, exit_px),
                 }
             )
             self._entry_prices.pop(sym_excel, None)
@@ -737,11 +1092,16 @@ class EtfMomentumBacktestEngine:
         holdings: list[str],
         rebal_date: pd.Timestamp,
         next_date: pd.Timestamp,
+        *,
+        n_equal_weight_slots: int | None = None,
+        intraweek_exit_skip: frozenset[str] | None = None,
     ) -> tuple[float, list[str], list[dict[str, Any]]]:
         """Equal-weight period return with optional 9 EMA / stop-loss intraperiod exits."""
         cfg = self.config
         if not holdings:
             return 0.0, [], []
+
+        n_slots = n_equal_weight_slots if n_equal_weight_slots is not None else len(holdings)
 
         if _intraweek_exits_enabled(cfg):
             slot_returns, end_holdings, mid_9ema, mid_sl = simulate_week_with_exits(
@@ -756,8 +1116,9 @@ class EtfMomentumBacktestEngine:
                 stop_loss_pct=float(cfg.stop_loss_pct),
                 entry_prices=dict(self._entry_prices),
                 daily_adj=self._weekly_adj_excel(),
+                intraweek_exit_skip=intraweek_exit_skip,
             )
-            port_ret = equal_weight_port_return(slot_returns, len(holdings))
+            port_ret = equal_weight_port_return(slot_returns, n_slots)
             intraweek_exits = self._intraweek_exit_rows(mid_9ema, mid_sl, rebal_date)
             return port_ret, end_holdings, intraweek_exits
 
@@ -782,86 +1143,8 @@ class EtfMomentumBacktestEngine:
             )
             end_holdings.append(sym_excel)
 
-        port_ret = float(np.mean(period_rets)) if period_rets else 0.0
+        port_ret = equal_weight_port_return(period_rets, n_slots)
         return port_ret, end_holdings, []
-
-    def _build_period_position_rows(
-        self,
-        *,
-        rebal_date: pd.Timestamp,
-        next_date: pd.Timestamp,
-        prev_holdings: list[str],
-        holdings_at_rebal: list[str],
-        end_holdings: list[str],
-        rebal_9ema_exits: list[dict[str, Any]],
-        intraweek_exits: list[dict[str, Any]],
-        rebal_sl_exits: list[dict[str, Any]],
-        ranked_df: pd.DataFrame,
-        top_n: int,
-        exit_rank_threshold: int,
-        exit_rank_enabled: bool,
-    ) -> list[dict[str, Any]]:
-        prev_set = set(prev_holdings)
-        rank_map = (
-            dict(zip(ranked_df["Symbol"], ranked_df["Rank_Position"]))
-            if not ranked_df.empty
-            else {}
-        )
-        rows: list[dict[str, Any]] = []
-
-        for sym_excel in sorted(prev_set - set(holdings_at_rebal)):
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
-            entry = self._entry_prices.get(sym_excel)
-            exit_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
-            if entry is None:
-                entry = exit_px
-            rows.append(
-                {
-                    "ticker": sym_excel,
-                    "status": "Exit",
-                    "entry": entry,
-                    "exit": exit_px,
-                    "exit_date": rebal_date,
-                    "exit_reason": _exit_reason(
-                        sym_excel,
-                        rank_map=rank_map,
-                        holdings=holdings_at_rebal,
-                        top_n=top_n,
-                        exit_rank_threshold=exit_rank_threshold,
-                        exit_rank_enabled=exit_rank_enabled,
-                    ),
-                    "pl_pct": self._pl_pct(entry, exit_px),
-                }
-            )
-            self._entry_prices.pop(sym_excel, None)
-
-        rows.extend(rebal_9ema_exits)
-        rows.extend(rebal_sl_exits)
-        rows.extend(intraweek_exits)
-
-        for sym_excel in end_holdings:
-            yh = EXCEL_TO_YAHOO.get(sym_excel)
-            rebal_px = self._adj_price(self._etf_adj, yh, rebal_date) if yh else None
-            mark_px = self._adj_price(self._etf_adj, yh, next_date) if yh else None
-            entry_orig = self._entry_prices.get(sym_excel, rebal_px)
-            status = "New" if sym_excel not in prev_set else "Held"
-            rank_pos = rank_map.get(sym_excel)
-            rows.append(
-                {
-                    "ticker": sym_excel,
-                    "status": status,
-                    "entry": entry_orig,
-                    "exit": mark_px,
-                    "exit_date": None,
-                    "exit_reason": (
-                        f"Open (rank {rank_pos})" if rank_pos is not None else "Open"
-                    ),
-                    "pl_pct": self._pl_pct(entry_orig, mark_px),
-                    "period_pl_pct": self._pl_pct(rebal_px, mark_px),
-                }
-            )
-
-        return rows
 
     def load_data(self) -> None:
         cfg = self.config
@@ -908,8 +1191,16 @@ class EtfMomentumBacktestEngine:
         )
         go_cash = cfg.use_regime_filter and regime == "Trend_Down"
 
+        ranked_df = pd.DataFrame()
         if go_cash:
-            ranked_df = pd.DataFrame()
+            ranked_df = rank_at_date(
+                cfg.strategy_key,
+                self._etf_adj,
+                self._etf_vol,
+                self._bench_adj,
+                rebal_date,
+                proximity_of_52w_high=cfg.proximity_of_52w_high,
+            )
             holdings = []
         else:
             ranked_df = rank_at_date(
@@ -920,15 +1211,18 @@ class EtfMomentumBacktestEngine:
                 rebal_date,
                 proximity_of_52w_high=cfg.proximity_of_52w_high,
             )
+            need_9ema = cfg.entry_above_9ema or cfg.exit_below_9ema
             holdings = _select_holdings(
                 ranked_df,
-                self._prev_holdings,
+                _strip_park_slots(self._prev_holdings),
                 cfg.portfolio_size,
                 cfg.exit_rank_threshold,
                 exit_rank_enabled=cfg.exit_rank_enabled,
+                exit_below_9ema=cfg.exit_below_9ema,
                 entry_above_9ema=cfg.entry_above_9ema,
-                daily_close=self._daily_close_excel() if cfg.entry_above_9ema else None,
-                as_of=rebal_date if cfg.entry_above_9ema else None,
+                entry_rank_depth=cfg.entry_rank_depth,
+                daily_close=self._daily_close_excel() if need_9ema else None,
+                as_of=rebal_date if need_9ema else None,
             )
 
         self._ensure_entry_prices(holdings, rebal_date)
@@ -945,15 +1239,33 @@ class EtfMomentumBacktestEngine:
             rebal_sl_exits = self._rebal_stop_loss_exit_rows(dropped, rebal_date)
             holdings = kept
 
-        rebal_9ema_exits: list[dict[str, Any]] = []
-        if cfg.exit_below_9ema and holdings:
-            kept, dropped = split_holdings_below_9ema(
-                holdings, self._daily_close_excel(), rebal_date
+        momentum_holdings = list(holdings)
+        park_slot_count = 0
+        if cfg.park_empty_slots and holdings and not go_cash:
+            park_etf = cfg.park_slot_etf.strip().upper().replace(".NS", "")
+            if park_etf not in PARK_SLOT_ETFS:
+                park_etf = DEFAULT_PARK_SLOT_ETF
+            holdings, park_slot_count = _pad_holdings_with_park(
+                momentum_holdings, cfg.portfolio_size, park_etf
             )
-            rebal_9ema_exits = self._rebal_9ema_exit_rows(dropped, rebal_date)
-            holdings = kept
+            self._ensure_entry_prices(holdings, rebal_date)
+
+        portfolio_value_at_rebal = self._portfolio_value
+        n_slots = _alloc_slot_count(
+            portfolio_size=cfg.portfolio_size,
+            holdings_at_rebal=holdings,
+            park_slot_count=park_slot_count,
+        )
+        skip_intraweek = (
+            frozenset(PARK_SLOT_ETFS) if park_slot_count > 0 else None
+        )
+
         port_ret, end_holdings, intraweek_exits = self._simulate_period_returns(
-            holdings, rebal_date, next_date
+            holdings,
+            rebal_date,
+            next_date,
+            n_equal_weight_slots=n_slots,
+            intraweek_exit_skip=skip_intraweek,
         )
         position_rows = self._build_period_position_rows(
             rebal_date=rebal_date,
@@ -961,13 +1273,19 @@ class EtfMomentumBacktestEngine:
             prev_holdings=list(self._prev_holdings),
             holdings_at_rebal=holdings,
             end_holdings=end_holdings,
-            rebal_9ema_exits=rebal_9ema_exits,
             intraweek_exits=intraweek_exits,
             rebal_sl_exits=rebal_sl_exits,
             ranked_df=ranked_df,
             top_n=cfg.portfolio_size,
             exit_rank_threshold=cfg.exit_rank_threshold,
             exit_rank_enabled=cfg.exit_rank_enabled,
+            exit_below_9ema=cfg.exit_below_9ema,
+            daily_close=self._daily_close_excel() if cfg.exit_below_9ema else None,
+            regime_cash=go_cash,
+            portfolio_value_at_rebal=portfolio_value_at_rebal,
+            momentum_holdings_at_rebal=momentum_holdings,
+            park_slot_count=park_slot_count,
+            park_slot_etf=cfg.park_slot_etf,
         )
 
         b_from = self._bench_adj.loc[:rebal_date]
@@ -980,24 +1298,32 @@ class EtfMomentumBacktestEngine:
 
         turnover = 0.0
         new_entries_count = 0
-        if self._prev_holdings:
-            old_set = set(self._prev_holdings)
-            new_set = set(end_holdings)
-            new_entries_count = len(new_set - old_set)
-            changed = len(old_set.symmetric_difference(new_set))
-            turnover = changed / max(len(old_set | new_set), 1)
+        prev_momentum = set(_strip_park_slots(self._prev_holdings))
+        end_momentum = set(_strip_park_slots(end_holdings))
+        if prev_momentum or end_momentum:
+            new_entries_count = len(end_momentum - prev_momentum)
+            changed = len(prev_momentum.symmetric_difference(end_momentum))
+            turnover = changed / max(len(prev_momentum | end_momentum), 1)
         else:
-            new_entries_count = len(end_holdings)
+            new_entries_count = len(end_momentum)
 
-        self._portfolio_value *= 1 + port_ret
+        portfolio_value_end = portfolio_value_at_rebal * (1 + port_ret)
+        self._portfolio_value = portfolio_value_end
 
         record = {
             "Period": i + 1,
             "Rebal_Date": rebal_date,
             "End_Date": next_date,
-            "Holdings": ", ".join(end_holdings) if end_holdings else "CASH",
+            "Holdings": _format_holdings_label(end_holdings),
             "Open_Tickers": list(end_holdings),
-            "Num_Holdings": len(end_holdings),
+            "Num_Holdings": len(momentum_holdings),
+            "Num_Slots": len(holdings) if holdings else 0,
+            "Park_Slots": park_slot_count,
+            "Momentum_Holdings": ", ".join(momentum_holdings) if momentum_holdings else "CASH",
+            "Equal_Weight_Slots": n_slots,
+            "Slot_Alloc_Amount": (
+                portfolio_value_at_rebal / n_slots if n_slots > 0 else 0.0
+            ),
             "Universe_Ranked": len(ranked_df),
             "Regime": regime,
             "Port_Return": port_ret,
@@ -1005,7 +1331,11 @@ class EtfMomentumBacktestEngine:
             "Excess_Return": port_ret - bench_ret,
             "Turnover": turnover,
             "New_Entries": new_entries_count,
-            "EMA_9_Exits_Rebal": len(rebal_9ema_exits),
+            "EMA_9_Exits_Rebal": sum(
+                1
+                for row in position_rows
+                if row.get("exit_reason") == "Close below 9 EMA at rebalance"
+            ),
             "Stop_Loss_Exits_Rebal": len(rebal_sl_exits),
             "EMA_9_Exits_Midweek": sum(
                 1
@@ -1018,7 +1348,9 @@ class EtfMomentumBacktestEngine:
                 for row in intraweek_exits
                 if str(row.get("exit_reason", "")).startswith("Stop loss")
             ),
-            "Portfolio_Value": self._portfolio_value,
+            "Portfolio_Value_Start": portfolio_value_at_rebal,
+            "Portfolio_Value_End": portfolio_value_end,
+            "Portfolio_Value": portfolio_value_end,
             "Strategy": STRATEGY_LABELS.get(cfg.strategy_key, cfg.strategy_key),
             "Rebalance": REBALANCE_LABELS.get(cfg.rebalance_period, cfg.rebalance_period),
             "Position_Rows": position_rows,
@@ -1122,6 +1454,7 @@ def build_config_from_ui(
     backtest_end: str,
     rebalance_period: str = "weekly",
     portfolio_size: int | None = None,
+    entry_rank_depth: int | None = None,
     exit_rank_threshold: int | None = None,
     exit_rank_enabled: bool = False,
     benchmark_ticker: str | None = None,
@@ -1129,19 +1462,26 @@ def build_config_from_ui(
     initial_capital: float = 100_000.0,
     use_regime_filter: bool = False,
     exit_below_9ema: bool = True,
-    entry_above_9ema: bool = True,
+    entry_above_9ema: bool = False,
     exit_stop_loss: bool = False,
     stop_loss_pct: float = 5.0,
+    park_empty_slots: bool | None = None,
+    park_slot_etf: str | None = None,
 ) -> EtfMomentumBacktestConfig:
     defaults = strategy_defaults(strategy_key)
     ps = portfolio_size if portfolio_size is not None else defaults["portfolio_size"]
+    erd = entry_rank_depth if entry_rank_depth is not None else defaults["entry_rank_depth"]
     ex = exit_rank_threshold if exit_rank_threshold is not None else defaults["exit_rank_threshold"]
+    park_etf = (park_slot_etf or defaults["park_slot_etf"]).strip().upper().replace(".NS", "")
+    if park_etf not in PARK_SLOT_ETFS:
+        park_etf = DEFAULT_PARK_SLOT_ETF
     return EtfMomentumBacktestConfig(
         strategy_key=strategy_key,
         backtest_start=normalize_backtest_date(backtest_start),
         backtest_end=normalize_backtest_date(backtest_end),
         rebalance_period=REBALANCE_ALIASES.get(rebalance_period, rebalance_period),
         portfolio_size=ps,
+        entry_rank_depth=max(int(erd), ps),
         exit_rank_threshold=max(ex, ps),
         exit_rank_enabled=exit_rank_enabled,
         benchmark_ticker=benchmark_ticker or defaults["benchmark_ticker"],
@@ -1156,6 +1496,12 @@ def build_config_from_ui(
         entry_above_9ema=entry_above_9ema,
         exit_stop_loss=exit_stop_loss,
         stop_loss_pct=float(stop_loss_pct),
+        park_empty_slots=(
+            defaults["park_empty_slots"]
+            if park_empty_slots is None
+            else bool(park_empty_slots)
+        ),
+        park_slot_etf=park_etf,
     )
 
 
@@ -1166,6 +1512,7 @@ def run_backtest_cli(
     backtest_end: str,
     rebalance_period: str = "weekly",
     portfolio_size: int | None = None,
+    entry_rank_depth: int | None = None,
     exit_rank_threshold: int | None = None,
     exit_rank_enabled: bool = False,
     benchmark_ticker: str | None = None,
@@ -1173,7 +1520,7 @@ def run_backtest_cli(
     initial_capital: float = 100_000.0,
     use_regime_filter: bool = False,
     exit_below_9ema: bool = True,
-    entry_above_9ema: bool = True,
+    entry_above_9ema: bool = False,
     exit_stop_loss: bool = False,
     stop_loss_pct: float = 5.0,
 ) -> dict:
@@ -1183,6 +1530,7 @@ def run_backtest_cli(
         backtest_end=backtest_end,
         rebalance_period=rebalance_period,
         portfolio_size=portfolio_size,
+        entry_rank_depth=entry_rank_depth,
         exit_rank_threshold=exit_rank_threshold,
         exit_rank_enabled=exit_rank_enabled,
         benchmark_ticker=benchmark_ticker,
@@ -1217,6 +1565,12 @@ def main() -> int:
         choices=["weekly", "biweekly", "bi-weekly", "monthly"],
     )
     parser.add_argument("--portfolio-size", type=int, default=None)
+    parser.add_argument(
+        "--entry-rank-depth",
+        type=int,
+        default=None,
+        help="Max rank to scan when filling empty portfolio slots (default: strategy default)",
+    )
     parser.add_argument("--exit-rank-threshold", type=int, default=None)
     parser.add_argument(
         "--exit-rank",
@@ -1232,10 +1586,18 @@ def main() -> int:
         action="store_true",
         help="Disable 9 EMA exit (default: on)",
     )
+    parser.set_defaults(entry_above_9ema=False)
+    parser.add_argument(
+        "--entry-above-9ema",
+        dest="entry_above_9ema",
+        action="store_true",
+        help="Require close above 9 EMA for new entries (default: off)",
+    )
     parser.add_argument(
         "--no-entry-above-9ema",
-        action="store_true",
-        help="Disable 9 EMA entry filter (default: on)",
+        dest="entry_above_9ema",
+        action="store_false",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--exit-stop-loss",
@@ -1257,6 +1619,7 @@ def main() -> int:
         backtest_end=end,
         rebalance_period=args.rebalance,
         portfolio_size=args.portfolio_size,
+        entry_rank_depth=args.entry_rank_depth,
         exit_rank_threshold=args.exit_rank_threshold,
         exit_rank_enabled=args.exit_rank,
         benchmark_ticker=args.benchmark_ticker,
@@ -1264,7 +1627,7 @@ def main() -> int:
         initial_capital=args.capital,
         use_regime_filter=args.regime_filter,
         exit_below_9ema=not args.no_exit_below_9ema,
-        entry_above_9ema=not args.no_entry_above_9ema,
+        entry_above_9ema=args.entry_above_9ema,
         exit_stop_loss=args.exit_stop_loss,
         stop_loss_pct=args.stop_loss_pct,
     )

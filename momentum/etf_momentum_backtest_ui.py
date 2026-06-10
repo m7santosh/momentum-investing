@@ -37,6 +37,30 @@ from momentum.rrg_ui_copy import install_copy_support  # noqa: E402
 from utils.nse_bhavcopy import today_ist  # noqa: E402
 
 
+def _format_quantity(value) -> str:
+    if value is None:
+        return "—"
+    return str(int(value))
+
+
+def _format_alloc_pct(value) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):.2f}%"
+
+
+def _format_allocated(value) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):,.2f}"
+
+
+def _format_portfolio_value(value) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):,.2f}"
+
+
 def _make_kv_tree(
     parent: tk.Misc,
     *,
@@ -71,24 +95,34 @@ def _fill_pick_tree(tree: ttk.Treeview, rows: list[dict] | None) -> None:
     for item in tree.get_children():
         tree.delete(item)
     if not rows:
-        tree.insert("", tk.END, values=("—", "—", "—", "—", "—", "—", "—"))
+        tree.insert("", tk.END, values=("—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—"))
         return
     for row in rows:
-        if row.get("status") == "Exit":
+        status = row.get("status") or "—"
+        if status == "Exit":
             date_s = format_exit_date(row.get("exit_date"))
             mark_or_exit = format_price(row.get("exit"))
+        elif status == "Skipped":
+            date_s = "—"
+            mark_or_exit = "—"
         else:
             date_s = "Open"
             mark_or_exit = format_price(row.get("exit"))
+        alloc_pct = row.get("alloc_pct")
+        alloc_amt = row.get("alloc_amount")
         tree.insert(
             "",
             tk.END,
             values=(
                 row.get("ticker") or "—",
-                row.get("status") or "—",
+                status,
                 format_price(row.get("entry")),
                 mark_or_exit,
                 date_s,
+                _format_alloc_pct(alloc_pct),
+                _format_quantity(row.get("alloc_qty")),
+                _format_allocated(alloc_amt),
+                format_pl_pct(row.get("period_pl_pct")),
                 format_pl_pct(row.get("pl_pct")),
                 row.get("exit_reason") or "—",
             ),
@@ -105,6 +139,7 @@ def _strategy_key_from_label(label: str) -> str:
 def _apply_strategy_defaults(
     strategy_var: tk.StringVar,
     portfolio_var: tk.IntVar,
+    entry_rank_var: tk.IntVar,
     exit_rank_var: tk.IntVar,
     benchmark_var: tk.StringVar,
     proximity_var: tk.StringVar,
@@ -112,7 +147,9 @@ def _apply_strategy_defaults(
 ) -> None:
     key = _strategy_key_from_label(strategy_var.get())
     defaults = strategy_defaults(key)
-    portfolio_var.set(defaults["portfolio_size"])
+    ps = int(defaults["portfolio_size"])
+    portfolio_var.set(ps)
+    entry_rank_var.set(max(int(defaults["entry_rank_depth"]), ps))
     exit_rank_var.set(defaults["exit_rank_threshold"])
     benchmark_var.set(defaults["benchmark_ticker"])
     proximity_var.set(f"{defaults['proximity_of_52w_high']:.2f}")
@@ -178,20 +215,36 @@ def open_etf_momentum_backtest(
         state="readonly",
     ).grid(row=0, column=7, **_pad)
 
-    tk.Label(params, text="Portfolio:").grid(row=0, column=8, sticky="w")
+    tk.Label(params, text="Portfolio size:").grid(row=0, column=8, sticky="w")
     portfolio_var = tk.IntVar(value=5)
-    ttk.Spinbox(params, from_=1, to=30, width=4, textvariable=portfolio_var).grid(
-        row=0, column=9, **_pad
+    portfolio_spin = ttk.Spinbox(
+        params, from_=1, to=30, width=4, textvariable=portfolio_var
     )
+    portfolio_spin.grid(row=0, column=9, **_pad)
+
+    tk.Label(params, text="Entry rank:").grid(row=0, column=10, sticky="w")
+    entry_rank_var = tk.IntVar(value=5)
+    entry_rank_spin = ttk.Spinbox(
+        params, from_=5, to=50, width=4, textvariable=entry_rank_var
+    )
+    entry_rank_spin.grid(row=0, column=11, padx=(4, 14), sticky="w")
+
+    def _sync_entry_rank_floor(*_args: object) -> None:
+        ps = max(int(portfolio_var.get()), 1)
+        entry_rank_spin.config(from_=ps)
+        if int(entry_rank_var.get()) < ps:
+            entry_rank_var.set(ps)
+
+    portfolio_var.trace_add("write", _sync_entry_rank_floor)
 
     exit_rank_enabled_var = tk.BooleanVar(value=False)
     exit_rank_cb = ttk.Checkbutton(params, text="Exit rank", variable=exit_rank_enabled_var)
-    exit_rank_cb.grid(row=0, column=10, padx=(0, 2), sticky="w")
+    exit_rank_cb.grid(row=0, column=12, padx=(0, 2), sticky="w")
     exit_rank_var = tk.IntVar(value=10)
     exit_rank_spin = ttk.Spinbox(
         params, from_=1, to=50, width=4, textvariable=exit_rank_var
     )
-    exit_rank_spin.grid(row=0, column=11, padx=(4, 0), sticky="w")
+    exit_rank_spin.grid(row=0, column=13, padx=(4, 0), sticky="w")
 
     def _toggle_exit_rank_spin() -> None:
         exit_rank_spin.config(
@@ -268,8 +321,32 @@ def open_etf_momentum_backtest(
     stop_loss_cb.config(command=_toggle_stop_loss_spin)
     _toggle_stop_loss_spin()
 
+    park_empty_slots_var = tk.BooleanVar(value=True)
+    park_slot_var = tk.StringVar(value="LIQUIDCASE")
+    park_cb = ttk.Checkbutton(
+        params, text="Park empty slots", variable=park_empty_slots_var
+    )
+    park_cb.grid(row=1, column=9, padx=(0, 4), pady=(6, 0), sticky="w")
+    tk.Label(params, text="Park:").grid(row=1, column=10, sticky="w", pady=(6, 0))
+    park_combo = ttk.Combobox(
+        params,
+        textvariable=park_slot_var,
+        values=("LIQUIDCASE", "LTGILTBEES"),
+        width=11,
+        state="readonly",
+    )
+    park_combo.grid(row=1, column=11, padx=(4, 0), pady=(6, 0), sticky="w")
+
+    def _toggle_park_combo() -> None:
+        park_combo.config(
+            state="readonly" if park_empty_slots_var.get() else tk.DISABLED
+        )
+
+    park_cb.config(command=_toggle_park_combo)
+    _toggle_park_combo()
+
     exit_below_9ema_var = tk.BooleanVar(value=True)
-    entry_above_9ema_var = tk.BooleanVar(value=True)
+    entry_above_9ema_var = tk.BooleanVar(value=False)
 
     mode_var = tk.StringVar(value="all")
     mode_row = tk.Frame(params)
@@ -298,11 +375,13 @@ def open_etf_momentum_backtest(
     _apply_strategy_defaults(
         strategy_var,
         portfolio_var,
+        entry_rank_var,
         exit_rank_var,
         benchmark_var,
         proximity_var,
         rebalance_var,
     )
+    _sync_entry_rank_floor()
 
     btn_row = tk.Frame(params)
     btn_row.grid(row=3, column=0, columnspan=12, sticky="w", pady=(8, 0))
@@ -345,7 +424,19 @@ def open_etf_momentum_backtest(
 
     pick_frame = tk.LabelFrame(detail_pane, text="Rebalance tickers", padx=4, pady=4)
     detail_pane.add(pick_frame, weight=2)
-    pick_cols = ("Symbol", "Status", "Entry", "Mark/Exit", "Date", "P/L %", "Reason")
+    pick_cols = (
+        "Symbol",
+        "Status",
+        "Entry",
+        "Mark/Exit",
+        "Date",
+        "Alloc %",
+        "Qty",
+        "Allocated",
+        "Period P/L %",
+        "Since entry %",
+        "Reason",
+    )
     pick_table = tk.Frame(pick_frame)
     pick_table.pack(fill=tk.BOTH, expand=True)
     pick_tree = ttk.Treeview(
@@ -357,8 +448,12 @@ def open_etf_momentum_backtest(
         "Entry": 76,
         "Mark/Exit": 76,
         "Date": 84,
-        "P/L %": 68,
-        "Reason": 280,
+        "Alloc %": 52,
+        "Qty": 72,
+        "Allocated": 78,
+        "Period P/L %": 72,
+        "Since entry %": 72,
+        "Reason": 220,
     }
     for col in pick_cols:
         pick_tree.heading(col, text=col)
@@ -391,7 +486,8 @@ def open_etf_momentum_backtest(
         "Port%",
         "Bench%",
         "DD%",
-        "Value",
+        "Val start",
+        "Val end",
     )
     _log_col_widths = {
         "Period": 52,
@@ -402,7 +498,8 @@ def open_etf_momentum_backtest(
         "Port%": 64,
         "Bench%": 64,
         "DD%": 56,
-        "Value": 88,
+        "Val start": 88,
+        "Val end": 88,
     }
     log_table = tk.Frame(log_frame)
     log_table.pack(fill=tk.BOTH, expand=True)
@@ -470,6 +567,7 @@ def open_etf_momentum_backtest(
             backtest_end=rrg_config_date_str(end_var.get()),
             rebalance_period=_rebalance_key(),
             portfolio_size=int(portfolio_var.get()),
+            entry_rank_depth=max(int(entry_rank_var.get()), int(portfolio_var.get())),
             exit_rank_threshold=int(exit_rank_var.get()),
             exit_rank_enabled=bool(exit_rank_enabled_var.get()),
             benchmark_ticker=benchmark_var.get().strip(),
@@ -480,6 +578,8 @@ def open_etf_momentum_backtest(
             entry_above_9ema=bool(entry_above_9ema_var.get()),
             exit_stop_loss=bool(exit_stop_loss_var.get()),
             stop_loss_pct=_parse_stop_loss_pct() if exit_stop_loss_var.get() else 5.0,
+            park_empty_slots=bool(park_empty_slots_var.get()),
+            park_slot_etf=park_slot_var.get().strip(),
         )
 
     def _sync_engine_config() -> None:
@@ -487,6 +587,7 @@ def open_etf_momentum_backtest(
             return
         ui = _ui_config()
         engine.config.portfolio_size = ui.portfolio_size
+        engine.config.entry_rank_depth = ui.entry_rank_depth
         engine.config.exit_rank_threshold = ui.exit_rank_threshold
         engine.config.exit_rank_enabled = ui.exit_rank_enabled
         engine.config.proximity_of_52w_high = ui.proximity_of_52w_high
@@ -495,6 +596,8 @@ def open_etf_momentum_backtest(
         engine.config.entry_above_9ema = ui.entry_above_9ema
         engine.config.exit_stop_loss = ui.exit_stop_loss
         engine.config.stop_loss_pct = ui.stop_loss_pct
+        engine.config.park_empty_slots = ui.park_empty_slots
+        engine.config.park_slot_etf = ui.park_slot_etf
 
     def _config_needs_reload(
         old: EtfMomentumBacktestConfig, new: EtfMomentumBacktestConfig
@@ -625,7 +728,10 @@ def open_etf_momentum_backtest(
                     f"{row['Port_Return'] * 100:+.2f}",
                     f"{row['Bench_Return'] * 100:+.2f}",
                     f"{dd_series[i]:.2f}",
-                    f"{row['Portfolio_Value']:,.0f}",
+                    _format_portfolio_value(
+                        row.get("Portfolio_Value_Start", row["Portfolio_Value"])
+                    ),
+                    _format_portfolio_value(row.get("Portfolio_Value_End", row["Portfolio_Value"])),
                 ),
             )
 
@@ -635,12 +741,28 @@ def open_etf_momentum_backtest(
             _fill_pick_tree(pick_tree, None)
             return
         cap = _parse_capital()
-        cum_pl = backtest_cum_pl_pct(float(record["Portfolio_Value"]), cap)
+        port_end = float(record.get("Portfolio_Value_End", record["Portfolio_Value"]))
+        cum_pl = backtest_cum_pl_pct(port_end, cap)
         fields = {
             "Period start": rrg_format_date(record["Rebal_Date"]),
             "Period end": rrg_format_date(record["End_Date"]),
+            "Portfolio value (start)": _format_portfolio_value(
+                record.get("Portfolio_Value_Start")
+            ),
+            "Portfolio value (end)": _format_portfolio_value(
+                record.get("Portfolio_Value_End", record.get("Portfolio_Value"))
+            ),
             "Market regime": str(record.get("Regime", "—")),
             "Holdings": record.get("Holdings") or "CASH",
+            "Momentum ETFs": record.get("Momentum_Holdings") or "—",
+            "Park slots": str(record.get("Park_Slots", 0)),
+            "Equal-weight slots": str(record.get("Equal_Weight_Slots", "—")),
+            "Slot allocation": (
+                f"{record.get('Slot_Alloc_Amount', 0):,.2f}"
+                if record.get("Slot_Alloc_Amount") is not None
+                else "—"
+            ),
+            "Ranked ETFs (screen)": str(record.get("Universe_Ranked", 0)),
             "New entries": str(record.get("New_Entries", 0)),
             "9 EMA exits (rebal)": str(record.get("EMA_9_Exits_Rebal", 0)),
             "9 EMA exits (mid-period)": str(record.get("EMA_9_Exits_Midweek", 0)),
@@ -649,7 +771,6 @@ def open_etf_momentum_backtest(
             "Portfolio % (period)": f"{record['Port_Return'] * 100:+.2f}",
             "Portfolio P/L % (since start)": f"{cum_pl:+.2f}",
             "Benchmark %": f"{record['Bench_Return'] * 100:+.2f}",
-            "Portfolio value": f"{record['Portfolio_Value']:,.0f}",
         }
         _fill_kv_tree(detail_tree, fields, empty="—")
         _fill_pick_tree(pick_tree, record.get("Position_Rows"))
@@ -807,11 +928,13 @@ def open_etf_momentum_backtest(
         _apply_strategy_defaults(
             strategy_var,
             portfolio_var,
+            entry_rank_var,
             exit_rank_var,
             benchmark_var,
             proximity_var,
             rebalance_var,
         )
+        _sync_entry_rank_floor()
 
     strategy_combo.bind("<<ComboboxSelected>>", _on_strategy_change)
 

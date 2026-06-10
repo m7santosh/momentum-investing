@@ -258,8 +258,11 @@ def _first_intraweek_exit_day(
     exit_below_9ema: bool,
     exit_stop_loss: bool,
     stop_loss_pct: float,
+    skip_intraweek_exits: bool = False,
 ) -> tuple[pd.Timestamp | None, str | None]:
     """Earliest mid-week exit day and rule tag (``9ema`` | ``stop_loss``)."""
+    if skip_intraweek_exits:
+        return None, None
     candidates: list[tuple[pd.Timestamp, str]] = []
     if exit_below_9ema:
         ema_day = first_9ema_exit_day(daily_9ema, decision_date, period_end)
@@ -291,6 +294,7 @@ def simulate_week_with_exits(
     through_date: pd.Timestamp | None = None,
     entry_prices: dict[str, float] | None = None,
     daily_adj: dict[str, pd.Series] | None = None,
+    intraweek_exit_skip: frozenset[str] | None = None,
 ) -> tuple[
     list[float],
     list[str],
@@ -353,6 +357,10 @@ def simulate_week_with_exits(
         if daily_stop is None or daily_stop.empty:
             daily_stop = daily
 
+        bare_sym = _bare_symbol(sym)
+        skip_exit = bool(
+            intraweek_exit_skip and bare_sym in intraweek_exit_skip
+        )
         exit_day, rule = _first_intraweek_exit_day(
             daily,
             daily_stop,
@@ -362,6 +370,7 @@ def simulate_week_with_exits(
             exit_below_9ema=exit_below_9ema,
             exit_stop_loss=exit_stop_loss,
             stop_loss_pct=stop_loss_pct,
+            skip_intraweek_exits=skip_exit,
         )
         if exit_day is not None:
             p_exit = _close_on_date(daily, weekly, exit_day) or p_entry

@@ -7,7 +7,7 @@ momentum_us_rs_etfs_adaptive.py for on-screen display and backtest.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -136,11 +136,38 @@ def _rs_vs_benchmark(
     return return_1w, return_2w, return_1m, return_3m, rs_1w, rs_2w, rs_1m, rs_3m
 
 
-def _collect_rs_rows(bench_adj: pd.Series, start_date, end_date) -> list[dict]:
+def _truncate_ohlcv(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
+    if df is None or len(df) == 0:
+        return df
+    out = df.loc[:as_of]
+    if out.empty:
+        return out
+    if "Close" in out.columns:
+        return out.dropna(subset=["Close"])
+    return out
+
+
+def _resolve_as_of(as_of_date: str | None) -> pd.Timestamp:
+    if as_of_date and str(as_of_date).strip():
+        as_of = pd.Timestamp(str(as_of_date).strip()).normalize()
+        if as_of > pd.Timestamp(datetime.today().date()):
+            raise ValueError(f"As-of date cannot be in the future ({as_of_date}).")
+        return as_of
+    return pd.Timestamp(datetime.today().date())
+
+
+def _collect_rs_rows(
+    bench_adj: pd.Series,
+    start_date,
+    end_date,
+    *,
+    as_of: pd.Timestamp,
+) -> list[dict]:
     summary: list[dict] = []
     for ticker in us_universe.TICKERS:
         try:
             df = get_data(ticker, start_date, end_date)
+            df = _truncate_ohlcv(df, as_of)
             if df is None or len(df) == 0:
                 continue
 
@@ -371,17 +398,19 @@ def _compute_rs_adaptive(df_summary: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return df_out[cols], len(df_ranked)
 
 
-def fetch_us_etf_momentum_snapshot() -> UsEtfMomentumSnapshot:
-    """Fetch data and compute all three US ranker outputs."""
+def fetch_us_etf_momentum_snapshot(as_of_date: str | None = None) -> UsEtfMomentumSnapshot:
+    """Fetch data and compute all three US ranker outputs as of ``as_of_date`` (YYYY-MM-DD)."""
     us_universe.ensure_loaded()
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=365 * 2)
-    run_date = end_date.strftime("%Y-%m-%d")
+    as_of = _resolve_as_of(as_of_date)
+    end_date = as_of + pd.Timedelta(days=1)
+    start_date = as_of - pd.Timedelta(days=365 * 2)
+    run_date = as_of.strftime("%Y-%m-%d")
 
     abs_data: dict[str, pd.DataFrame] = {}
     for ticker in us_universe.TICKERS:
         try:
             stock_data = get_data(ticker, start_date, end_date)
+            stock_data = _truncate_ohlcv(stock_data, as_of)
             if stock_data is not None and len(stock_data) > 0:
                 abs_data[ticker] = stock_data
         except Exception:
@@ -390,20 +419,24 @@ def fetch_us_etf_momentum_snapshot() -> UsEtfMomentumSnapshot:
     abs_df = _compute_abs_momentum(abs_data)
 
     sp500_df = get_data(BENCHMARK_TICKER, start_date, end_date)
+    sp500_df = _truncate_ohlcv(sp500_df, as_of)
     if sp500_df is None or len(sp500_df) == 0:
-        raise RuntimeError(f"No rows for benchmark {BENCHMARK_TICKER}")
+        raise RuntimeError(f"No benchmark data for {BENCHMARK_TICKER} on or before {run_date}")
 
     sp500_adj = _adj_close_series(sp500_df).dropna()
+    if sp500_adj.empty:
+        raise RuntimeError(f"No benchmark prices on or before {run_date}")
     market_regime = classify_ema_regime(sp500_adj, BENCH_EMA_FAST, BENCH_EMA_SLOW)
     benchmark_1m = _benchmark_return_1m(sp500_adj)
 
-    rs_rows = _collect_rs_rows(sp500_adj, start_date, end_date)
+    rs_rows = _collect_rs_rows(sp500_adj, start_date, end_date, as_of=as_of)
     rs_summary = pd.DataFrame(rs_rows)
 
     rs_blended = _compute_rs_blended(rs_summary.copy())
     rs_adaptive, etfs_ranked = _compute_rs_adaptive(rs_summary.copy())
 
     run_info: dict[str, str | int | float | None] = {
+        "As_Of_Date": run_date,
         "Run_Date": run_date,
         "Weight_Profile": _weight_label_adaptive(),
         "Rank_By": "Weighted_RS_pct vs S&P 500 (highest first)",

@@ -5,21 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from momentum.etf.universes import us_universe as _us_core
+from momentum.etf.universes.us import overlap_bucket_for
 from momentum.rrg_core import RRG_COLOR_IMPROVING, RRG_COLOR_LEADING, get_status
-
-# Near-duplicate products only — countries stay separate (EWY + EWT both allowed).
-_OVERLAP_BUCKETS: tuple[frozenset[str], ...] = (
-    frozenset({"SOXX", "SMH", "XSD"}),
-    frozenset({"XSW", "SKYY", "IGV", "CLOU"}),
-    frozenset({"CIBR", "HACK"}),
-    frozenset({"IBB", "XBI"}),
-    frozenset({"BITO", "IBIT"}),
-    frozenset({"TAN", "ICLN", "QCLN", "FAN"}),
-    frozenset({"FXI", "MCHI"}),
-    frozenset({"KWEB", "CQQQ"}),
-    frozenset({"GDX", "GDXJ"}),
-    frozenset({"VNQ", "IYR", "XLRE"}),
-)
 
 # Smaller / frontier — penalized unless momentum score is very strong.
 FRONTIER_TICKERS: frozenset[str] = frozenset(
@@ -61,10 +48,7 @@ def parse_rank_delta(text: str) -> int | None:
 
 
 def _bucket_for(ticker: str) -> frozenset[str] | None:
-    for bucket in _OVERLAP_BUCKETS:
-        if ticker in bucket:
-            return bucket
-    return None
+    return overlap_bucket_for(ticker)
 
 
 def format_vol_pct(vol: float) -> str:

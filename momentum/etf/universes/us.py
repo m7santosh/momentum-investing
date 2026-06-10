@@ -196,6 +196,7 @@ tickers = [
     'ETHA',
     # --- Bonds / cash ---
     'SGOV',
+    'BIL',
     'BND',
     'TLT',
     'HYG',
@@ -490,6 +491,7 @@ ETF_LABELS = {
     "WGMI": "Bitcoin Miners",
     "ETHA": "Ethereum",
     "SGOV": "0-3 Month Treasury",
+    "BIL": "1-3 Month T-Bill ETF",
     "BND": "Total Bond Market",
     "TLT": "20+ Year Treasury",
     "HYG": "High Yield Corporate Bond",
@@ -602,5 +604,36 @@ ETF_LABELS = {
     "XSLV": "Invesco S&P SmallCap Low Volatility ETF",
     "XSHD": "Invesco S&P SmallCap High Dividend Low Volatility ETF",
 }
+
+# Near-duplicate tradable ETFs — at most one per bucket in a portfolio.
+OVERLAP_BUCKETS: tuple[frozenset[str], ...] = (
+    frozenset({"SOXX", "SMH", "XSD"}),
+    frozenset({"XSW", "SKYY", "IGV", "CLOU"}),
+    frozenset({"CIBR", "HACK"}),
+    frozenset({"IBB", "XBI"}),
+    frozenset({"BITO", "IBIT"}),
+    frozenset({"TAN", "ICLN", "QCLN", "FAN"}),
+    frozenset({"FXI", "MCHI"}),
+    frozenset({"KWEB", "CQQQ"}),
+    frozenset({"GDX", "GDXJ"}),
+    frozenset({"VNQ", "IYR", "XLRE"}),
+)
+
+PARK_SLOT_ETFS: tuple[str, ...] = ("SGOV", "BIL")
+DEFAULT_PARK_SLOT_ETF = "SGOV"
+
+
+def is_park_slot_symbol(symbol: str) -> bool:
+    bare = (symbol or "").strip().upper()
+    return bare in PARK_SLOT_ETFS
+
+
+def overlap_bucket_for(symbol: str) -> frozenset[str] | None:
+    bare = (symbol or "").strip().upper()
+    for bucket in OVERLAP_BUCKETS:
+        if bare in bucket:
+            return bucket
+    return None
+
 
 # --- end ticker universe ---

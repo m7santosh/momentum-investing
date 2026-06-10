@@ -7,7 +7,6 @@ momentum_rs_etfs_adaptive.py for on-screen display and later validation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -179,12 +178,22 @@ def _compute_abs_momentum(
             within_30_pct_high = adj.iloc[-1] >= high_52_week * PROXIMITY_OF_52W_HIGH
 
             if adj.iloc[-1] >= df["EMA200"].iloc[-1] and within_30_pct_high:
+                close_on_adj = _close_series(df).reindex(adj.index).ffill().bfill()
+                ema9_close = float(
+                    close_on_adj.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1]
+                )
+                last_close = float(close_on_adj.iloc[-1])
+                close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+
                 return_1m = (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100
                 return_1w = (adj.iloc[-1] / adj.iloc[-LB_1W] - 1) * 100
                 return_2w = (adj.iloc[-1] / adj.iloc[-LB_2W] - 1) * 100
                 summary.append(
                     {
                         "Symbol": _symbol_display(ticker),
+                        "Close": round(last_close, 2),
+                        "9EMA": round(ema9_close, 2),
+                        "Close_Below_9EMA": close_below_9ema,
                         "Return_1M": return_1m,
                         "Return_2W": return_2w,
                         "Return_1W": return_1w,
@@ -212,15 +221,57 @@ def _compute_abs_momentum(
 
     df_out = df_summary.sort_values("Final_Rank").head(TOP_N_ABS).copy()
     df_out.insert(0, "Position", np.arange(1, len(df_out) + 1))
-    return df_out.reset_index(drop=True)
+    final_cols = [
+        "Position",
+        "Symbol",
+        "Close",
+        "9EMA",
+        "Close_Below_9EMA",
+        "Return_1W",
+        "Return_2W",
+        "Return_1M",
+        "Rank_1W",
+        "Rank_2W",
+        "Rank_1M",
+        "Final_Rank",
+    ]
+    return df_out[final_cols].reset_index(drop=True)
 
 
-def _collect_rs_rows(nifty_adj: pd.Series, start_date, end_date) -> list[dict]:
+def _truncate_ohlcv(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
+    if df is None or len(df) == 0:
+        return df
+    out = df.loc[:as_of]
+    if out.empty:
+        return out
+    if "Close" in out.columns:
+        return out.dropna(subset=["Close"])
+    return out
+
+
+def _resolve_as_of(as_of_date: str | None) -> pd.Timestamp:
+    if as_of_date and str(as_of_date).strip():
+        as_of = pd.Timestamp(str(as_of_date).strip()).normalize()
+        if as_of > pd.Timestamp(today_ist()):
+            raise ValueError(f"As-of date cannot be in the future ({as_of_date}).")
+        return as_of
+    return pd.Timestamp(today_ist())
+
+
+def _collect_rs_rows(
+    nifty_adj: pd.Series,
+    start_date,
+    end_date,
+    *,
+    patch_nse: bool,
+    as_of: pd.Timestamp,
+) -> list[dict]:
     summary: list[dict] = []
     for sym in tickers:
         try:
-            df = get_data(sym, start_date, end_date, patch_nse=True)
-            if len(df) == 0:
+            df = get_data(sym, start_date, end_date, patch_nse=patch_nse)
+            df = _truncate_ohlcv(df, as_of)
+            if df is None or len(df) == 0:
                 continue
 
             adj = _adj_close_series(df).dropna()
@@ -434,16 +485,19 @@ def _compute_rs_adaptive(df_summary: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return df_out[final_cols], len(df_ranked)
 
 
-def fetch_etf_momentum_snapshot() -> EtfMomentumSnapshot:
-    """Fetch data and compute all three ranker outputs."""
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=365 * 2)
-    run_date = end_date.strftime("%Y-%m-%d")
+def fetch_etf_momentum_snapshot(as_of_date: str | None = None) -> EtfMomentumSnapshot:
+    """Fetch data and compute all three ranker outputs as of ``as_of_date`` (YYYY-MM-DD)."""
+    as_of = _resolve_as_of(as_of_date)
+    end_date = as_of + pd.Timedelta(days=1)
+    start_date = as_of - pd.Timedelta(days=365 * 2)
+    run_date = as_of.strftime("%Y-%m-%d")
+    patch_nse = as_of.date() >= today_ist()
 
     abs_data: dict[str, pd.DataFrame] = {}
     for ticker in tickers:
         try:
             stock_data = get_data(ticker, start_date, end_date, patch_nse=False)
+            stock_data = _truncate_ohlcv(stock_data, as_of)
             if stock_data is not None and len(stock_data) > 0:
                 abs_data[ticker] = stock_data
         except Exception:
@@ -451,21 +505,27 @@ def fetch_etf_momentum_snapshot() -> EtfMomentumSnapshot:
 
     abs_df = _compute_abs_momentum(abs_data)
 
-    nifty_df = get_data(BENCHMARK_TICKER, start_date, end_date, patch_nse=True)
+    nifty_df = get_data(BENCHMARK_TICKER, start_date, end_date, patch_nse=patch_nse)
+    nifty_df = _truncate_ohlcv(nifty_df, as_of)
     if nifty_df is None or len(nifty_df) == 0:
-        raise RuntimeError(f"No rows for benchmark {BENCHMARK_TICKER}")
+        raise RuntimeError(f"No benchmark data for {BENCHMARK_TICKER} on or before {run_date}")
 
     nifty_adj = _adj_close_series(nifty_df).dropna()
+    if nifty_adj.empty:
+        raise RuntimeError(f"No benchmark prices on or before {run_date}")
     market_regime = classify_ema_regime(nifty_adj, BENCH_EMA_FAST, BENCH_EMA_SLOW)
     benchmark_1m = _benchmark_return_1m(nifty_adj)
 
-    rs_rows = _collect_rs_rows(nifty_adj, start_date, end_date)
+    rs_rows = _collect_rs_rows(
+        nifty_adj, start_date, end_date, patch_nse=patch_nse, as_of=as_of
+    )
     rs_summary = pd.DataFrame(rs_rows)
 
     rs_blended = _compute_rs_blended(rs_summary.copy())
     rs_adaptive, etfs_ranked = _compute_rs_adaptive(rs_summary.copy())
 
     run_info: dict[str, str | int | float | None] = {
+        "As_Of_Date": run_date,
         "Run_Date": run_date,
         "Weight_Profile": _weight_label_adaptive(),
         "Rank_By": "Weighted_RS_pct vs N500 (highest first)",

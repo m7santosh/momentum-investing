@@ -10,6 +10,7 @@ import pandas as pd
 import yfinance as yf
 
 from momentum.etf.universes import india as _india_core
+from momentum.etf.universes.india import overlap_bucket_for
 from momentum.etf.us_rrg_recommendations import (
     _build_concise_reason,
     _build_reason,
@@ -22,15 +23,6 @@ from utils.nse_bhavcopy import today_ist
 
 # Cash-equivalent sleeve — not a tactical swing target.
 EXCLUDE_REF_ETFS: frozenset[str] = frozenset({"LIQUIDCASE"})
-
-# Near-duplicate tradable symbols (ref ETF column).
-_OVERLAP_BUCKETS: tuple[frozenset[str], ...] = (
-    frozenset({"MIDCAPETF", "MOMIDMTM", "HDFCSML250"}),
-    frozenset({"NIFTYBEES", "NEXT50IETF", "MOVALUE"}),
-    frozenset({"MON100", "MAFANG"}),
-    frozenset({"HNGSNGBEES", "MAHKTECH"}),
-    frozenset({"PSUBNKBEES", "PVTBANIETF"}),
-)
 
 CORE_REF_ETFS: frozenset[str] = frozenset(
     t.replace(".NS", "") for t in _india_core.DEFAULT_VISIBLE
@@ -147,11 +139,7 @@ def _extract_close(raw, ticker: str) -> pd.Series | None:
 
 
 def _bucket_for_ref(ref: str) -> frozenset[str] | None:
-    bare = ref.replace(".NS", "").upper()
-    for bucket in _OVERLAP_BUCKETS:
-        if bare in bucket:
-            return bucket
-    return None
+    return overlap_bucket_for(ref)
 
 
 def _score_candidate(

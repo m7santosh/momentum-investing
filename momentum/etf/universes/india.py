@@ -26,6 +26,7 @@ DEFAULT_VISIBLE = {
     'MODEFENCE.NS',
     'MOENERGY.NS',
     'MON100.NS',
+    'MONQ50.NS',
     'MOREALTY.NS',
     'MOTOUR.NS',
     'OILIETF.NS',
@@ -60,6 +61,7 @@ tickers = [
     'MOCAPITAL.NS',
     'MODEFENCE.NS',
     'MON100.NS',
+    'MONQ50.NS',
     'MOREALTY.NS',
     'MOTOUR.NS',
     'MOVALUE.NS',
@@ -94,6 +96,8 @@ ETF_TO_NSE_INDEX = {
     'INFRAIETF.NS': 'Nifty Infrastructure',
     'ITBEES.NS': 'Nifty IT',
     'LIQUIDCASE.NS': None,
+    'LTGILTBEES.NS': None,
+    'ICICIB22.NS': None,
     'MAFANG.NS': None,
     'MAHKTECH.NS': None,
     'METALIETF.NS': 'Nifty Metal',
@@ -101,6 +105,7 @@ ETF_TO_NSE_INDEX = {
     'MOCAPITAL.NS': 'Nifty Capital Markets',
     'MODEFENCE.NS': 'Nifty India Defence',
     'MON100.NS': None,
+    'MONQ50.NS': None,
     'MOREALTY.NS': 'Nifty Realty',
     'MOTOUR.NS': 'Nifty India Tourism',
     'MOVALUE.NS': 'NIFTY500 Value 50',
@@ -122,11 +127,37 @@ ETF_LABELS = {
     'SILVERBEES.NS': 'Silver ETF',
     'MAFANG.NS': 'US FANG+ ETF',
     'MON100.NS': 'Nasdaq 100 ETF',
+    "MONQ50.NS": "Nasdaq Q 50 ETF",
     'MAHKTECH.NS': 'Hang Seng Tech ETF',
     'HNGSNGBEES.NS': 'Hang Seng ETF',
     'LIQUIDCASE.NS': 'Liquid ETF',
+    'LTGILTBEES.NS': 'Long Term Government Bond ETF',
     'ICICIB22.NS': 'Bharat 22 ETF',
     'GROWWPOWER.NS': 'Power ETF',
 }
+
+# Near-duplicate tradable ETFs — at most one per bucket in a portfolio.
+OVERLAP_BUCKETS: tuple[frozenset[str], ...] = (
+    frozenset({"MON100", "MONQ50", "MAFANG"}),
+    frozenset({"HNGSNGBEES", "MAHKTECH"}),
+)
+
+
+PARK_SLOT_ETFS: tuple[str, ...] = ("LIQUIDCASE", "LTGILTBEES")
+DEFAULT_PARK_SLOT_ETF = "LIQUIDCASE"
+
+
+def is_park_slot_symbol(symbol: str) -> bool:
+    bare = (symbol or "").strip().upper().replace(".NS", "")
+    return bare in PARK_SLOT_ETFS
+
+
+def overlap_bucket_for(symbol: str) -> frozenset[str] | None:
+    bare = (symbol or "").strip().upper().replace(".NS", "")
+    for bucket in OVERLAP_BUCKETS:
+        if bare in bucket:
+            return bucket
+    return None
+
 
 # --- end ticker universe ---

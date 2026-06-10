@@ -25,11 +25,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from momentum.etf.etf_momentum_engine import EtfMomentumSnapshot, fetch_etf_momentum_snapshot  # noqa: E402
 from momentum.rrg_busy import RrgBusyOverlay  # noqa: E402
+from momentum.rrg_core import rrg_config_date_str, rrg_format_date  # noqa: E402
+from momentum.rrg_date_picker import attach_rrg_date_picker  # noqa: E402
 from momentum.rrg_ui_copy import install_copy_support  # noqa: E402
+from utils.nse_bhavcopy import today_ist  # noqa: E402
 
 ABS_COLUMNS = (
     "Position",
     "Symbol",
+    "Close",
+    "9EMA",
+    "Close_Below_9EMA",
     "Return_1W",
     "Return_2W",
     "Return_1M",
@@ -38,6 +44,12 @@ ABS_COLUMNS = (
     "Rank_1M",
     "Final_Rank",
 )
+
+ABS_COLUMN_LABELS = {
+    "Close": "Price",
+    "9EMA": "9 EMA",
+    "Close_Below_9EMA": "9 EMA Close",
+}
 
 RS_BLENDED_COLUMNS = (
     "Position",
@@ -111,13 +123,19 @@ def _cell(value: object, heading: str) -> str:
     return str(value)
 
 
-def _make_tree(parent: tk.Misc, headings: tuple[str, ...]) -> ttk.Treeview:
+def _make_tree(
+    parent: tk.Misc,
+    headings: tuple[str, ...],
+    *,
+    labels: dict[str, str] | None = None,
+) -> ttk.Treeview:
     col_ids = tuple(f"c{i}" for i in range(len(headings)))
     tree = ttk.Treeview(parent, columns=col_ids, show="headings", selectmode="extended")
+    label_map = labels or {}
     for col_id, heading in zip(col_ids, headings, strict=True):
-        tree.heading(col_id, text=heading)
+        tree.heading(col_id, text=label_map.get(heading, heading))
         width = _COLUMN_WIDTHS.get(heading, 88)
-        anchor = "w" if heading in ("Symbol", "Close_Below_9EMA") else "e"
+        anchor = "w" if heading in ("Symbol", "Name", "Close_Below_9EMA") else "e"
         if heading == "Position":
             anchor = "center"
         tree.column(col_id, width=width, stretch=False, minwidth=width, anchor=anchor)
@@ -201,6 +219,20 @@ class EtfMomentumScreenApp:
             side=tk.LEFT, padx=(0, 16)
         )
 
+        tk.Label(toolbar, text="As of:").pack(side=tk.LEFT)
+        date_frame = tk.Frame(toolbar)
+        date_frame.pack(side=tk.LEFT, padx=(4, 16))
+        self._date_var = tk.StringVar(value=rrg_format_date(today_ist()))
+        self._date_entry = tk.Entry(date_frame, textvariable=self._date_var, width=11)
+        self._date_entry.pack(side=tk.LEFT)
+        attach_rrg_date_picker(
+            date_frame,
+            self._date_entry,
+            self._date_var,
+            default_date=today_ist(),
+            max_date=today_ist(),
+        ).pack(side=tk.LEFT, padx=(2, 0))
+
         tk.Label(toolbar, text="Filter:").pack(side=tk.LEFT)
         self._filter_var = tk.StringVar()
         filter_entry = tk.Entry(toolbar, textvariable=self._filter_var, width=18)
@@ -219,7 +251,9 @@ class EtfMomentumScreenApp:
         notebook = ttk.Notebook(left)
         notebook.pack(fill=tk.BOTH, expand=True)
 
-        self._abs_tree = self._add_tab(notebook, "Abs Momentum (top 10)", ABS_COLUMNS)
+        self._abs_tree = self._add_tab(
+            notebook, "Abs Momentum (top 10)", ABS_COLUMNS, labels=ABS_COLUMN_LABELS
+        )
         self._rs_tree = self._add_tab(notebook, "RS Blended (top 30)", RS_BLENDED_COLUMNS)
         self._adaptive_tree = self._add_tab(notebook, "RS Adaptive (top 30)", RS_ADAPTIVE_COLUMNS)
 
@@ -235,11 +269,16 @@ class EtfMomentumScreenApp:
         self.root.after(200, self._on_refresh)
 
     def _add_tab(
-        self, notebook: ttk.Notebook, title: str, headings: tuple[str, ...]
+        self,
+        notebook: ttk.Notebook,
+        title: str,
+        headings: tuple[str, ...],
+        *,
+        labels: dict[str, str] | None = None,
     ) -> ttk.Treeview:
         frame = tk.Frame(notebook)
         notebook.add(frame, text=title)
-        return _make_tree(frame, headings)
+        return _make_tree(frame, headings, labels=labels)
 
     def _on_backtest(self) -> None:
         from momentum.etf_momentum_backtest_ui import open_etf_momentum_backtest
@@ -254,11 +293,17 @@ class EtfMomentumScreenApp:
     def _on_refresh(self) -> None:
         if self._busy:
             return
+        try:
+            as_of_iso = rrg_config_date_str(self._date_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Invalid date", str(exc), parent=self.root)
+            self._date_entry.focus_set()
+            return
         self._set_busy(True)
-        self._status_var.set("Fetching Yahoo + NSE data (may take a minute)…")
+        self._status_var.set(f"Fetching rankings as of {self._date_var.get()}…")
 
         def worker() -> EtfMomentumSnapshot:
-            return fetch_etf_momentum_snapshot()
+            return fetch_etf_momentum_snapshot(as_of_date=as_of_iso)
 
         def on_done(snap: EtfMomentumSnapshot) -> None:
             self._on_load_done(snap, None)
