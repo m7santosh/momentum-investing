@@ -10,10 +10,17 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from momentum.etf.universes.india import tickers
-from utils.nse_bhavcopy import fetch_bhavcopy, fetch_nse_live_quotes, nse_symbol_from_yahoo, today_ist
+from utils.india_market_data import (
+    MIN_BARS_NS_BHAVCOPY_FIRST,
+    format_range_label,
+    get_data,
+    get_india_market_data_run_stats,
+    prepare_india_market_data_range,
+    summarize_etf_history_gaps,
+)
+from utils.nse_bhavcopy import today_ist
 
 BENCHMARK_TICKER = "^CRSLDX"
 
@@ -88,45 +95,6 @@ def _passes_established_trend_gate(adj: pd.Series) -> bool:
     high_52w = adj.iloc[-LB_52W:].max()
     last = adj.iloc[-1]
     return last >= ema200 and last >= (high_52w * PROXIMITY_OF_52W_HIGH)
-
-
-def _fill_ohlcv_from_nse(df: pd.DataFrame, nse_row: dict) -> pd.DataFrame:
-    idx = df.index[-1]
-    last_vol = df.iloc[-1].get("Volume")
-    df.at[idx, "Close"] = nse_row["close"]
-    df.at[idx, "Adj Close"] = nse_row["close"]
-    df.at[idx, "Open"] = nse_row["open"]
-    df.at[idx, "High"] = nse_row["high"]
-    df.at[idx, "Low"] = nse_row["low"]
-    if pd.isna(last_vol) or last_vol == 0:
-        df.at[idx, "Volume"] = nse_row["volume"]
-    return df
-
-
-def get_data(ticker: str, start_date, end_date, *, patch_nse: bool) -> pd.DataFrame:
-    df = yf.download(
-        ticker,
-        start=start_date,
-        end=end_date,
-        multi_level_index=False,
-        auto_adjust=False,
-        progress=False,
-    )
-    if df is None or len(df) == 0:
-        return df
-    if not patch_nse or pd.notna(df.iloc[-1].get("Close")):
-        return df
-    trade_dt = df.index[-1].date() if hasattr(df.index[-1], "date") else df.index[-1]
-    if ticker.endswith(".NS"):
-        nse_sym = nse_symbol_from_yahoo(ticker)
-        bhav = fetch_bhavcopy(trade_dt)
-        if nse_sym in bhav:
-            return _fill_ohlcv_from_nse(df, bhav[nse_sym])
-        if trade_dt == today_ist():
-            live = fetch_nse_live_quotes()
-            if nse_sym in live:
-                return _fill_ohlcv_from_nse(df, live[nse_sym])
-    return df.dropna(subset=["Close"])
 
 
 def classify_ema_regime(close: pd.Series, fast_span: int, slow_span: int) -> str:
@@ -263,13 +231,12 @@ def _collect_rs_rows(
     start_date,
     end_date,
     *,
-    patch_nse: bool,
     as_of: pd.Timestamp,
 ) -> list[dict]:
     summary: list[dict] = []
     for sym in tickers:
         try:
-            df = get_data(sym, start_date, end_date, patch_nse=patch_nse)
+            df = get_data(sym, start_date, end_date)
             df = _truncate_ohlcv(df, as_of)
             if df is None or len(df) == 0:
                 continue
@@ -491,12 +458,11 @@ def fetch_etf_momentum_snapshot(as_of_date: str | None = None) -> EtfMomentumSna
     end_date = as_of + pd.Timedelta(days=1)
     start_date = as_of - pd.Timedelta(days=365 * 2)
     run_date = as_of.strftime("%Y-%m-%d")
-    patch_nse = as_of.date() >= today_ist()
-
+    prepare_india_market_data_range(start_date, as_of)
     abs_data: dict[str, pd.DataFrame] = {}
     for ticker in tickers:
         try:
-            stock_data = get_data(ticker, start_date, end_date, patch_nse=False)
+            stock_data = get_data(ticker, start_date, end_date)
             stock_data = _truncate_ohlcv(stock_data, as_of)
             if stock_data is not None and len(stock_data) > 0:
                 abs_data[ticker] = stock_data
@@ -505,7 +471,7 @@ def fetch_etf_momentum_snapshot(as_of_date: str | None = None) -> EtfMomentumSna
 
     abs_df = _compute_abs_momentum(abs_data)
 
-    nifty_df = get_data(BENCHMARK_TICKER, start_date, end_date, patch_nse=patch_nse)
+    nifty_df = get_data(BENCHMARK_TICKER, start_date, end_date)
     nifty_df = _truncate_ohlcv(nifty_df, as_of)
     if nifty_df is None or len(nifty_df) == 0:
         raise RuntimeError(f"No benchmark data for {BENCHMARK_TICKER} on or before {run_date}")
@@ -516,9 +482,7 @@ def fetch_etf_momentum_snapshot(as_of_date: str | None = None) -> EtfMomentumSna
     market_regime = classify_ema_regime(nifty_adj, BENCH_EMA_FAST, BENCH_EMA_SLOW)
     benchmark_1m = _benchmark_return_1m(nifty_adj)
 
-    rs_rows = _collect_rs_rows(
-        nifty_adj, start_date, end_date, patch_nse=patch_nse, as_of=as_of
-    )
+    rs_rows = _collect_rs_rows(nifty_adj, start_date, end_date, as_of=as_of)
     rs_summary = pd.DataFrame(rs_rows)
 
     rs_blended = _compute_rs_blended(rs_summary.copy())
@@ -539,6 +503,9 @@ def fetch_etf_momentum_snapshot(as_of_date: str | None = None) -> EtfMomentumSna
         "Rows_Written": len(rs_adaptive),
         "Abs_Momentum_Rows": len(abs_df),
         "RS_Blended_Rows": len(rs_blended),
+        "Data_Window": format_range_label(start_date, end_date),
+        "Data_Cache": get_india_market_data_run_stats().summary(),
+        **summarize_etf_history_gaps(tickers, min_bars=MIN_BARS_NS_BHAVCOPY_FIRST),
     }
 
     return EtfMomentumSnapshot(

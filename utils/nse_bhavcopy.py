@@ -1,7 +1,11 @@
 """
 NSE data helpers: bhavcopy (after-hours EOD) and live quotes (market hours).
 
-Fallback chain when Yahoo Finance returns NaN prices for the latest session:
+Momentum screeners and India ETF backtests load OHLCV via ``utils.india_market_data``:
+  - Past dates: NSE EOD (CM bhavcopy / index archive) when available, else Yahoo.
+  - Today: Yahoo; bhavcopy/live only if Yahoo Close is NaN.
+
+Fallback chain for today's NaN row:
   1. Bhavcopy — official EOD CSV, available ~7 PM IST after close.
   2. Live quotes — NSE API (Nifty 500 + ETFs), works during market hours
      and the window between close and bhavcopy publication.
@@ -25,6 +29,18 @@ _ANNOUNCED: set[date] = set()
 _LIVE_CACHE: dict[str, dict] = {}
 _LIVE_CACHE_TS: float = 0
 _LIVE_ANNOUNCED: bool = False
+
+
+def clear_nse_data_caches() -> None:
+    """Drop in-memory NSE bhavcopy, index EOD, and live-quote caches."""
+    global _LIVE_CACHE, _LIVE_CACHE_TS, _LIVE_ANNOUNCED
+    _CACHE.clear()
+    _INDEX_CLOSE_CACHE.clear()
+    _ANNOUNCED.clear()
+    _INDEX_CLOSE_ANNOUNCED.clear()
+    _LIVE_CACHE = {}
+    _LIVE_CACHE_TS = 0.0
+    _LIVE_ANNOUNCED = False
 
 
 def _session() -> requests.Session:

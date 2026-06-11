@@ -24,8 +24,6 @@ from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
-
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -68,6 +66,14 @@ from momentum.rrg_ema_exit import (  # noqa: E402
     split_holdings_at_stop_loss,
 )
 from momentum.rrg_portfolio_fill import equal_weight_port_return  # noqa: E402
+from utils.india_market_data import (  # noqa: E402
+    MIN_BARS_NS_BHAVCOPY_FIRST,
+    format_range_label,
+    get_india_market_data,
+    get_india_market_data_run_stats,
+    prepare_india_market_data_range,
+    summarize_etf_history_gaps,
+)
 from utils.nse_bhavcopy import today_ist  # noqa: E402
 
 STRATEGY_KEYS = (
@@ -140,27 +146,25 @@ def _close_col(df: pd.DataFrame) -> pd.Series:
     return (s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()).dropna()
 
 
-def _download_adj_vol_close(
-    yahoo_symbols: list[str], start: str, end: str
-) -> tuple[dict[str, pd.Series], dict[str, pd.Series], dict[str, pd.Series]]:
+def _backtest_download_window(start: str, end: str) -> tuple[str, str]:
     start_iso = normalize_backtest_date(start)
     end_iso = _yf_download_end_exclusive(end)
     extra_start = (
         pd.Timestamp(start_iso) - pd.Timedelta(days=int(MIN_HISTORY * 1.6))
     ).strftime("%Y-%m-%d")
+    return extra_start, end_iso
+
+
+def _download_adj_vol_close(
+    yahoo_symbols: list[str], start: str, end: str
+) -> tuple[dict[str, pd.Series], dict[str, pd.Series], dict[str, pd.Series]]:
+    extra_start, end_iso = _backtest_download_window(start, end)
     adj_store: dict[str, pd.Series] = {}
     vol_store: dict[str, pd.Series] = {}
     close_store: dict[str, pd.Series] = {}
     for sym in yahoo_symbols:
         try:
-            df = yf.download(
-                sym,
-                start=extra_start,
-                end=end_iso,
-                multi_level_index=False,
-                auto_adjust=False,
-                progress=False,
-            )
+            df = get_india_market_data(sym, extra_start, end_iso)
             if df is None or len(df) == 0:
                 continue
             adj_store[sym] = _adj_col(df)
@@ -1148,6 +1152,10 @@ class EtfMomentumBacktestEngine:
 
     def load_data(self) -> None:
         cfg = self.config
+        extra_start, end_iso = _backtest_download_window(
+            cfg.backtest_start, cfg.backtest_end
+        )
+        prepare_india_market_data_range(extra_start, end_iso, reset_stats=True)
         self._log(f"Downloading {len(ETF_TICKERS)} ETFs …")
         self._etf_adj, self._etf_vol, self._etf_close = _download_adj_vol_close(
             list(ETF_TICKERS), cfg.backtest_start, cfg.backtest_end
@@ -1158,6 +1166,18 @@ class EtfMomentumBacktestEngine:
         bench_adj, _, _ = _download_adj_vol_close(
             [cfg.benchmark_ticker], cfg.backtest_start, cfg.backtest_end
         )
+        data_stats = get_india_market_data_run_stats().summary()
+        if data_stats:
+            self._log(
+                f"  [India data] {format_range_label(extra_start, end_iso)} — {data_stats}"
+            )
+        gaps = summarize_etf_history_gaps(
+            list(ETF_TICKERS), min_bars=MIN_BARS_NS_BHAVCOPY_FIRST
+        )
+        if gaps["Bhavcopy_Backfill"] != "None":
+            self._log(f"  [NSE backfill] {gaps['Bhavcopy_Backfill']}")
+        if gaps["Insufficient_History"] != "None":
+            self._log(f"  [Data gaps] {gaps['Insufficient_History']}")
         if cfg.benchmark_ticker not in bench_adj:
             raise RuntimeError(f"Could not download benchmark {cfg.benchmark_ticker}")
         self._bench_adj = bench_adj[cfg.benchmark_ticker]

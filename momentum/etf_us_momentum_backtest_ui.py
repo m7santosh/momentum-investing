@@ -485,7 +485,6 @@ def open_us_etf_momentum_backtest(
         "Rebal",
         "End",
         "Holdings",
-        "Ranked",
         "Port%",
         "Bench%",
         "DD%",
@@ -497,7 +496,6 @@ def open_us_etf_momentum_backtest(
         "Rebal": 88,
         "End": 88,
         "Holdings": 200,
-        "Ranked": 56,
         "Port%": 64,
         "Bench%": 64,
         "DD%": 56,
@@ -727,7 +725,6 @@ def open_us_etf_momentum_backtest(
                     rrg_format_date(row["Rebal_Date"]),
                     rrg_format_date(row["End_Date"]),
                     row.get("Holdings", "—"),
-                    row.get("Universe_Ranked", "—"),
                     f"{row['Port_Return'] * 100:+.2f}",
                     f"{row['Bench_Return'] * 100:+.2f}",
                     f"{dd_series[i]:.2f}",
@@ -755,6 +752,9 @@ def open_us_etf_momentum_backtest(
             "Portfolio value (end)": _format_portfolio_value(
                 record.get("Portfolio_Value_End", record.get("Portfolio_Value"))
             ),
+            "Portfolio % (period)": f"{record['Port_Return'] * 100:+.2f}",
+            "Portfolio P/L % (since start)": f"{cum_pl:+.2f}",
+            "Benchmark %": f"{record['Bench_Return'] * 100:+.2f}",
             "Market regime": str(record.get("Regime", "—")),
             "Holdings": record.get("Holdings") or "CASH",
             "Momentum ETFs": record.get("Momentum_Holdings") or "—",
@@ -771,9 +771,6 @@ def open_us_etf_momentum_backtest(
             "9 EMA exits (mid-period)": str(record.get("EMA_9_Exits_Midweek", 0)),
             "Stop loss exits": str(record.get("Stop_Loss_Exits", 0)),
             "Turnover": f"{record.get('Turnover', 0) * 100:.1f} %",
-            "Portfolio % (period)": f"{record['Port_Return'] * 100:+.2f}",
-            "Portfolio P/L % (since start)": f"{cum_pl:+.2f}",
-            "Benchmark %": f"{record['Bench_Return'] * 100:+.2f}",
         }
         _fill_kv_tree(detail_tree, fields, empty="—")
         _fill_pick_tree(pick_tree, record.get("Position_Rows"))
