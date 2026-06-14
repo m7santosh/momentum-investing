@@ -81,13 +81,7 @@ NIFTY_INDEX_BY_ID: dict[str, NiftyIndex] = {i.index_id: i for i in NIFTY_INDICES
 NIFTY_INDEX_BY_LABEL: dict[str, NiftyIndex] = {i.label: i for i in NIFTY_INDICES}
 NIFTY_INDEX_YAHOO_TICKERS: list[str] = list(dict.fromkeys(i.yahoo_ticker for i in NIFTY_INDICES))
 
-DEFAULT_SELECTED_INDEX_IDS: tuple[str, ...] = (
-    "Nifty Auto",
-    "Nifty Bank",
-    "Nifty IT",
-    "Nifty Pharma",
-    "Nifty Metal",
-)
+DEFAULT_SELECTED_INDEX_IDS: tuple[str, ...] = ("Nifty 50",)
 
 
 def resolve_selected_indices(values: list[str] | tuple[str, ...] | None) -> list[NiftyIndex]:
