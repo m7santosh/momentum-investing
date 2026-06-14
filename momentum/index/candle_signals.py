@@ -22,13 +22,69 @@ _PERIODS_PER_YEAR: dict[Timeframe, int] = {
 }
 
 
+def ohlc_for_timeframe(
+    ohlc: pd.DataFrame,
+    timeframe: Timeframe,
+    candle_mode: CandleMode,
+) -> pd.DataFrame:
+    """OHLC at the requested timeframe.
+
+    Weekly Heikin Ashi matches TradingView: daily HA first, then aggregate to
+    weekly bars (``ticker.heikinashi`` + weekly resolution). Daily/monthly HA
+    is computed on bars at that timeframe.
+    """
+    base = normalize_ohlc(ohlc)
+    if base.empty:
+        return base
+    if timeframe == "day":
+        return candle_frame(base, candle_mode)
+    if candle_mode == "heikin_ashi" and timeframe in ("week", "month"):
+        ha_daily = candle_frame(base, "heikin_ashi")
+        return resample_ohlc(ha_daily, timeframe)
+    return resample_ohlc(base, timeframe)
+
+
+def chart_plot_mode(timeframe: Timeframe, candle_mode: CandleMode) -> CandleMode:
+    """Render mode for ``plot_candles`` (weekly/monthly HA OHLC is pre-transformed)."""
+    if candle_mode == "heikin_ashi" and timeframe in ("week", "month"):
+        return "candlestick"
+    return candle_mode
+
+
+def ohlc_uses_precomputed_ha(timeframe: Timeframe, candle_mode: CandleMode) -> bool:
+    return candle_mode == "heikin_ashi" and timeframe in ("week", "month")
+
+
+def _resample_weekly_tradingview(base: pd.DataFrame) -> pd.DataFrame:
+    """Weekly OHLC grouped by calendar Mon–Fri, labeled by first trading session (TV NSE)."""
+    tmp = base.copy()
+    tmp["_cal_mon"] = tmp.index - pd.to_timedelta(tmp.index.dayofweek, unit="D")
+    rows: list[dict] = []
+    for _, grp in tmp.groupby("_cal_mon", sort=True):
+        grp = grp.sort_index()
+        rows.append(
+            {
+                "Date": grp.index[0],
+                "Open": float(grp["Open"].iloc[0]),
+                "High": float(grp["High"].max()),
+                "Low": float(grp["Low"].min()),
+                "Close": float(grp["Close"].iloc[-1]),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+    out = pd.DataFrame(rows).set_index("Date").sort_index()
+    return out
+
+
 def resample_ohlc(ohlc: pd.DataFrame, timeframe: Timeframe) -> pd.DataFrame:
-    """Aggregate daily OHLC to weekly (Fri) or month-end bars."""
+    """Aggregate daily OHLC to weekly (first trading day label) or month-end bars."""
     base = normalize_ohlc(ohlc)
     if base.empty or timeframe == "day":
         return base
-    rule = "W-FRI" if timeframe == "week" else "ME"
-    out = base.resample(rule).agg(
+    if timeframe == "week":
+        return _resample_weekly_tradingview(base)
+    out = base.resample("ME").agg(
         {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
     )
     return out.dropna(subset=["Close"])

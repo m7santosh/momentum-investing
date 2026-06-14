@@ -12,7 +12,13 @@ from matplotlib.collections import LineCollection
 from matplotlib.patches import Rectangle
 from matplotlib.ticker import NullLocator
 
-from momentum.index.candle_signals import CandleMode, candle_frame, normalize_ohlc
+from momentum.index.candle_signals import (
+    CandleMode,
+    Timeframe,
+    candle_frame,
+    chart_plot_mode,
+    normalize_ohlc,
+)
 from momentum.index.index_indicators import (
     DEFAULT_INDICATOR_PERIOD,
     DEFAULT_SUPERTREND_MULTIPLIER,
@@ -473,6 +479,7 @@ def _signal_transitions(
     candle_mode: CandleMode,
     period: int,
     supertrend_multiplier: float,
+    timeframe: Timeframe = "day",
 ) -> tuple[list[pd.Timestamp], list[pd.Timestamp]]:
     """Return (entry_dates, exit_dates) where indicator flips."""
     base = normalize_ohlc(ohlc)
@@ -491,6 +498,7 @@ def _signal_transitions(
             as_of=pd.Timestamp(ts),
             period=period,
             supertrend_multiplier=supertrend_multiplier,
+            timeframe=timeframe,
         )
         if prev_bull is not None:
             if bull and not prev_bull:
@@ -562,6 +570,7 @@ def plot_index_with_indicator(
     chart_candle_mode: CandleMode | None = None,
     period: int = DEFAULT_INDICATOR_PERIOD,
     supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
+    timeframe: Timeframe = "day",
     timeframe_label: str = "Daily",
     mark_signals: bool = True,
     display_start: pd.Timestamp | None = None,
@@ -586,11 +595,20 @@ def plot_index_with_indicator(
         fig.tight_layout()
         return None
 
-    plot_mode = chart_candle_mode or candle_mode
+    data_gap_note = ""
+    if display_start is not None and len(display_ohlc.index):
+        first_bar = pd.Timestamp(display_ohlc.index[0])
+        if first_bar > display_start:
+            data_gap_note = (
+                f"NSE history starts {first_bar.strftime('%d-%m-%Y')} "
+                f"(no bars before requested {display_start.strftime('%d-%m-%Y')})"
+            )
+
+    render_mode = chart_plot_mode(timeframe, chart_candle_mode or candle_mode)
     frame = plot_candles(
         ax,
         display_ohlc,
-        mode=plot_mode,
+        mode=render_mode,
         title="",
         mark_signals=False,
     )
@@ -614,7 +632,12 @@ def plot_index_with_indicator(
             zorder=3,
         )
     elif indicator == "supertrend":
-        ind_full = indicator_ohlc(base_full, indicator=indicator, candle_mode=candle_mode)
+        ind_full = indicator_ohlc(
+            base_full,
+            indicator=indicator,
+            candle_mode=candle_mode,
+            timeframe=timeframe,
+        )
         st_full = compute_supertrend(ind_full, atr_period=period, multiplier=supertrend_multiplier)
         st_frame = st_full.reindex(frame.index)
         _plot_supertrend_line(ax, st_frame, label=ind_label)
@@ -626,6 +649,7 @@ def plot_index_with_indicator(
             candle_mode=candle_mode,
             period=period,
             supertrend_multiplier=supertrend_multiplier,
+            timeframe=timeframe,
         )
         if display_start is not None or display_end is not None:
             entries = [d for d in entries if (display_start is None or pd.Timestamp(d) >= display_start) and (display_end is None or pd.Timestamp(d) < display_end)]
@@ -644,10 +668,13 @@ def plot_index_with_indicator(
                 ax.scatter(x[i], highs[i] * 1.002, marker="v", s=36, color=_BEAR_COLOR, zorder=4)
 
     ax.legend(loc="upper left", fontsize=8)
-    ax.set_title(f"{index_label} — {ind_label} ({timeframe_label})")
+    title = f"{index_label} — {ind_label} ({timeframe_label})"
+    if data_gap_note:
+        title += f"\n{data_gap_note}"
+    ax.set_title(title, fontsize=10)
     fig.tight_layout()
 
-    chart_mode_label = "Heikin Ashi" if plot_mode == "heikin_ashi" else "Candlestick"
+    chart_mode_label = "Heikin Ashi" if (chart_candle_mode or candle_mode) == "heikin_ashi" else "Candlestick"
     return CandleHoverData(
         ax=ax,
         frame=frame,

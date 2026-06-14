@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -32,6 +32,7 @@ from momentum.index.candle_signals import (  # noqa: E402
     CandleMode,
     Timeframe,
     _PERIODS_PER_YEAR,
+    ohlc_for_timeframe,
     resample_ohlc,
 )
 from momentum.index.index_indicators import (  # noqa: E402
@@ -56,7 +57,6 @@ from momentum.index.nifty_indices import (  # noqa: E402
     resolve_benchmark,
     resolve_selected_indices,
 )
-from momentum.rrg_core import rrg_config_date_str, rrg_format_date  # noqa: E402
 from utils.india_market_data import (  # noqa: E402
     format_range_label,
     get_india_market_data,
@@ -136,6 +136,42 @@ class NiftyCandleBacktestConfig:
         return resolve_selected_indices(self.selected_index_ids)
 
 
+_DISPLAY_DATE_FMT = "%d-%m-%Y"
+
+
+def _format_display_date(value) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        ts = pd.Timestamp(value)
+    except (ValueError, TypeError):
+        return ""
+    if pd.isna(ts):
+        return ""
+    return ts.strftime(_DISPLAY_DATE_FMT)
+
+
+def _parse_user_date(text: str) -> pd.Timestamp:
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("Date is required (DD-MM-YYYY).")
+    parts = raw.split("-")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"Use DD-MM-YYYY only (e.g. 03-06-2026). Got: {raw!r}")
+    day, month, year = (int(parts[0]), int(parts[1]), int(parts[2]))
+    if len(parts[2]) != 4:
+        raise ValueError(f"Use DD-MM-YYYY only (4-digit year). Got: {raw!r}")
+    try:
+        ts = pd.Timestamp(datetime(year, month, day))
+    except ValueError as exc:
+        raise ValueError(f"Invalid calendar date: {raw!r}") from exc
+    if pd.isna(ts):
+        raise ValueError(f"Invalid date: {raw!r}")
+    if ts.strftime(_DISPLAY_DATE_FMT) != raw:
+        raise ValueError(f"Use DD-MM-YYYY only (e.g. 03-06-2026). Got: {raw!r}")
+    return ts
+
+
 def normalize_backtest_date(value: str) -> str:
     raw = (value or "").strip()
     if not raw:
@@ -144,7 +180,7 @@ def normalize_backtest_date(value: str) -> str:
     if len(parts) == 3 and len(parts[0]) == 4 and parts[0].isdigit():
         pd.Timestamp(raw)
         return raw
-    return rrg_config_date_str(raw)
+    return _parse_user_date(raw).strftime("%Y-%m-%d")
 
 
 def _series_col(df: pd.DataFrame, col: str) -> pd.Series:
@@ -202,6 +238,21 @@ class NiftyCandleBacktestEngine:
         start = pd.Timestamp(normalize_backtest_date(self.config.backtest_start))
         end = pd.Timestamp(normalize_backtest_date(self.config.backtest_end))
         return start, end
+
+    @property
+    def first_bar_date(self) -> date | None:
+        return self._bar_dates[0] if self._bar_dates else None
+
+    @property
+    def last_bar_date(self) -> date | None:
+        return self._bar_dates[-1] if self._bar_dates else None
+
+    def data_starts_after_backtest(self) -> bool:
+        """True when the first bar in-range is later than the configured backtest start."""
+        if not self._bar_dates:
+            return False
+        req = pd.Timestamp(normalize_backtest_date(self.config.backtest_start)).date()
+        return self._bar_dates[0] > req
 
     @property
     def trades_df(self) -> pd.DataFrame:
@@ -334,10 +385,11 @@ class NiftyCandleBacktestEngine:
 
     def _apply_timeframe(self) -> None:
         tf = self.config.timeframe
+        mode = self.config.candle_mode
         self._ohlc.clear()
         self._closes.clear()
         for ticker, daily in self._ohlc_daily.items():
-            resampled = resample_ohlc(daily, tf)
+            resampled = ohlc_for_timeframe(daily, tf, mode)
             if resampled.empty:
                 continue
             self._ohlc[ticker] = resampled
@@ -345,7 +397,7 @@ class NiftyCandleBacktestEngine:
 
         bench_daily = self._ohlc_daily.get(self.config.benchmark_yahoo)
         if bench_daily is not None and not bench_daily.empty:
-            bench_frame = resample_ohlc(bench_daily, tf)
+            bench_frame = ohlc_for_timeframe(bench_daily, tf, mode)
             self._bench = bench_frame["Close"].astype(float) if not bench_frame.empty else pd.Series(dtype=float)
         else:
             self._bench = pd.Series(dtype=float)
@@ -407,6 +459,20 @@ class NiftyCandleBacktestEngine:
             f"Loaded {len(self._ohlc)}/{len(self._universe)} indices, "
             f"{len(self._bar_dates)} {tf_label.lower()} bars ({stats.summary()})"
         )
+        if self._bar_dates:
+            req_start = pd.Timestamp(start).date()
+            first = self._bar_dates[0]
+            last = self._bar_dates[-1]
+            if first > req_start:
+                self._log(
+                    f"  Note: first {tf_label.lower()} bar is {_format_display_date(first)} "
+                    f"(no NSE history before your start {_format_display_date(req_start)})"
+                )
+            else:
+                self._log(
+                    f"  Bars in backtest window: {_format_display_date(first)} .. "
+                    f"{_format_display_date(last)}"
+                )
 
     def step_period(self) -> dict | None:
         """Advance one bar — exit on bearish signal, enter on bullish signal."""
@@ -445,6 +511,7 @@ class NiftyCandleBacktestEngine:
                 as_of=bar_ts,
                 period=period,
                 supertrend_multiplier=st_mult,
+                timeframe=self.config.timeframe,
             ):
                 px = self._close_on(pos.yahoo_ticker, bar_date)
                 if px is not None:
@@ -463,6 +530,7 @@ class NiftyCandleBacktestEngine:
                 as_of=bar_ts,
                 period=period,
                 supertrend_multiplier=st_mult,
+                timeframe=self.config.timeframe,
             ):
                 entered = self._enter_position(cand, bar_date)
                 if entered is not None:
@@ -566,8 +634,8 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
         "Index_List": selected_s,
         "Benchmark": str(df.attrs.get("benchmark_label", BENCHMARK_LABEL)),
         "Period": (
-            f"{rrg_format_date(df['Bar_Date'].iloc[0])} to "
-            f"{rrg_format_date(df['Bar_Date'].iloc[-1])}"
+            f"{_format_display_date(df['Bar_Date'].iloc[0])} to "
+            f"{_format_display_date(df['Bar_Date'].iloc[-1])}"
         ),
         "Bars": n_periods,
         "Total_Return_%": round(total_ret * 100, 2),

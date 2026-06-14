@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from momentum.etf.etf_rrg_universe import RRG_ROWS
+from momentum.etf.universes import india
 from utils.nse_bhavcopy import nse_index_data_ticker
 
 
@@ -58,18 +58,18 @@ class NiftyIndex:
 
 
 def build_nifty_index_universe() -> list[NiftyIndex]:
-    """RRG index rows using NSE index EOD (Yahoo index symbol or ``NSEIDX:`` — never ETF)."""
+    """Nifty indices using NSE index EOD (Yahoo index symbol or ``NSEIDX:`` — never ETF)."""
     out: list[NiftyIndex] = []
     seen: set[str] = set()
-    for row in RRG_ROWS:
-        if row.kind != "index" or row.row_id in seen:
+    for index_name in dict.fromkeys(v for v in india.ETF_TO_NSE_INDEX.values() if v):
+        if index_name in seen:
             continue
-        seen.add(row.row_id)
+        seen.add(index_name)
         out.append(
             NiftyIndex(
-                index_id=row.row_id,
-                yahoo_ticker=nse_index_data_ticker(row.row_id),
-                label=row.label,
+                index_id=index_name,
+                yahoo_ticker=nse_index_data_ticker(index_name),
+                label=index_name,
             )
         )
     return out

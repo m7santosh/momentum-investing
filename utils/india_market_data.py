@@ -25,7 +25,8 @@ from utils.nse_bhavcopy import (
     clear_nse_data_caches,
     fetch_bhavcopy,
     fetch_index_close_all,
-    fetch_index_close_history,
+    fetch_index_ohlc_all,
+    fetch_index_ohlc_history,
     fetch_nse_live_quotes,
     NSE_INDEX_TICKER_PREFIX,
     nse_symbol_from_yahoo,
@@ -200,17 +201,22 @@ def _patch_index_eod_history(df: pd.DataFrame, index_name: str, *, before: date)
         trade_dt = _trade_date_from_index(idx)
         if trade_dt >= before:
             continue
-        day_map = fetch_index_close_all(trade_dt, quiet=True)
-        if not day_map:
+        ohlc_day = fetch_index_ohlc_all(trade_dt, quiet=True)
+        if not ohlc_day:
             continue
         if trade_dt not in resolved_by_date:
-            resolved_by_date[trade_dt] = resolve_index_name(index_name, day_map)
+            resolved_by_date[trade_dt] = resolve_index_name(index_name, ohlc_day)
         key = resolved_by_date[trade_dt]
-        if not key or key not in day_map:
+        if not key or key not in ohlc_day:
             continue
-        close = day_map[key]
-        df.at[idx, "Close"] = close
-        df.at[idx, "Adj Close"] = close
+        row = ohlc_day[key]
+        df.at[idx, "Open"] = row["open"]
+        df.at[idx, "High"] = row["high"]
+        df.at[idx, "Low"] = row["low"]
+        df.at[idx, "Close"] = row["close"]
+        df.at[idx, "Adj Close"] = row["close"]
+        if "Volume" in df.columns:
+            df.at[idx, "Volume"] = row.get("volume", 0.0)
 
 
 def _patch_today_yahoo_fallback(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -369,31 +375,15 @@ def _build_ohlcv_from_index_eod(
     start: pd.Timestamp,
     end_exclusive: pd.Timestamp,
 ) -> tuple[pd.DataFrame, int]:
-    """Daily OHLC from NSE ``ind_close_all`` (flat OHLC when only close is available)."""
+    """Daily OHLC from NSE ``ind_close_all`` archive."""
     start_d = start.date()
     end_d = (end_exclusive - pd.Timedelta(days=1)).date()
     if end_d < start_d:
         return pd.DataFrame(), 0
 
-    closes = fetch_index_close_history(index_name, start_d, end_d)
-    if closes.empty:
+    out = fetch_index_ohlc_history(index_name, start_d, end_d, quiet=True)
+    if out.empty:
         return pd.DataFrame(), 0
-
-    rows: list[dict] = []
-    for ts, close in closes.items():
-        c = float(close)
-        rows.append(
-            {
-                "Date": pd.Timestamp(ts),
-                "Open": c,
-                "High": c,
-                "Low": c,
-                "Close": c,
-                "Adj Close": c,
-                "Volume": 0,
-            }
-        )
-    out = pd.DataFrame(rows).set_index("Date").sort_index()
     return out, len(out)
 
 

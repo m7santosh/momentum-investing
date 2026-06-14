@@ -35,7 +35,7 @@ def clear_nse_data_caches() -> None:
     """Drop in-memory NSE bhavcopy, index EOD, and live-quote caches."""
     global _LIVE_CACHE, _LIVE_CACHE_TS, _LIVE_ANNOUNCED
     _CACHE.clear()
-    _INDEX_CLOSE_CACHE.clear()
+    _INDEX_DAY_CACHE.clear()
     _ANNOUNCED.clear()
     _INDEX_CLOSE_ANNOUNCED.clear()
     _LIVE_CACHE = {}
@@ -261,7 +261,9 @@ def nse_symbol_from_yahoo(yahoo_ticker: str) -> str:
 
 # --- NSE index EOD (ind_close_all_*.csv) — sector indices are NOT in CM bhavcopy ---
 
-_INDEX_CLOSE_CACHE: dict[date, dict[str, float] | None] = {}
+_IndexOhlcRow = dict[str, float]  # open, high, low, close, volume
+
+_INDEX_DAY_CACHE: dict[date, dict[str, _IndexOhlcRow] | None] = {}
 _INDEX_CLOSE_ANNOUNCED: set[date] = set()
 
 # Yahoo / custom symbol → name as listed in NSE ind_close_all CSV
@@ -334,9 +336,9 @@ def _ind_close_all_url(trade_date: date) -> str:
     )
 
 
-def _parse_ind_close_all(text: str) -> dict[str, float]:
-    """``Index Name`` → closing value from NSE ``ind_close_all`` CSV."""
-    result: dict[str, float] = {}
+def _parse_ind_close_all_ohlc(text: str) -> dict[str, _IndexOhlcRow]:
+    """``Index Name`` → OHLCV from NSE ``ind_close_all`` CSV."""
+    result: dict[str, _IndexOhlcRow] = {}
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("<") or line.lower().startswith("index name"):
@@ -346,35 +348,41 @@ def _parse_ind_close_all(text: str) -> dict[str, float]:
             continue
         name = parts[0].strip()
         try:
-            result[name] = float(parts[5])
+            result[name] = {
+                "open": float(parts[2]),
+                "high": float(parts[3]),
+                "low": float(parts[4]),
+                "close": float(parts[5]),
+                "volume": float(parts[8]) if len(parts) > 8 else 0.0,
+            }
         except ValueError:
             continue
     return result
 
 
-def fetch_index_close_all(
+def _fetch_index_day_ohlc(
     trade_date: date,
     *,
     quiet: bool = False,
-    rrg_index_count: int | None = None,
-) -> dict[str, float]:
-    """All index closes for one session from NSE ``ind_close_all`` archive."""
-    if trade_date in _INDEX_CLOSE_CACHE:
-        return _INDEX_CLOSE_CACHE[trade_date] or {}
+    index_count: int | None = None,
+) -> dict[str, _IndexOhlcRow]:
+    """All index OHLC rows for one session from NSE ``ind_close_all`` archive."""
+    if trade_date in _INDEX_DAY_CACHE:
+        return _INDEX_DAY_CACHE[trade_date] or {}
 
     sess = _session()
     url = _ind_close_all_url(trade_date)
     try:
         resp = sess.get(url, timeout=30)
         if resp.status_code == 200 and resp.text and "Closing Index Value" in resp.text:
-            result = _parse_ind_close_all(resp.text)
+            result = _parse_ind_close_all_ohlc(resp.text)
             if result:
-                _INDEX_CLOSE_CACHE[trade_date] = result
+                _INDEX_DAY_CACHE[trade_date] = result
                 if not quiet and trade_date not in _INDEX_CLOSE_ANNOUNCED:
-                    if rrg_index_count is not None:
+                    if index_count is not None:
                         print(
                             f"  [NSE Index EOD] {trade_date}: downloaded index archive "
-                            f"({len(result)} names in file; RRG uses {rrg_index_count})"
+                            f"({len(result)} names in file; {index_count} requested)"
                         )
                     else:
                         print(f"  [NSE Index EOD] {trade_date} ({len(result)} indices)")
@@ -383,8 +391,33 @@ def fetch_index_close_all(
     except Exception:
         pass
 
-    _INDEX_CLOSE_CACHE[trade_date] = None
+    _INDEX_DAY_CACHE[trade_date] = None
     return {}
+
+
+def fetch_index_ohlc_all(
+    trade_date: date,
+    *,
+    quiet: bool = False,
+    index_count: int | None = None,
+) -> dict[str, _IndexOhlcRow]:
+    """All index OHLC rows for one session from NSE ``ind_close_all`` archive."""
+    return _fetch_index_day_ohlc(
+        trade_date, quiet=quiet, index_count=index_count
+    )
+
+
+def fetch_index_close_all(
+    trade_date: date,
+    *,
+    quiet: bool = False,
+    index_count: int | None = None,
+) -> dict[str, float]:
+    """All index closes for one session from NSE ``ind_close_all`` archive."""
+    day_map = _fetch_index_day_ohlc(
+        trade_date, quiet=quiet, index_count=index_count
+    )
+    return {name: row["close"] for name, row in day_map.items()}
 
 
 def resolve_index_name(requested: str, available: dict[str, float]) -> str | None:
@@ -408,6 +441,80 @@ def fetch_index_close_history(
     return batch.get(index_name, pd.Series(dtype=float))
 
 
+def fetch_index_ohlc_history(
+    index_name: str,
+    start_date: date,
+    end_date: date,
+    *,
+    quiet: bool = True,
+) -> "pd.DataFrame":
+    """Daily index OHLC from ``ind_close_all`` archives (walk trading days)."""
+    import pandas as pd
+
+    batch = fetch_index_ohlc_histories(
+        [index_name], start_date, end_date, quiet=quiet
+    )
+    return batch.get(index_name, pd.DataFrame())
+
+
+def fetch_index_ohlc_histories(
+    index_names: list[str],
+    start_date: date,
+    end_date: date,
+    *,
+    quiet: bool = True,
+) -> dict[str, "pd.DataFrame"]:
+    """Daily OHLC for many indices — one archive download per trading day."""
+    buckets: dict[str, list[tuple[pd.Timestamp, _IndexOhlcRow]]] = {
+        n: [] for n in index_names
+    }
+    resolved: dict[str, str | None] = {n: None for n in index_names}
+    sessions_loaded = 0
+
+    d = start_date
+    while d <= end_date:
+        if d.weekday() < 5:
+            day_map = fetch_index_ohlc_all(
+                d, quiet=True, index_count=len(index_names)
+            )
+            if day_map:
+                sessions_loaded += 1
+                for name in index_names:
+                    if resolved[name] is None:
+                        resolved[name] = resolve_index_name(name, day_map)
+                    canonical = resolved[name]
+                    if canonical and canonical in day_map:
+                        buckets[name].append((pd.Timestamp(d), day_map[canonical]))
+        d += timedelta(days=1)
+
+    if not quiet and sessions_loaded:
+        print(
+            f"  [NSE Index EOD] loaded {sessions_loaded} sessions for "
+            f"{len(index_names)} index(es)"
+        )
+
+    out: dict[str, pd.DataFrame] = {}
+    for name, rows in buckets.items():
+        if not rows:
+            out[name] = pd.DataFrame()
+            continue
+        frame_rows: list[dict] = []
+        for ts, ohlc in rows:
+            frame_rows.append(
+                {
+                    "Date": ts,
+                    "Open": ohlc["open"],
+                    "High": ohlc["high"],
+                    "Low": ohlc["low"],
+                    "Close": ohlc["close"],
+                    "Adj Close": ohlc["close"],
+                    "Volume": ohlc.get("volume", 0.0),
+                }
+            )
+        out[name] = pd.DataFrame(frame_rows).set_index("Date").sort_index()
+    return out
+
+
 def fetch_index_close_histories(
     index_names: list[str],
     start_date: date,
@@ -426,7 +533,7 @@ def fetch_index_close_histories(
     while d <= end_date:
         if d.weekday() < 5:
             day_map = fetch_index_close_all(
-                d, quiet=quiet, rrg_index_count=len(index_names)
+                d, quiet=True, index_count=len(index_names)
             )
             if day_map:
                 sessions_loaded += 1
@@ -438,10 +545,10 @@ def fetch_index_close_histories(
                         buckets[name].append((pd.Timestamp(d), day_map[canonical]))
         d += timedelta(days=1)
 
-    if quiet and sessions_loaded:
+    if not quiet and sessions_loaded:
         print(
-            f"  [NSE Index EOD] RRG: {sessions_loaded} sessions × "
-            f"{len(index_names)} hardcoded index name(s)"
+            f"  [NSE Index EOD] loaded {sessions_loaded} sessions for "
+            f"{len(index_names)} index(es)"
         )
 
     out: dict[str, pd.Series] = {}
@@ -559,8 +666,8 @@ def _load_nse_cm_histories(
 
     if not quiet and sessions_loaded:
         print(
-            f"  [NSE Bhavcopy] RRG: {sessions_loaded} sessions × {len(unique)} "
-            f"hardcoded {asset_label}(s) (from CM file, not full-universe API)"
+            f"  [NSE Bhavcopy] loaded {sessions_loaded} sessions for {len(unique)} "
+            f"{asset_label}(s) (CM archive)"
         )
 
     out: dict[str, pd.Series] = {}

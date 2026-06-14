@@ -7,7 +7,14 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from momentum.index.candle_signals import CandleMode, candle_frame, is_bullish_bar, normalize_ohlc
+from momentum.index.candle_signals import (
+    CandleMode,
+    Timeframe,
+    candle_frame,
+    is_bullish_bar,
+    normalize_ohlc,
+    ohlc_uses_precomputed_ha,
+)
 
 IndicatorKind = Literal["candle", "sma", "ema", "supertrend"]
 
@@ -85,9 +92,12 @@ def indicator_ohlc(
     *,
     indicator: IndicatorKind,
     candle_mode: CandleMode,
+    timeframe: Timeframe = "day",
 ) -> pd.DataFrame:
     """OHLC series used to compute an indicator (matches chart candle type)."""
     base = normalize_ohlc(ohlc)
+    if ohlc_uses_precomputed_ha(timeframe, candle_mode):
+        return base
     if indicator == "supertrend" and candle_mode == "heikin_ashi":
         return candle_frame(base, "heikin_ashi")
     return base
@@ -182,10 +192,14 @@ def bullish_signal(
     as_of: pd.Timestamp,
     period: int = DEFAULT_INDICATOR_PERIOD,
     supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
+    timeframe: Timeframe = "day",
 ) -> bool:
     """True when the selected indicator is bullish on/before *as_of*."""
     if indicator == "candle":
-        frame = candle_frame(ohlc, candle_mode)
+        if ohlc_uses_precomputed_ha(timeframe, candle_mode):
+            frame = normalize_ohlc(ohlc)
+        else:
+            frame = candle_frame(ohlc, candle_mode)
         sliced = _slice_as_of(frame, as_of)
         if sliced.empty:
             return False
@@ -208,7 +222,12 @@ def bullish_signal(
         return bool(pd.notna(ma) and close > float(ma))
 
     if indicator == "supertrend":
-        src = indicator_ohlc(base, indicator=indicator, candle_mode=candle_mode)
+        src = indicator_ohlc(
+            base,
+            indicator=indicator,
+            candle_mode=candle_mode,
+            timeframe=timeframe,
+        )
         st = compute_supertrend(
             src,
             atr_period=period,
@@ -230,10 +249,14 @@ def bearish_signal(
     as_of: pd.Timestamp,
     period: int = DEFAULT_INDICATOR_PERIOD,
     supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
+    timeframe: Timeframe = "day",
 ) -> bool:
     """True when the selected indicator is bearish on/before *as_of*."""
     if indicator == "candle":
-        frame = candle_frame(ohlc, candle_mode)
+        if ohlc_uses_precomputed_ha(timeframe, candle_mode):
+            frame = normalize_ohlc(ohlc)
+        else:
+            frame = candle_frame(ohlc, candle_mode)
         sliced = _slice_as_of(frame, as_of)
         if sliced.empty:
             return False
@@ -247,6 +270,7 @@ def bearish_signal(
         as_of=as_of,
         period=period,
         supertrend_multiplier=supertrend_multiplier,
+        timeframe=timeframe,
     )
 
 
@@ -257,6 +281,7 @@ def indicator_series(
     candle_mode: CandleMode,
     period: int = DEFAULT_INDICATOR_PERIOD,
     supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
+    timeframe: Timeframe = "day",
 ) -> pd.Series | pd.DataFrame:
     """Compute indicator values for chart overlay."""
     base = normalize_ohlc(ohlc)
@@ -268,10 +293,17 @@ def indicator_series(
     if indicator == "ema":
         return compute_ema(base["Close"], period)
     if indicator == "supertrend":
-        src = indicator_ohlc(base, indicator=indicator, candle_mode=candle_mode)
+        src = indicator_ohlc(
+            base,
+            indicator=indicator,
+            candle_mode=candle_mode,
+            timeframe=timeframe,
+        )
         return compute_supertrend(
             src,
             atr_period=period,
             multiplier=supertrend_multiplier,
         )
+    if ohlc_uses_precomputed_ha(timeframe, candle_mode):
+        return base["Close"]
     return candle_frame(ohlc, candle_mode)["Close"]

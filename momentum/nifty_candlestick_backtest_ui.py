@@ -22,6 +22,7 @@ from backtest.index.backtest_nifty_candlestick import (  # noqa: E402
     CANDLE_MODES,
     NiftyCandleBacktestConfig,
     NiftyCandleBacktestEngine,
+    _format_display_date,
     compute_metrics,
     normalize_backtest_date,
 )
@@ -494,6 +495,19 @@ def open_nifty_candlestick_backtest(
                 return eng.ohlc_for_chart(idx.yahoo_ticker)
         return None
 
+    def _chart_display_range() -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+        """Use current UI dates for chart slicing (matches Start/End fields)."""
+        try:
+            return (
+                pd.Timestamp(normalize_backtest_date(start_var.get())),
+                pd.Timestamp(normalize_backtest_date(end_var.get())),
+            )
+        except ValueError:
+            eng = _active_engine()
+            if eng is not None and eng.loaded:
+                return eng.chart_display_range()
+            return None, None
+
     def _update_index_chart() -> None:
         label = _chart_index_label()
         eng = _active_engine()
@@ -523,10 +537,11 @@ def open_nifty_candlestick_backtest(
             chart_candle_mode=_chart_candle_mode(),  # type: ignore[arg-type]
             period=period,
             supertrend_multiplier=st_mult,
+            timeframe=_timeframe_key(),  # type: ignore[arg-type]
             timeframe_label=tf_label,
             mark_signals=eng is not None and eng.loaded,
-            display_start=eng.chart_display_range()[0] if eng is not None and eng.loaded else None,
-            display_end=eng.chart_display_range()[1] if eng is not None and eng.loaded else None,
+            display_start=_chart_display_range()[0] if eng is not None and eng.loaded else None,
+            display_end=_chart_display_range()[1] if eng is not None and eng.loaded else None,
         )
         candle_hover.update(hover)
         chart_canvas.draw_idle()
@@ -575,9 +590,14 @@ def open_nifty_candlestick_backtest(
             elif n_bars == 0:
                 status_var.set("No bars in date range — check start/end dates.")
             else:
-                status_var.set(
-                    f"Loaded {n_bars} {tf.lower()} bar(s). Chart updated — click Run All for backtest."
-                )
+                msg = f"Loaded {n_bars} {tf.lower()} bar(s)"
+                if eng.data_starts_after_backtest() and eng.first_bar_date is not None:
+                    msg += (
+                        f" — NSE data from {_format_display_date(eng.first_bar_date)} "
+                        f"(requested {start_var.get()})"
+                    )
+                msg += ". Chart updated — click Run All for backtest."
+                status_var.set(msg)
 
     def _load_worker() -> None:
         nonlocal engine, compare_engine, _cancel_event
