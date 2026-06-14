@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
@@ -64,6 +65,7 @@ from momentum.rrg_ema_exit import (  # noqa: E402
     simulate_week_with_exits,
     split_holdings_at_stop_loss,
 )
+from momentum.backtest_cancel import cancel_check_from_event, check_cancelled  # noqa: E402
 from momentum.rrg_portfolio_fill import equal_weight_port_return  # noqa: E402
 
 STRATEGY_KEYS = (
@@ -151,7 +153,11 @@ def _close_col(df: pd.DataFrame) -> pd.Series:
 
 
 def _download_adj_vol_close(
-    yahoo_symbols: list[str], start: str, end: str
+    yahoo_symbols: list[str],
+    start: str,
+    end: str,
+    *,
+    cancel_check: Callable[[], None] | None = None,
 ) -> tuple[dict[str, pd.Series], dict[str, pd.Series], dict[str, pd.Series]]:
     start_iso = normalize_backtest_date(start)
     end_iso = _yf_download_end_exclusive(end)
@@ -162,6 +168,7 @@ def _download_adj_vol_close(
     vol_store: dict[str, pd.Series] = {}
     close_store: dict[str, pd.Series] = {}
     for sym in yahoo_symbols:
+        check_cancelled(cancel_check)
         try:
             df = yf.download(
                 sym,
@@ -729,6 +736,7 @@ def _intraweek_exits_enabled(cfg: EtfMomentumBacktestConfig) -> bool:
 class EtfMomentumBacktestEngine:
     config: EtfMomentumBacktestConfig
     progress_cb: Callable[[str], None] | None = None
+    cancel_event: threading.Event | None = None
     _etf_adj: dict[str, pd.Series] = field(default_factory=dict)
     _etf_vol: dict[str, pd.Series] = field(default_factory=dict)
     _etf_close: dict[str, pd.Series] = field(default_factory=dict)
@@ -747,6 +755,9 @@ class EtfMomentumBacktestEngine:
     def _log(self, msg: str) -> None:
         if self.progress_cb:
             self.progress_cb(msg)
+
+    def _check_cancel(self) -> None:
+        check_cancelled(cancel_check_from_event(self.cancel_event))
 
     @property
     def loaded(self) -> bool:
@@ -1141,17 +1152,25 @@ class EtfMomentumBacktestEngine:
 
     def load_data(self) -> None:
         cfg = self.config
+        cancel_check = cancel_check_from_event(self.cancel_event)
         tickers = _etf_tickers()
         _get_symbol_map()
         self._log(f"Downloading {len(tickers)} ETFs …")
         self._etf_adj, self._etf_vol, self._etf_close = _download_adj_vol_close(
-            tickers, cfg.backtest_start, cfg.backtest_end
+            tickers,
+            cfg.backtest_start,
+            cfg.backtest_end,
+            cancel_check=cancel_check,
         )
         self._log(f"  {len(self._etf_adj)} ETFs loaded")
 
+        self._check_cancel()
         self._log(f"Downloading benchmark {cfg.benchmark_ticker} …")
         bench_adj, _, _ = _download_adj_vol_close(
-            [cfg.benchmark_ticker], cfg.backtest_start, cfg.backtest_end
+            [cfg.benchmark_ticker],
+            cfg.backtest_start,
+            cfg.backtest_end,
+            cancel_check=cancel_check,
         )
         if cfg.benchmark_ticker not in bench_adj:
             raise RuntimeError(f"Could not download benchmark {cfg.benchmark_ticker}")
@@ -1175,6 +1194,7 @@ class EtfMomentumBacktestEngine:
     def step_period(self) -> dict | None:
         if not self._loaded or self.finished:
             return None
+        self._check_cancel()
 
         cfg = self.config
         i = self._period_idx
@@ -1357,6 +1377,7 @@ class EtfMomentumBacktestEngine:
 
     def run_all(self) -> pd.DataFrame:
         while not self.finished:
+            self._check_cancel()
             self.step_period()
         return self.trades_df
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,7 @@ from momentum.rrg_ema_exit import (  # noqa: E402
     simulate_week_with_exits,
     split_holdings_at_stop_loss,
 )
+from momentum.backtest_cancel import cancel_check_from_event, check_cancelled  # noqa: E402
 from momentum.rrg_portfolio_fill import equal_weight_port_return  # noqa: E402
 from utils.india_market_data import (  # noqa: E402
     MIN_BARS_NS_BHAVCOPY_FIRST,
@@ -156,13 +158,18 @@ def _backtest_download_window(start: str, end: str) -> tuple[str, str]:
 
 
 def _download_adj_vol_close(
-    yahoo_symbols: list[str], start: str, end: str
+    yahoo_symbols: list[str],
+    start: str,
+    end: str,
+    *,
+    cancel_check: Callable[[], None] | None = None,
 ) -> tuple[dict[str, pd.Series], dict[str, pd.Series], dict[str, pd.Series]]:
     extra_start, end_iso = _backtest_download_window(start, end)
     adj_store: dict[str, pd.Series] = {}
     vol_store: dict[str, pd.Series] = {}
     close_store: dict[str, pd.Series] = {}
     for sym in yahoo_symbols:
+        check_cancelled(cancel_check)
         try:
             df = get_india_market_data(sym, extra_start, end_iso)
             if df is None or len(df) == 0:
@@ -740,6 +747,7 @@ def _intraweek_exits_enabled(cfg: EtfMomentumBacktestConfig) -> bool:
 class EtfMomentumBacktestEngine:
     config: EtfMomentumBacktestConfig
     progress_cb: Callable[[str], None] | None = None
+    cancel_event: threading.Event | None = None
     _etf_adj: dict[str, pd.Series] = field(default_factory=dict)
     _etf_vol: dict[str, pd.Series] = field(default_factory=dict)
     _etf_close: dict[str, pd.Series] = field(default_factory=dict)
@@ -758,6 +766,9 @@ class EtfMomentumBacktestEngine:
     def _log(self, msg: str) -> None:
         if self.progress_cb:
             self.progress_cb(msg)
+
+    def _check_cancel(self) -> None:
+        check_cancelled(cancel_check_from_event(self.cancel_event))
 
     @property
     def loaded(self) -> bool:
@@ -1152,19 +1163,30 @@ class EtfMomentumBacktestEngine:
 
     def load_data(self) -> None:
         cfg = self.config
+        cancel_check = cancel_check_from_event(self.cancel_event)
         extra_start, end_iso = _backtest_download_window(
             cfg.backtest_start, cfg.backtest_end
         )
-        prepare_india_market_data_range(extra_start, end_iso, reset_stats=True)
+        prepare_india_market_data_range(
+            extra_start, end_iso, reset_stats=True, cancel_check=cancel_check
+        )
+        self._check_cancel()
         self._log(f"Downloading {len(ETF_TICKERS)} ETFs …")
         self._etf_adj, self._etf_vol, self._etf_close = _download_adj_vol_close(
-            list(ETF_TICKERS), cfg.backtest_start, cfg.backtest_end
+            list(ETF_TICKERS),
+            cfg.backtest_start,
+            cfg.backtest_end,
+            cancel_check=cancel_check,
         )
         self._log(f"  {len(self._etf_adj)} ETFs loaded")
 
+        self._check_cancel()
         self._log(f"Downloading benchmark {cfg.benchmark_ticker} …")
         bench_adj, _, _ = _download_adj_vol_close(
-            [cfg.benchmark_ticker], cfg.backtest_start, cfg.backtest_end
+            [cfg.benchmark_ticker],
+            cfg.backtest_start,
+            cfg.backtest_end,
+            cancel_check=cancel_check,
         )
         data_stats = get_india_market_data_run_stats().summary()
         if data_stats:
@@ -1200,6 +1222,7 @@ class EtfMomentumBacktestEngine:
     def step_period(self) -> dict | None:
         if not self._loaded or self.finished:
             return None
+        self._check_cancel()
 
         cfg = self.config
         i = self._period_idx
@@ -1382,6 +1405,7 @@ class EtfMomentumBacktestEngine:
 
     def run_all(self) -> pd.DataFrame:
         while not self.finished:
+            self._check_cancel()
             self.step_period()
         return self.trades_df
 

@@ -463,6 +463,7 @@ def warm_nse_eod_caches(
     *,
     include_cm_bhavcopy: bool = True,
     include_index_archive: bool = True,
+    cancel_check=None,
 ) -> int:
     """Pre-load NSE EOD archives for weekdays in range that are not yet cached."""
     start = _as_date(start_date)
@@ -478,6 +479,8 @@ def warm_nse_eod_caches(
     sessions = 0
     d = start
     while d <= end_past:
+        if cancel_check is not None:
+            cancel_check()
         if d.weekday() < 5:
             if include_cm_bhavcopy:
                 fetch_bhavcopy(d)
@@ -493,11 +496,12 @@ def prepare_india_market_data_range(
     end_date,
     *,
     reset_stats: bool = True,
+    cancel_check=None,
 ) -> IndiaMarketDataRunStats:
     """Warm NSE day archives for a date window; reset per-run symbol stats when requested."""
     if reset_stats:
         reset_india_market_data_run_stats()
         _LOAD_META.clear()
-    warm_nse_eod_caches(start_date, end_date)
+    warm_nse_eod_caches(start_date, end_date, cancel_check=cancel_check)
     return get_india_market_data_run_stats()
 

@@ -15,6 +15,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from momentum.backtest_cancel import BacktestCancelled  # noqa: E402
 from backtest.etf.backtest_etf_momentum import (  # noqa: E402
     REBALANCE_ALIASES,
     REBALANCE_LABELS,
@@ -175,6 +176,9 @@ def open_etf_momentum_backtest(
     engine: EtfMomentumBacktestEngine | None = None
     _busy = False
     _load_run_all_after = False
+    _cancel_event: threading.Event | None = None
+    _engine_before_load: EtfMomentumBacktestEngine | None = None
+    _in_load_session = False
 
     params = tk.Frame(win, padx=10, pady=6)
     params.pack(fill=tk.X)
@@ -525,6 +529,8 @@ def open_etf_momentum_backtest(
 
     load_btn = ttk.Button(btn_row, text="Load Data")
     load_btn.pack(side=tk.LEFT, padx=4)
+    cancel_btn = ttk.Button(btn_row, text="Cancel", state=tk.DISABLED)
+    cancel_btn.pack(side=tk.LEFT, padx=4)
     prev_btn = ttk.Button(btn_row, text="Prev Period", state=tk.DISABLED)
     prev_btn.pack(side=tk.LEFT, padx=4)
     next_btn = ttk.Button(btn_row, text="Next Period", state=tk.DISABLED)
@@ -609,7 +615,7 @@ def open_etf_momentum_backtest(
         )
 
     def _set_busy(busy: bool) -> None:
-        nonlocal _busy
+        nonlocal _busy, _cancel_event
         _busy = busy
         state = tk.DISABLED if busy else tk.NORMAL
         load_btn.config(state=state)
@@ -617,10 +623,18 @@ def open_etf_momentum_backtest(
         prev_btn.config(state=state)
         run_all_btn.config(state=state)
         reset_btn.config(state=state)
+        cancel_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
         strategy_combo.config(state="disabled" if busy else "readonly")
         win.config(cursor="watch" if busy else "")
         if not busy:
+            _cancel_event = None
             _refresh_nav_buttons()
+
+    def _on_cancel() -> None:
+        if _cancel_event is not None:
+            _cancel_event.set()
+            cancel_btn.config(state=tk.DISABLED)
+            status_var.set("Cancelling…")
 
     def _refresh_nav_buttons() -> None:
         can_prev = (
@@ -646,6 +660,7 @@ def open_etf_momentum_backtest(
     def _clear_results() -> None:
         for item in log_tree.get_children():
             log_tree.delete(item)
+        detail_frame.configure(text="Selected period")
         _fill_kv_tree(detail_tree, None, empty="Load data, then Next Period or Run All.")
         _fill_pick_tree(pick_tree, None)
         _fill_kv_tree(metrics_tree, None, empty="No results yet.")
@@ -734,24 +749,31 @@ def open_etf_momentum_backtest(
 
     def _show_period_detail(record: dict | None) -> None:
         if record is None or engine is None:
+            detail_frame.configure(text="Selected period")
             _fill_kv_tree(detail_tree, None, empty="Load data, then Next Period or Run All.")
             _fill_pick_tree(pick_tree, None)
             return
+        period_start = rrg_format_date(record["Rebal_Date"])
+        period_end = rrg_format_date(record["End_Date"])
         cap = _parse_capital()
         port_end = float(record.get("Portfolio_Value_End", record["Portfolio_Value"]))
         cum_pl = backtest_cum_pl_pct(port_end, cap)
+        port_pct = f"{record['Port_Return'] * 100:+.2f}"
+        cum_pl_pct = f"{cum_pl:+.2f}"
+        bench_pct = f"{record['Bench_Return'] * 100:+.2f}"
+        detail_frame.configure(
+            text=(
+                f"Selected period  ({period_start} — {period_end})  "
+                f"Week P/L %: {port_pct}  Port P/L %: {cum_pl_pct}  Bench %: {bench_pct}"
+            )
+        )
         fields = {
-            "Period start": rrg_format_date(record["Rebal_Date"]),
-            "Period end": rrg_format_date(record["End_Date"]),
             "Portfolio value (start)": _format_portfolio_value(
                 record.get("Portfolio_Value_Start")
             ),
             "Portfolio value (end)": _format_portfolio_value(
                 record.get("Portfolio_Value_End", record.get("Portfolio_Value"))
             ),
-            "Portfolio % (period)": f"{record['Port_Return'] * 100:+.2f}",
-            "Portfolio P/L % (since start)": f"{cum_pl:+.2f}",
-            "Benchmark %": f"{record['Bench_Return'] * 100:+.2f}",
             "Market regime": str(record.get("Regime", "—")),
             "Holdings": record.get("Holdings") or "CASH",
             "Momentum ETFs": record.get("Momentum_Holdings") or "—",
@@ -785,8 +807,55 @@ def open_etf_momentum_backtest(
 
     log_tree.bind("<<TreeviewSelect>>", _on_log_select)
 
-    def _on_step_done(err: Exception | None) -> None:
+    def _restore_loaded_idle(*, cancelled: bool = False) -> None:
+        prefix = "Cancelled. " if cancelled else ""
+        if engine is not None and engine.loaded:
+            _refresh_log_table()
+            _update_chart()
+            _update_metrics()
+            if engine.trades_df.shape[0]:
+                last = engine.trades_df.iloc[-1].to_dict()
+                _show_period_detail(last)
+                log_tree.selection_set(str(last["Period"]))
+            else:
+                detail_frame.configure(text="Selected period")
+                _fill_kv_tree(
+                    detail_tree,
+                    None,
+                    empty="Load data, then Next Period or Run All.",
+                )
+                _fill_pick_tree(pick_tree, None)
+            status_var.set(
+                f"{prefix}{engine.total_periods} periods ready — "
+                "click Next Period or Run All."
+            )
+        else:
+            _clear_results()
+            status_var.set(
+                f"{prefix}Choose strategy, set dates, then Load Data."
+                if cancelled
+                else "Choose strategy, set dates, then Load Data."
+            )
+        _refresh_nav_buttons()
+
+    def _on_cancelled() -> None:
+        nonlocal engine, _in_load_session
+        if _in_load_session:
+            engine = _engine_before_load
+            _in_load_session = False
+            _restore_loaded_idle(cancelled=True)
+            return
+        if engine is not None and engine.loaded:
+            engine.reset_run()
+        _restore_loaded_idle(cancelled=True)
+
+    def _on_step_done(err: Exception | None, *, cancelled: bool = False) -> None:
+        nonlocal _in_load_session
+        if cancelled:
+            _on_cancelled()
+            return
         if err is not None:
+            _in_load_session = False
             messagebox.showerror("Backtest", str(err), parent=win)
             status_var.set(f"Error: {err}")
             return
@@ -802,10 +871,11 @@ def open_etf_momentum_backtest(
                 if not engine.finished
                 else "All periods complete."
             )
+        _in_load_session = False
         _refresh_nav_buttons()
 
     def _on_load() -> None:
-        nonlocal engine, _load_run_all_after
+        nonlocal engine, _load_run_all_after, _cancel_event, _engine_before_load, _in_load_session
         if _busy:
             return
         try:
@@ -813,31 +883,49 @@ def open_etf_momentum_backtest(
         except ValueError as exc:
             messagebox.showerror("Invalid input", str(exc), parent=win)
             return
+        _engine_before_load = engine
+        _in_load_session = True
         _load_run_all_after = mode_var.get() == "all"
+        _cancel_event = threading.Event()
         _set_busy(True)
-        status_var.set("Loading Yahoo data (may take a few minutes)…")
+        status_var.set("Loading market data (may take a few minutes)…")
 
         def worker() -> None:
             err: Exception | None = None
+            cancelled = False
             eng: EtfMomentumBacktestEngine | None = None
             try:
-                eng = EtfMomentumBacktestEngine(ui_cfg)
+                eng = EtfMomentumBacktestEngine(ui_cfg, cancel_event=_cancel_event)
                 eng.load_data()
+            except BacktestCancelled:
+                cancelled = True
             except Exception as exc:
                 err = exc
-            win.after(0, lambda: _on_load_done(eng, err))
+            win.after(0, lambda: _on_load_done(eng, err, cancelled))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_load_done(eng: EtfMomentumBacktestEngine | None, err: Exception | None) -> None:
-        nonlocal engine, _load_run_all_after
+    def _on_load_done(
+        eng: EtfMomentumBacktestEngine | None,
+        err: Exception | None,
+        cancelled: bool,
+    ) -> None:
+        nonlocal engine, _load_run_all_after, _in_load_session
         _set_busy(False)
+        if cancelled:
+            engine = _engine_before_load
+            _in_load_session = False
+            _restore_loaded_idle(cancelled=True)
+            return
         if err is not None:
+            _in_load_session = False
             messagebox.showerror("Load failed", str(err), parent=win)
             status_var.set(f"Load failed: {err}")
             return
         engine = eng
         _clear_results()
+        if not _load_run_all_after:
+            _in_load_session = False
         status_var.set(
             f"Loaded {engine.total_periods} periods for {strategy_var.get()}. "
             + ("Running all…" if _load_run_all_after else "Click Next Period or Run All.")
@@ -861,17 +949,23 @@ def open_etf_momentum_backtest(
                 parent=win,
             )
             return
+        nonlocal _cancel_event
+        _cancel_event = threading.Event()
+        engine.cancel_event = _cancel_event
         _set_busy(True)
         status_var.set("Simulating period…")
 
         def worker() -> None:
             err: Exception | None = None
+            cancelled = False
             try:
                 _sync_engine_config()
                 engine.step_period()
+            except BacktestCancelled:
+                cancelled = True
             except Exception as exc:
                 err = exc
-            win.after(0, lambda: (_set_busy(False), _on_step_done(err)))
+            win.after(0, lambda: (_set_busy(False), _on_step_done(err, cancelled=cancelled)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -880,17 +974,23 @@ def open_etf_momentum_backtest(
             return
         if engine.finished and not from_load:
             return
+        nonlocal _cancel_event
+        _cancel_event = threading.Event()
+        engine.cancel_event = _cancel_event
         _set_busy(True)
         status_var.set("Running all periods…")
 
         def worker() -> None:
             err: Exception | None = None
+            cancelled = False
             try:
                 _sync_engine_config()
                 engine.run_all()
+            except BacktestCancelled:
+                cancelled = True
             except Exception as exc:
                 err = exc
-            win.after(0, lambda: (_set_busy(False), _on_step_done(err)))
+            win.after(0, lambda: (_set_busy(False), _on_step_done(err, cancelled=cancelled)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -898,18 +998,24 @@ def open_etf_momentum_backtest(
         if _busy or engine is None or engine.current_period <= 0:
             return
         target = engine.current_period - 1
+        nonlocal _cancel_event
+        _cancel_event = threading.Event()
+        engine.cancel_event = _cancel_event
         _set_busy(True)
 
         def worker() -> None:
             err: Exception | None = None
+            cancelled = False
             try:
                 _sync_engine_config()
                 engine.reset_run()
                 for _ in range(target):
                     engine.step_period()
+            except BacktestCancelled:
+                cancelled = True
             except Exception as exc:
                 err = exc
-            win.after(0, lambda: (_set_busy(False), _on_step_done(err)))
+            win.after(0, lambda: (_set_busy(False), _on_step_done(err, cancelled=cancelled)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -936,6 +1042,7 @@ def open_etf_momentum_backtest(
     strategy_combo.bind("<<ComboboxSelected>>", _on_strategy_change)
 
     load_btn.config(command=_on_load)
+    cancel_btn.config(command=_on_cancel)
     next_btn.config(command=_on_next)
     prev_btn.config(command=_on_prev)
     run_all_btn.config(command=lambda: _on_run_all(from_load=False))
