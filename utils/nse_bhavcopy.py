@@ -283,11 +283,36 @@ YAHOO_TO_NSE_INDEX: dict[str, str] = {
     "NIFTY_RAILWAYSPSU.NS": "Nifty India Railways PSU",
     "NIFTY_OIL_AND_GAS.NS": "Nifty Oil & Gas",
     "NIFTY_CHEMICALS.NS": "Nifty Chemicals",
+    "NIFTYM150MOMNTM50.NS": "Nifty Midcap150 Momentum 50",
 }
+
+# Synthetic tickers for index backtests: ``NSEIDX:<exact NSE index name>`` → NSE EOD only.
+NSE_INDEX_TICKER_PREFIX = "NSEIDX:"
+
+
+def nse_index_data_ticker(index_name: str) -> str:
+    """Ticker for OHLC loaders — Yahoo index symbol when known, else ``NSEIDX:`` (never ETF)."""
+    yahoo = nse_index_to_yahoo_ticker(index_name)
+    if yahoo:
+        return yahoo
+    return f"{NSE_INDEX_TICKER_PREFIX}{index_name}"
+
+
+def nse_index_to_yahoo_ticker(index_name: str) -> str | None:
+    """NSE ``ind_close_all`` index name → preferred Yahoo symbol (not tracking ETF)."""
+    if not index_name:
+        return None
+    req = _normalize_index_key(index_name)
+    for yahoo, nse in YAHOO_TO_NSE_INDEX.items():
+        if _normalize_index_key(nse) == req:
+            return yahoo
+    return None
 
 
 def yahoo_ticker_to_nse_index(yahoo_ticker: str) -> str | None:
     """Map a Yahoo-style ticker to the NSE index name in ``ind_close_all`` CSV."""
+    if yahoo_ticker.startswith(NSE_INDEX_TICKER_PREFIX):
+        return yahoo_ticker[len(NSE_INDEX_TICKER_PREFIX) :]
     if yahoo_ticker in YAHOO_TO_NSE_INDEX:
         return YAHOO_TO_NSE_INDEX[yahoo_ticker]
     base = yahoo_ticker.split(".")[0].replace("_", " ").replace("^", "").strip()

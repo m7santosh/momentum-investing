@@ -25,7 +25,9 @@ from utils.nse_bhavcopy import (
     clear_nse_data_caches,
     fetch_bhavcopy,
     fetch_index_close_all,
+    fetch_index_close_history,
     fetch_nse_live_quotes,
+    NSE_INDEX_TICKER_PREFIX,
     nse_symbol_from_yahoo,
     resolve_index_name,
     today_ist,
@@ -243,15 +245,17 @@ def patch_yahoo_with_nse_eod(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     out = df.copy()
     today = today_ist()
 
+    index_name = yahoo_ticker_to_nse_index(ticker)
+    if index_name:
+        _patch_index_eod_history(out, index_name, before=today)
+        if ticker.endswith(".NS"):
+            return _patch_today_yahoo_fallback(out, ticker)
+        return out
+
     if ticker.endswith(".NS"):
         nse_sym = nse_symbol_from_yahoo(ticker)
         _patch_cm_bhavcopy_history(out, nse_sym, before=today)
         return _patch_today_yahoo_fallback(out, ticker)
-
-    index_name = yahoo_ticker_to_nse_index(ticker)
-    if index_name:
-        _patch_index_eod_history(out, index_name, before=today)
-        return out
 
     return out
 
@@ -272,13 +276,19 @@ def _download_yahoo(ticker: str, start, end_exclusive) -> pd.DataFrame:
 
 def _series_col(df: pd.DataFrame, col: str) -> pd.Series:
     s = df[col]
-    return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s.squeeze()
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    s = s.squeeze()
+    if isinstance(s, pd.Series):
+        return s
+    return pd.Series([s], index=df.index)
 
 
 def _yahoo_valid_bar_count(df: pd.DataFrame) -> int:
     if df is None or df.empty or "Close" not in df.columns:
         return 0
-    return int(_series_col(df, "Close").dropna().shape[0])
+    close = _series_col(df, "Close")
+    return int(close.dropna().shape[0])
 
 
 def _effective_bar_count(df: pd.DataFrame) -> int:
@@ -354,6 +364,100 @@ def _merge_yahoo_onto_bhavcopy(
     return _patch_today_yahoo_fallback(out, ticker)
 
 
+def _build_ohlcv_from_index_eod(
+    index_name: str,
+    start: pd.Timestamp,
+    end_exclusive: pd.Timestamp,
+) -> tuple[pd.DataFrame, int]:
+    """Daily OHLC from NSE ``ind_close_all`` (flat OHLC when only close is available)."""
+    start_d = start.date()
+    end_d = (end_exclusive - pd.Timedelta(days=1)).date()
+    if end_d < start_d:
+        return pd.DataFrame(), 0
+
+    closes = fetch_index_close_history(index_name, start_d, end_d)
+    if closes.empty:
+        return pd.DataFrame(), 0
+
+    rows: list[dict] = []
+    for ts, close in closes.items():
+        c = float(close)
+        rows.append(
+            {
+                "Date": pd.Timestamp(ts),
+                "Open": c,
+                "High": c,
+                "Low": c,
+                "Close": c,
+                "Adj Close": c,
+                "Volume": 0,
+            }
+        )
+    out = pd.DataFrame(rows).set_index("Date").sort_index()
+    return out, len(out)
+
+
+def _merge_yahoo_ohlc_onto_index(base: pd.DataFrame, yahoo_df: pd.DataFrame) -> pd.DataFrame:
+    """Overlay Yahoo index OHLC on NSE index close history where dates overlap."""
+    if yahoo_df is None or yahoo_df.empty:
+        return base
+    out = base.copy()
+    yahoo = yahoo_df.copy()
+    for idx in yahoo.index:
+        if idx not in out.index:
+            continue
+        for col in _OHLCV_COLS:
+            if col not in yahoo.columns or col not in out.columns:
+                continue
+            val = yahoo.at[idx, col]
+            if pd.notna(val):
+                out.at[idx, col] = val
+    return out
+
+
+def _load_nse_index_ohlcv(
+    ticker: str,
+    start: pd.Timestamp,
+    end_exclusive: pd.Timestamp,
+) -> tuple[pd.DataFrame, IndiaTickerLoadMeta]:
+    index_name = yahoo_ticker_to_nse_index(ticker)
+    if not index_name:
+        return pd.DataFrame(), IndiaTickerLoadMeta(
+            ticker=ticker,
+            source="none",
+            yahoo_bars=0,
+            bhavcopy_bars=0,
+            effective_bars=0,
+        )
+
+    if ticker.startswith(NSE_INDEX_TICKER_PREFIX):
+        yahoo_df = pd.DataFrame()
+    else:
+        yahoo_df = _download_yahoo(ticker, start, end_exclusive)
+    yahoo_n = _yahoo_valid_bar_count(yahoo_df)
+    base, index_n = _build_ohlcv_from_index_eod(index_name, start, end_exclusive)
+
+    if base.empty and yahoo_df.empty:
+        loaded = pd.DataFrame()
+        source = "none"
+    elif base.empty:
+        loaded = patch_yahoo_with_nse_eod(yahoo_df, ticker)
+        source = "yahoo"
+    else:
+        merged = _merge_yahoo_ohlc_onto_index(base, yahoo_df)
+        loaded = patch_yahoo_with_nse_eod(merged, ticker)
+        source = "nse_index+yahoo" if yahoo_n else "nse_index"
+
+    meta = IndiaTickerLoadMeta(
+        ticker=ticker,
+        source=source,
+        yahoo_bars=yahoo_n,
+        bhavcopy_bars=index_n,
+        effective_bars=_effective_bar_count(loaded),
+    )
+    return loaded, meta
+
+
 def _load_ns_equity_ohlcv(
     ticker: str,
     start: pd.Timestamp,
@@ -425,7 +529,9 @@ def get_india_market_data(ticker: str, start_date, end_date) -> pd.DataFrame:
         _bump_stat(cached=True)
         return entry.df.copy()
 
-    if ticker.endswith(".NS"):
+    if yahoo_ticker_to_nse_index(ticker):
+        loaded, meta = _load_nse_index_ohlcv(ticker, start, end_exclusive)
+    elif ticker.endswith(".NS"):
         loaded, meta = _load_ns_equity_ohlcv(ticker, start, end_exclusive)
     else:
         raw = _download_yahoo(ticker, start, end_exclusive)

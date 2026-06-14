@@ -174,7 +174,7 @@ def open_nifty_candlestick_backtest(
 
     period_label = tk.Label(params, text="Period:")
     period_label.grid(row=1, column=4, sticky="w", pady=(8, 0))
-    period_var = tk.IntVar(value=DEFAULT_INDICATOR_PERIOD)
+    period_var = tk.StringVar(value=str(DEFAULT_INDICATOR_PERIOD))
     period_spin = ttk.Spinbox(params, from_=2, to=200, width=5, textvariable=period_var)
     period_spin.grid(row=1, column=5, padx=(4, 8), pady=(8, 0), sticky="w")
 
@@ -304,6 +304,8 @@ def open_nifty_candlestick_backtest(
 
     install_copy_support(win)
 
+    _last_indicator_key: list[str] = [DEFAULT_INDICATOR]
+
     def _indicator_key() -> str:
         label = indicator_var.get().strip()
         for key, text in INDICATOR_LABELS.items():
@@ -311,13 +313,49 @@ def open_nifty_candlestick_backtest(
                 return key
         return resolve_indicator(label)
 
-    def _parse_supertrend_multiplier() -> float:
-        return float(st_mult_var.get().strip())
+    def _parse_period() -> int | None:
+        raw = period_var.get().strip()
+        if not raw:
+            return None
+        try:
+            val = int(raw)
+        except ValueError:
+            return None
+        return val if 2 <= val <= 200 else None
+
+    def _require_period() -> int:
+        val = _parse_period()
+        if val is None:
+            raise ValueError("Enter a valid period (2–200).")
+        return val
+
+    def _parse_supertrend_multiplier() -> float | None:
+        raw = st_mult_var.get().strip()
+        if not raw:
+            return None
+        try:
+            val = float(raw)
+        except ValueError:
+            return None
+        return val if val > 0 else None
+
+    def _require_supertrend_multiplier() -> float:
+        val = _parse_supertrend_multiplier()
+        if val is None:
+            raise ValueError("Enter a valid Supertrend multiplier (> 0).")
+        return val
 
     def _update_indicator_controls(_event=None) -> None:
         ind = _indicator_key()
         is_candle = ind == "candle"
         is_st = ind == "supertrend"
+
+        if is_st and _last_indicator_key[0] != "supertrend":
+            period_var.set(str(DEFAULT_SUPERTREND_ATR))
+            st_mult_var.set(str(DEFAULT_SUPERTREND_MULTIPLIER))
+        elif not is_st and _last_indicator_key[0] == "supertrend":
+            period_var.set(str(DEFAULT_INDICATOR_PERIOD))
+        _last_indicator_key[0] = ind
 
         chart_values = [CANDLE_MODE_LABELS[m] for m in CANDLE_MODES]
         if is_candle:
@@ -389,14 +427,19 @@ def open_nifty_candlestick_backtest(
         return tuple(_index_label_to_id[_index_labels[i]] for i in sel)
 
     def _build_config(candle_mode: str) -> NiftyCandleBacktestConfig:
+        ind = _indicator_key()
         return NiftyCandleBacktestConfig(
             backtest_start=normalize_backtest_date(start_var.get()),
             backtest_end=normalize_backtest_date(end_var.get()),
             candle_mode=candle_mode,  # type: ignore[arg-type]
             selected_index_ids=_selected_index_ids(),
-            indicator=_indicator_key(),  # type: ignore[arg-type]
-            indicator_period=int(period_var.get()),
-            supertrend_multiplier=_parse_supertrend_multiplier(),
+            indicator=ind,  # type: ignore[arg-type]
+            indicator_period=_require_period(),
+            supertrend_multiplier=(
+                _require_supertrend_multiplier()
+                if ind == "supertrend"
+                else DEFAULT_SUPERTREND_MULTIPLIER
+            ),
             initial_capital=_parse_capital(),
             timeframe=_timeframe_key(),  # type: ignore[arg-type]
             benchmark_key=_benchmark_key(),
@@ -456,8 +499,15 @@ def open_nifty_candlestick_backtest(
         eng = _active_engine()
         ohlc = _ohlc_for_chart_label(label) if label and eng is not None and eng.loaded else None
         ind = _indicator_key()
-        period = int(period_var.get())
-        st_mult = _parse_supertrend_multiplier()
+        period = _parse_period()
+        if period is None:
+            return
+        if ind == "supertrend":
+            st_mult = _parse_supertrend_multiplier()
+            if st_mult is None:
+                return
+        else:
+            st_mult = DEFAULT_SUPERTREND_MULTIPLIER
         tf_label = timeframe_var.get()
         signal_candle_mode = _chart_candle_mode()
         if ind == "candle":
@@ -568,8 +618,11 @@ def open_nifty_candlestick_backtest(
             return
         try:
             _selected_index_ids()
+            _require_period()
+            if _indicator_key() == "supertrend":
+                _require_supertrend_multiplier()
         except ValueError as exc:
-            messagebox.showerror("Indices required", str(exc), parent=win)
+            messagebox.showerror("Invalid parameters", str(exc), parent=win)
             return
         _load_run_all_after = run_all
         _cancel_event = threading.Event()

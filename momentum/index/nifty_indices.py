@@ -5,9 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from momentum.etf.etf_rrg_universe import RRG_ROWS
-from utils.nse_bhavcopy import YAHOO_TO_NSE_INDEX
-
-NSE_INDEX_TO_YAHOO: dict[str, str] = {v: k for k, v in YAHOO_TO_NSE_INDEX.items()}
+from utils.nse_bhavcopy import nse_index_data_ticker
 
 
 @dataclass(frozen=True)
@@ -60,19 +58,20 @@ class NiftyIndex:
 
 
 def build_nifty_index_universe() -> list[NiftyIndex]:
-    """RRG index rows with Yahoo index symbol or tracking ETF fallback."""
+    """RRG index rows using NSE index EOD (Yahoo index symbol or ``NSEIDX:`` — never ETF)."""
     out: list[NiftyIndex] = []
     seen: set[str] = set()
     for row in RRG_ROWS:
         if row.kind != "index" or row.row_id in seen:
             continue
         seen.add(row.row_id)
-        yahoo = NSE_INDEX_TO_YAHOO.get(row.row_id)
-        if not yahoo and row.etf_ticker:
-            yahoo = row.etf_ticker
-        if not yahoo:
-            continue
-        out.append(NiftyIndex(index_id=row.row_id, yahoo_ticker=yahoo, label=row.label))
+        out.append(
+            NiftyIndex(
+                index_id=row.row_id,
+                yahoo_ticker=nse_index_data_ticker(row.row_id),
+                label=row.label,
+            )
+        )
     return out
 
 

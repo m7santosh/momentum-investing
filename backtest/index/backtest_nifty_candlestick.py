@@ -37,6 +37,7 @@ from momentum.index.candle_signals import (  # noqa: E402
 from momentum.index.index_indicators import (  # noqa: E402
     DEFAULT_INDICATOR,
     DEFAULT_INDICATOR_PERIOD,
+    DEFAULT_SUPERTREND_ATR,
     DEFAULT_SUPERTREND_MULTIPLIER,
     INDICATOR_LABELS,
     IndicatorKind,
@@ -644,7 +645,7 @@ def main() -> int:
         default=DEFAULT_INDICATOR,
         choices=list(INDICATOR_LABELS.keys()),
     )
-    parser.add_argument("--period", type=int, default=DEFAULT_INDICATOR_PERIOD)
+    parser.add_argument("--period", type=int, default=None, help="SMA/EMA period or Supertrend ATR length")
     parser.add_argument(
         "--supertrend-multiplier",
         type=float,
@@ -671,14 +672,22 @@ def main() -> int:
     else:
         selected = DEFAULT_SELECTED_INDEX_IDS
 
+    indicator = resolve_indicator(args.indicator)
+    if args.period is not None:
+        indicator_period = args.period
+    elif indicator == "supertrend":
+        indicator_period = DEFAULT_SUPERTREND_ATR
+    else:
+        indicator_period = DEFAULT_INDICATOR_PERIOD
+
     df = run_backtest(
         args.start,
         end,
         candle_mode=args.mode,
         timeframe=tf,
         selected_index_ids=selected,
-        indicator=resolve_indicator(args.indicator),
-        indicator_period=args.period,
+        indicator=indicator,
+        indicator_period=indicator_period,
         supertrend_multiplier=args.supertrend_multiplier,
         initial_capital=args.capital,
         benchmark_key=args.benchmark,

@@ -117,7 +117,7 @@ ETF_TO_NSE_INDEX = {
     'PVTBANIETF.NS': 'Nifty Private Bank',
     'MOMIDMTM.NS': 'Nifty Midcap150 Momentum 50',
     'SILVERBEES.NS': None,
-    'SMALLCAP.NS': 'Nifty Smallcap 250 Momentum Quality 100',
+    'SMALLCAP.NS': 'Nifty Smallcap250 Momentum Quality 100',
     'CHEMICAL.NS': 'Nifty Chemicals',
     'GROWWNET.NS': 'Nifty India Internet',
 }
