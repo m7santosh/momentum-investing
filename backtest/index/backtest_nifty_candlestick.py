@@ -234,6 +234,10 @@ class NiftyCandleBacktestEngine:
         """OHLC at the configured timeframe (includes warmup bars for indicators)."""
         return self._ohlc.get(yahoo_ticker, pd.DataFrame())
 
+    def ohlc_daily_for_chart(self, yahoo_ticker: str) -> pd.DataFrame:
+        """Raw daily OHLC (includes warmup bars) for chart recompute by candle mode."""
+        return self._ohlc_daily.get(yahoo_ticker, pd.DataFrame())
+
     def chart_display_range(self) -> tuple[pd.Timestamp, pd.Timestamp]:
         start = pd.Timestamp(normalize_backtest_date(self.config.backtest_start))
         end = pd.Timestamp(normalize_backtest_date(self.config.backtest_end))

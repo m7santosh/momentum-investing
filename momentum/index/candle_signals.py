@@ -29,19 +29,19 @@ def ohlc_for_timeframe(
 ) -> pd.DataFrame:
     """OHLC at the requested timeframe.
 
-    Weekly Heikin Ashi matches TradingView: daily HA first, then aggregate to
-    weekly bars (``ticker.heikinashi`` + weekly resolution). Daily/monthly HA
-    is computed on bars at that timeframe.
+    Daily: optional Heikin Ashi on daily bars.
+    Weekly/monthly: aggregate standard OHLC first, then apply Heikin Ashi to those
+    bars when requested (matches TradingView weekly/monthly HA charts).
     """
     base = normalize_ohlc(ohlc)
     if base.empty:
         return base
     if timeframe == "day":
         return candle_frame(base, candle_mode)
-    if candle_mode == "heikin_ashi" and timeframe in ("week", "month"):
-        ha_daily = candle_frame(base, "heikin_ashi")
-        return resample_ohlc(ha_daily, timeframe)
-    return resample_ohlc(base, timeframe)
+    resampled = resample_ohlc(base, timeframe)
+    if candle_mode == "heikin_ashi":
+        return compute_heikin_ashi(resampled)
+    return resampled
 
 
 def chart_plot_mode(timeframe: Timeframe, candle_mode: CandleMode) -> CandleMode:

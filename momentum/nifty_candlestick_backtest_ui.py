@@ -27,7 +27,7 @@ from backtest.index.backtest_nifty_candlestick import (  # noqa: E402
     normalize_backtest_date,
 )
 from momentum.backtest_cancel import BacktestCancelled  # noqa: E402
-from momentum.index.candle_signals import TIMEFRAME_LABELS  # noqa: E402
+from momentum.index.candle_signals import TIMEFRAME_LABELS, ohlc_for_timeframe  # noqa: E402
 from momentum.index.index_indicators import (  # noqa: E402
     DEFAULT_INDICATOR,
     DEFAULT_INDICATOR_PERIOD,
@@ -492,7 +492,15 @@ def open_nifty_candlestick_backtest(
             return None
         for idx in eng._universe:
             if idx.label == label:
-                return eng.ohlc_for_chart(idx.yahoo_ticker)
+                daily = eng.ohlc_daily_for_chart(idx.yahoo_ticker)
+                if daily is None or daily.empty:
+                    return None
+                chart_mode = _chart_candle_mode()
+                return ohlc_for_timeframe(
+                    daily,
+                    _timeframe_key(),  # type: ignore[arg-type]
+                    chart_mode,  # type: ignore[arg-type]
+                )
         return None
 
     def _chart_display_range() -> tuple[pd.Timestamp | None, pd.Timestamp | None]:

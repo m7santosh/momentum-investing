@@ -26,6 +26,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from momentum.etf.etf_us_momentum_engine import (  # noqa: E402
+    TOP_N,
     UsEtfMomentumSnapshot,
     fetch_us_etf_momentum_snapshot,
 )
@@ -254,10 +255,14 @@ class UsEtfMomentumScreenApp:
         notebook.pack(fill=tk.BOTH, expand=True)
 
         self._abs_tree = self._add_tab(
-            notebook, "Abs Momentum (top 10)", ABS_COLUMNS, labels=ABS_COLUMN_LABELS
+            notebook, f"Abs Momentum (top {TOP_N})", ABS_COLUMNS, labels=ABS_COLUMN_LABELS
         )
-        self._rs_tree = self._add_tab(notebook, "RS Blended (top 10)", RS_BLENDED_COLUMNS)
-        self._adaptive_tree = self._add_tab(notebook, "RS Adaptive (top 10)", RS_ADAPTIVE_COLUMNS)
+        self._rs_tree = self._add_tab(
+            notebook, f"RS Blended (top {TOP_N})", RS_BLENDED_COLUMNS
+        )
+        self._adaptive_tree = self._add_tab(
+            notebook, f"RS Adaptive (top {TOP_N})", RS_ADAPTIVE_COLUMNS
+        )
 
         info_frame = tk.LabelFrame(body, text="Run Info", padx=6, pady=6)
         body.add(info_frame, weight=1)

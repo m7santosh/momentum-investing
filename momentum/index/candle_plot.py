@@ -107,7 +107,7 @@ class CandleChartHover:
         else:
             chg_part = "Chg —"
         parts = [
-            ts.strftime("%d-%m-%Y"),
+            f"{data.chart_mode_label}  |  {ts.strftime('%d-%m-%Y')}",
             f"O {o:,.2f}  H {h:,.2f}  L {l:,.2f}  C {c:,.2f}",
             chg_part,
         ]
