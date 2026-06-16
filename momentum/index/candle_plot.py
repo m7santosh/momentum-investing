@@ -18,6 +18,7 @@ from momentum.index.candle_signals import (
     candle_frame,
     chart_plot_mode,
     normalize_ohlc,
+    ohlc_for_timeframe,
 )
 from momentum.index.index_indicators import (
     DEFAULT_INDICATOR_PERIOD,
@@ -586,7 +587,12 @@ def plot_index_with_indicator(
         fig.tight_layout()
         return None
 
-    base_full = normalize_ohlc(ohlc)
+    effective_mode = chart_candle_mode or candle_mode
+    base_full = ohlc_for_timeframe(
+        normalize_ohlc(ohlc),
+        timeframe,
+        effective_mode,
+    )
     display_ohlc = _slice_display(
         base_full, display_start=display_start, display_end=display_end
     )
@@ -604,7 +610,7 @@ def plot_index_with_indicator(
                 f"(no bars before requested {display_start.strftime('%d-%m-%Y')})"
             )
 
-    render_mode = chart_plot_mode(timeframe, chart_candle_mode or candle_mode)
+    render_mode = chart_plot_mode(timeframe, effective_mode)
     frame = plot_candles(
         ax,
         display_ohlc,
@@ -635,7 +641,7 @@ def plot_index_with_indicator(
         ind_full = indicator_ohlc(
             base_full,
             indicator=indicator,
-            candle_mode=candle_mode,
+            candle_mode=effective_mode,
             timeframe=timeframe,
         )
         st_full = compute_supertrend(ind_full, atr_period=period, multiplier=supertrend_multiplier)
@@ -646,7 +652,7 @@ def plot_index_with_indicator(
         entries, exits = _signal_transitions(
             base_full,
             indicator=indicator,
-            candle_mode=candle_mode,
+            candle_mode=effective_mode,
             period=period,
             supertrend_multiplier=supertrend_multiplier,
             timeframe=timeframe,
@@ -674,7 +680,7 @@ def plot_index_with_indicator(
     ax.set_title(title, fontsize=10)
     fig.tight_layout()
 
-    chart_mode_label = "Heikin Ashi" if (chart_candle_mode or candle_mode) == "heikin_ashi" else "Candlestick"
+    chart_mode_label = "Heikin Ashi" if effective_mode == "heikin_ashi" else "Candlestick"
     return CandleHoverData(
         ax=ax,
         frame=frame,

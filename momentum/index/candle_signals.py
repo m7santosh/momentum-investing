@@ -45,14 +45,19 @@ def ohlc_for_timeframe(
 
 
 def chart_plot_mode(timeframe: Timeframe, candle_mode: CandleMode) -> CandleMode:
-    """Render mode for ``plot_candles`` (weekly/monthly HA OHLC is pre-transformed)."""
-    if candle_mode == "heikin_ashi" and timeframe in ("week", "month"):
+    """Render mode for ``plot_candles``.
+
+    When OHLC already comes from ``ohlc_for_timeframe`` with Heikin Ashi, bars are
+    pre-transformed — draw them as standard candles (no second HA pass).
+    """
+    if candle_mode == "heikin_ashi":
         return "candlestick"
     return candle_mode
 
 
 def ohlc_uses_precomputed_ha(timeframe: Timeframe, candle_mode: CandleMode) -> bool:
-    return candle_mode == "heikin_ashi" and timeframe in ("week", "month")
+    """True when ``ohlc_for_timeframe`` already applied Heikin Ashi (avoid double transform)."""
+    return candle_mode == "heikin_ashi"
 
 
 def _resample_weekly_tradingview(base: pd.DataFrame) -> pd.DataFrame:
