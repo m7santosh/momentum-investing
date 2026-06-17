@@ -508,6 +508,39 @@ def open_nifty_candlestick_backtest(
                 return eng.chart_display_range()
             return None, None
 
+    def _engine_candle_mode() -> str:
+        if _indicator_key() == "candle" and _mode_key() == "compare":
+            return "candlestick"
+        return _chart_candle_mode()
+
+    def _sync_engine_context_from_ui() -> bool:
+        """Align engine bar series with chart controls (timeframe, candles, indicator params)."""
+        eng = _active_engine()
+        if eng is None or not eng.loaded:
+            return False
+        period = _parse_period()
+        if period is None:
+            return False
+        st_mult = (
+            _parse_supertrend_multiplier()
+            if _indicator_key() == "supertrend"
+            else None
+        )
+        eng.reapply_chart_context(
+            timeframe=_timeframe_key(),  # type: ignore[arg-type]
+            candle_mode=_engine_candle_mode(),  # type: ignore[arg-type]
+            indicator_period=period,
+            supertrend_multiplier=st_mult,
+        )
+        if compare_engine is not None and compare_engine.loaded:
+            compare_engine.reapply_chart_context(
+                timeframe=_timeframe_key(),  # type: ignore[arg-type]
+                candle_mode="heikin_ashi",
+                indicator_period=period,
+                supertrend_multiplier=st_mult,
+            )
+        return True
+
     def _update_index_chart() -> None:
         label = _chart_index_label()
         eng = _active_engine()
@@ -547,7 +580,23 @@ def open_nifty_candlestick_backtest(
         chart_canvas.draw_idle()
 
     def _on_chart_controls_changed(_event=None) -> None:
+        had_backtest = False
+        eng = _active_engine()
+        if eng is not None and eng.loaded:
+            had_backtest = not eng.trades_df.empty
+            _sync_engine_context_from_ui()
         _update_index_chart()
+        if eng is not None and eng.loaded:
+            _refresh_log_table()
+            _update_metrics()
+            _refresh_action_buttons()
+            tf = timeframe_var.get()
+            n_bars = eng.total_periods
+            if had_backtest:
+                status_var.set(
+                    f"Context synced — {n_bars} {tf.lower()} bar(s). "
+                    "Click Run All for backtest."
+                )
 
     def _refresh_log_table() -> None:
         for item in log_tree.get_children():

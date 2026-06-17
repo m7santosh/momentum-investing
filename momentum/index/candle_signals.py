@@ -61,7 +61,7 @@ def ohlc_uses_precomputed_ha(timeframe: Timeframe, candle_mode: CandleMode) -> b
 
 
 def _resample_weekly_tradingview(base: pd.DataFrame) -> pd.DataFrame:
-    """Weekly OHLC grouped by calendar Mon–Fri, labeled by first trading session (TV NSE)."""
+    """Weekly OHLC grouped by calendar week, labeled by first NSE session (TradingView)."""
     tmp = base.copy()
     tmp["_cal_mon"] = tmp.index - pd.to_timedelta(tmp.index.dayofweek, unit="D")
     rows: list[dict] = []
@@ -82,17 +82,36 @@ def _resample_weekly_tradingview(base: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _resample_monthly_tradingview(base: pd.DataFrame) -> pd.DataFrame:
+    """Monthly OHLC grouped by calendar month, labeled by first NSE session (TradingView)."""
+    tmp = base.copy()
+    tmp["_cal_month"] = tmp.index.to_period("M")
+    rows: list[dict] = []
+    for _, grp in tmp.groupby("_cal_month", sort=True):
+        grp = grp.sort_index()
+        rows.append(
+            {
+                "Date": grp.index[0],
+                "Open": float(grp["Open"].iloc[0]),
+                "High": float(grp["High"].max()),
+                "Low": float(grp["Low"].min()),
+                "Close": float(grp["Close"].iloc[-1]),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+    out = pd.DataFrame(rows).set_index("Date").sort_index()
+    return out
+
+
 def resample_ohlc(ohlc: pd.DataFrame, timeframe: Timeframe) -> pd.DataFrame:
-    """Aggregate daily OHLC to weekly (first trading day label) or month-end bars."""
+    """Aggregate daily OHLC to weekly/monthly bars (TradingView / NSE session labels)."""
     base = normalize_ohlc(ohlc)
     if base.empty or timeframe == "day":
         return base
     if timeframe == "week":
         return _resample_weekly_tradingview(base)
-    out = base.resample("ME").agg(
-        {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
-    )
-    return out.dropna(subset=["Close"])
+    return _resample_monthly_tradingview(base)
 
 
 def _ohlc_series(df: pd.DataFrame, col: str) -> pd.Series:

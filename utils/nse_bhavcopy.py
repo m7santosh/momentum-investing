@@ -293,10 +293,7 @@ NSE_INDEX_TICKER_PREFIX = "NSEIDX:"
 
 
 def nse_index_data_ticker(index_name: str) -> str:
-    """Ticker for OHLC loaders — Yahoo index symbol when known, else ``NSEIDX:`` (never ETF)."""
-    yahoo = nse_index_to_yahoo_ticker(index_name)
-    if yahoo:
-        return yahoo
+    """Ticker for OHLC loaders — ``NSEIDX:`` uses NSE ``ind_close_all`` EOD (never ETF)."""
     return f"{NSE_INDEX_TICKER_PREFIX}{index_name}"
 
 

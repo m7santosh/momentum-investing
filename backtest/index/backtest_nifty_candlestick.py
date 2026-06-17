@@ -289,6 +289,26 @@ class NiftyCandleBacktestEngine:
         self._cash = self.config.initial_capital
         self._portfolio_value = self.config.initial_capital
 
+    def reapply_chart_context(
+        self,
+        *,
+        timeframe: Timeframe,
+        candle_mode: CandleMode,
+        indicator_period: int | None = None,
+        supertrend_multiplier: float | None = None,
+    ) -> None:
+        """Rebuild bars from cached daily OHLC — same path as the chart (TradingView rules)."""
+        self.config.timeframe = timeframe
+        self.config.candle_mode = candle_mode
+        if indicator_period is not None:
+            self.config.indicator_period = indicator_period
+        if supertrend_multiplier is not None:
+            self.config.supertrend_multiplier = supertrend_multiplier
+        if not self._loaded:
+            return
+        self._apply_timeframe()
+        self.reset_run()
+
     def _close_on(self, yahoo_ticker: str, on_date: date) -> float | None:
         series = self._closes.get(yahoo_ticker)
         if series is None or series.empty:

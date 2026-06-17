@@ -40,10 +40,10 @@ def indicator_warmup_start(
     """Load extra history so MA / Supertrend match chart platforms at display start."""
     p = max(2, int(period))
     if timeframe == "month":
-        return display_start - pd.DateOffset(months=max(24, p * 3))
+        return display_start - pd.DateOffset(months=max(36, p * 6))
     if timeframe == "week":
-        return display_start - pd.Timedelta(weeks=max(52, p * 5))
-    return display_start - pd.Timedelta(days=max(120, p * 10))
+        return display_start - pd.Timedelta(weeks=max(104, p * 12))
+    return display_start - pd.Timedelta(days=max(252, p * 15))
 
 
 def resolve_indicator(value: str) -> IndicatorKind:

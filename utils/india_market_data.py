@@ -422,6 +422,9 @@ def _load_nse_index_ohlcv(
 
     if ticker.startswith(NSE_INDEX_TICKER_PREFIX):
         yahoo_df = pd.DataFrame()
+    elif ticker.endswith(".NS"):
+        # Thematic NSE indices (e.g. NIFTYM150MOMNTM50.NS) are not on Yahoo; use EOD archive only.
+        yahoo_df = pd.DataFrame()
     else:
         yahoo_df = _download_yahoo(ticker, start, end_exclusive)
     yahoo_n = _yahoo_valid_bar_count(yahoo_df)
