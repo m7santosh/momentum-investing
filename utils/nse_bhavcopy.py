@@ -309,17 +309,17 @@ def nse_index_to_yahoo_ticker(index_name: str) -> str | None:
 
 
 def yahoo_ticker_to_nse_index(yahoo_ticker: str) -> str | None:
-    """Map a Yahoo-style ticker to the NSE index name in ``ind_close_all`` CSV."""
+    """Map a Yahoo-style ticker to the NSE index name in ``ind_close_all`` CSV.
+
+    Only explicit index symbols are mapped (``^…``, ``NSEIDX:…``, and
+    ``YAHOO_TO_NSE_INDEX``). Plain ``.NS`` equities/ETFs return ``None`` so
+    CM bhavcopy loaders handle them.
+    """
     if yahoo_ticker.startswith(NSE_INDEX_TICKER_PREFIX):
         return yahoo_ticker[len(NSE_INDEX_TICKER_PREFIX) :]
     if yahoo_ticker in YAHOO_TO_NSE_INDEX:
         return YAHOO_TO_NSE_INDEX[yahoo_ticker]
-    base = yahoo_ticker.split(".")[0].replace("_", " ").replace("^", "").strip()
-    if not base:
-        return None
-    if base.upper().startswith("NIFTY"):
-        return " ".join(part.capitalize() for part in base.split())
-    return base.upper()
+    return None
 
 
 def _normalize_index_key(name: str) -> str:
