@@ -8,7 +8,6 @@ from typing import Any, Callable
 import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
-from matplotlib.collections import LineCollection
 from matplotlib.patches import Rectangle
 from matplotlib.ticker import NullLocator
 
@@ -25,11 +24,13 @@ from momentum.index.index_indicators import (
     DEFAULT_SUPERTREND_MULTIPLIER,
     IndicatorKind,
     bullish_signal,
+    bearish_signal,
     compute_ema,
     compute_sma,
     compute_supertrend,
     indicator_display,
     indicator_ohlc,
+    supertrend_weekly_ha_frame,
 )
 
 _BULL_COLOR = "#26a69a"
@@ -481,68 +482,76 @@ def _signal_transitions(
     period: int,
     supertrend_multiplier: float,
     timeframe: Timeframe = "day",
+    standard_ohlc: pd.DataFrame | None = None,
 ) -> tuple[list[pd.Timestamp], list[pd.Timestamp]]:
-    """Return (entry_dates, exit_dates) where indicator flips."""
+    """Return (entry_dates, exit_dates) aligned with backtest (bullish = in, bearish = out)."""
     base = normalize_ohlc(ohlc)
     if base.empty:
         return [], []
 
     entries: list[pd.Timestamp] = []
     exits: list[pd.Timestamp] = []
-    prev_bull: bool | None = None
+    in_position = False
 
     for ts in base.index:
+        as_of = pd.Timestamp(ts)
         bull = bullish_signal(
             ohlc,
             indicator=indicator,
             candle_mode=candle_mode,
-            as_of=pd.Timestamp(ts),
+            as_of=as_of,
             period=period,
             supertrend_multiplier=supertrend_multiplier,
             timeframe=timeframe,
+            standard_ohlc=standard_ohlc,
         )
-        if prev_bull is not None:
-            if bull and not prev_bull:
-                entries.append(pd.Timestamp(ts))
-            elif not bull and prev_bull:
-                exits.append(pd.Timestamp(ts))
-        prev_bull = bull
+        if not in_position and bull:
+            entries.append(as_of)
+            in_position = True
+        elif in_position and bearish_signal(
+            ohlc,
+            indicator=indicator,
+            candle_mode=candle_mode,
+            as_of=as_of,
+            period=period,
+            supertrend_multiplier=supertrend_multiplier,
+            timeframe=timeframe,
+            standard_ohlc=standard_ohlc,
+        ):
+            exits.append(as_of)
+            in_position = False
 
     return entries, exits
 
 
 def _plot_supertrend_line(ax, st: pd.DataFrame, *, label: str, linewidth: float = 1.6) -> None:
-    """TradingView-style Supertrend: one continuous line, green bull / red bear."""
-    if st.empty or len(st) < 2:
-        if not st.empty:
-            x = mdates.date2num(st.index.to_pydatetime())
-            color = _ST_BULL_COLOR if int(st["direction"].iloc[0]) == 1 else _ST_BEAR_COLOR
-            ax.plot(x, st["supertrend"].astype(float), color=color, linewidth=linewidth, zorder=3)
+    """TradingView-style Supertrend: separate bull/bear segments with gaps at flips."""
+    if st.empty:
         return
 
     xnums = mdates.date2num(st.index.to_pydatetime())
     y = st["supertrend"].astype(float).values
     dirs = st["direction"].astype(int).values
+    n = len(st)
+    legend_done = False
 
-    segments = [
-        [(xnums[i], y[i]), (xnums[i + 1], y[i + 1])]
-        for i in range(len(xnums) - 1)
-    ]
-    colors = [_ST_BULL_COLOR if dirs[i] == 1 else _ST_BEAR_COLOR for i in range(len(xnums) - 1)]
-
-    lc = LineCollection(
-        segments,
-        colors=colors,
-        linewidths=linewidth,
-        capstyle="round",
-        joinstyle="round",
-        zorder=3,
-    )
-    ax.add_collection(lc)
-    ax.autoscale_view()
-
-    # Single legend entry (line is green/red on chart; legend shows one Supertrend label).
-    ax.plot([], [], color=_ST_BULL_COLOR, linewidth=linewidth, label=label)
+    i = 0
+    while i < n:
+        d = dirs[i]
+        j = i + 1
+        while j < n and dirs[j] == d:
+            j += 1
+        color = _ST_BULL_COLOR if d == 1 else _ST_BEAR_COLOR
+        ax.plot(
+            xnums[i:j],
+            y[i:j],
+            color=color,
+            linewidth=linewidth,
+            zorder=3,
+            label=label if not legend_done else None,
+        )
+        legend_done = True
+        i = j
 
 
 def _slice_display(
@@ -588,11 +597,9 @@ def plot_index_with_indicator(
         return None
 
     effective_mode = chart_candle_mode or candle_mode
-    base_full = ohlc_for_timeframe(
-        normalize_ohlc(ohlc),
-        timeframe,
-        effective_mode,
-    )
+    daily_norm = normalize_ohlc(ohlc)
+    base_full = ohlc_for_timeframe(daily_norm, timeframe, effective_mode)
+    std_full = ohlc_for_timeframe(daily_norm, timeframe, "candlestick")
     display_ohlc = _slice_display(
         base_full, display_start=display_start, display_end=display_end
     )
@@ -638,13 +645,23 @@ def plot_index_with_indicator(
             zorder=3,
         )
     elif indicator == "supertrend":
-        ind_full = indicator_ohlc(
-            base_full,
-            indicator=indicator,
-            candle_mode=effective_mode,
-            timeframe=timeframe,
-        )
-        st_full = compute_supertrend(ind_full, atr_period=period, multiplier=supertrend_multiplier)
+        if effective_mode == "heikin_ashi" and timeframe == "week":
+            st_full = supertrend_weekly_ha_frame(
+                base_full,
+                std_full,
+                period=period,
+                supertrend_multiplier=supertrend_multiplier,
+            )
+        else:
+            ind_full = indicator_ohlc(
+                base_full,
+                indicator=indicator,
+                candle_mode=effective_mode,
+                timeframe=timeframe,
+            )
+            st_full = compute_supertrend(
+                ind_full, atr_period=period, multiplier=supertrend_multiplier
+            )
         st_frame = st_full.reindex(frame.index)
         _plot_supertrend_line(ax, st_frame, label=ind_label)
 
@@ -656,6 +673,7 @@ def plot_index_with_indicator(
             period=period,
             supertrend_multiplier=supertrend_multiplier,
             timeframe=timeframe,
+            standard_ohlc=std_full,
         )
         if display_start is not None or display_end is not None:
             entries = [d for d in entries if (display_start is None or pd.Timestamp(d) >= display_start) and (display_end is None or pd.Timestamp(d) < display_end)]

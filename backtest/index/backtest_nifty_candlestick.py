@@ -42,8 +42,8 @@ from momentum.index.index_indicators import (  # noqa: E402
     DEFAULT_SUPERTREND_MULTIPLIER,
     INDICATOR_LABELS,
     IndicatorKind,
-    bearish_signal,
     bullish_signal,
+    bearish_signal,
     indicator_display,
     indicator_warmup_start,
     resolve_indicator,
@@ -195,6 +195,7 @@ class NiftyCandleBacktestEngine:
     cancel_check: Callable[[], bool] | None = None
     _ohlc_daily: dict[str, pd.DataFrame] = field(default_factory=dict)
     _ohlc: dict[str, pd.DataFrame] = field(default_factory=dict)
+    _ohlc_std: dict[str, pd.DataFrame] = field(default_factory=dict)
     _closes: dict[str, pd.Series] = field(default_factory=dict)
     _universe: list[NiftyIndex] = field(default_factory=list)
     _bench: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
@@ -289,6 +290,50 @@ class NiftyCandleBacktestEngine:
         self._cash = self.config.initial_capital
         self._portfolio_value = self.config.initial_capital
 
+    def _loaded_data_bounds(self) -> tuple[pd.Timestamp, pd.Timestamp]:
+        starts: list[pd.Timestamp] = []
+        ends: list[pd.Timestamp] = []
+        for df in self._ohlc_daily.values():
+            if df is None or df.empty:
+                continue
+            starts.append(pd.Timestamp(df.index.min()))
+            ends.append(pd.Timestamp(df.index.max()))
+        if not starts:
+            return pd.Timestamp.min, pd.Timestamp.max
+        return min(starts), max(ends)
+
+    def apply_run_context(self, config: NiftyCandleBacktestConfig) -> None:
+        """Apply UI/backtest parameters from *config* using cached daily OHLC."""
+        if not self._loaded:
+            return
+
+        req_end = pd.Timestamp(normalize_backtest_date(config.backtest_end))
+        _, loaded_end = self._loaded_data_bounds()
+        if req_end > loaded_end + pd.Timedelta(days=7):
+            raise ValueError(
+                f"End date {_format_display_date(config.backtest_end)} is beyond loaded data "
+                f"({_format_display_date(loaded_end.date())}). Click Load Data."
+            )
+
+        if config.benchmark_yahoo not in self._ohlc_daily:
+            raise ValueError(
+                f"Benchmark {config.benchmark_label} is not loaded. Click Load Data."
+            )
+
+        selected = config.selected_indices()
+        available = [idx for idx in selected if idx.yahoo_ticker in self._ohlc_daily]
+        missing = [idx.label for idx in selected if idx.yahoo_ticker not in self._ohlc_daily]
+        if not available:
+            raise ValueError("No selected indices have loaded data. Click Load Data.")
+
+        self.config = config
+        self._universe = available
+        if missing:
+            self._log(f"  Skipping indices without loaded data: {', '.join(missing)}")
+
+        self._apply_timeframe()
+        self.reset_run()
+
     def reapply_chart_context(
         self,
         *,
@@ -298,16 +343,29 @@ class NiftyCandleBacktestEngine:
         supertrend_multiplier: float | None = None,
     ) -> None:
         """Rebuild bars from cached daily OHLC — same path as the chart (TradingView rules)."""
-        self.config.timeframe = timeframe
-        self.config.candle_mode = candle_mode
-        if indicator_period is not None:
-            self.config.indicator_period = indicator_period
-        if supertrend_multiplier is not None:
-            self.config.supertrend_multiplier = supertrend_multiplier
         if not self._loaded:
             return
-        self._apply_timeframe()
-        self.reset_run()
+        updated = NiftyCandleBacktestConfig(
+            backtest_start=self.config.backtest_start,
+            backtest_end=self.config.backtest_end,
+            candle_mode=candle_mode,
+            timeframe=timeframe,
+            selected_index_ids=self.config.selected_index_ids,
+            indicator=self.config.indicator,
+            indicator_period=(
+                indicator_period
+                if indicator_period is not None
+                else self.config.indicator_period
+            ),
+            supertrend_multiplier=(
+                supertrend_multiplier
+                if supertrend_multiplier is not None
+                else self.config.supertrend_multiplier
+            ),
+            initial_capital=self.config.initial_capital,
+            benchmark_key=self.config.benchmark_key,
+        )
+        self.apply_run_context(updated)
 
     def _close_on(self, yahoo_ticker: str, on_date: date) -> float | None:
         series = self._closes.get(yahoo_ticker)
@@ -411,12 +469,17 @@ class NiftyCandleBacktestEngine:
         tf = self.config.timeframe
         mode = self.config.candle_mode
         self._ohlc.clear()
+        self._ohlc_std.clear()
         self._closes.clear()
         for ticker, daily in self._ohlc_daily.items():
             resampled = ohlc_for_timeframe(daily, tf, mode)
             if resampled.empty:
                 continue
             self._ohlc[ticker] = resampled
+            if tf == "week" and mode == "heikin_ashi":
+                std_frame = ohlc_for_timeframe(daily, tf, "candlestick")
+                if not std_frame.empty:
+                    self._ohlc_std[ticker] = std_frame
             self._closes[ticker] = resampled["Close"].astype(float)
 
         bench_daily = self._ohlc_daily.get(self.config.benchmark_yahoo)
@@ -503,8 +566,20 @@ class NiftyCandleBacktestEngine:
                     f"{_format_display_date(last)}"
                 )
 
+    def _signal_kwargs(self) -> dict:
+        return {
+            "indicator": self.config.indicator,
+            "candle_mode": self.config.candle_mode,
+            "period": self.config.indicator_period,
+            "supertrend_multiplier": self.config.supertrend_multiplier,
+            "timeframe": self.config.timeframe,
+        }
+
+    def _standard_ohlc_for(self, yahoo_ticker: str) -> pd.DataFrame | None:
+        return self._ohlc_std.get(yahoo_ticker)
+
     def step_period(self) -> dict | None:
-        """Advance one bar — exit on bearish signal, enter on bullish signal."""
+        """Advance one bar — enter when bullish, exit when bearish (close vs indicator)."""
         if not self._loaded or self.finished:
             return None
 
@@ -516,6 +591,7 @@ class NiftyCandleBacktestEngine:
         ind = self.config.indicator
         period = self.config.indicator_period
         st_mult = self.config.supertrend_multiplier
+        sig_kw = self._signal_kwargs()
 
         before = self._bar_before(bar_date)
         if before is None or (idx == 0 and not self._positions):
@@ -535,12 +611,9 @@ class NiftyCandleBacktestEngine:
                 continue
             if bearish_signal(
                 ohlc,
-                indicator=ind,
-                candle_mode=mode,
                 as_of=bar_ts,
-                period=period,
-                supertrend_multiplier=st_mult,
-                timeframe=self.config.timeframe,
+                standard_ohlc=self._standard_ohlc_for(pos.yahoo_ticker),
+                **sig_kw,
             ):
                 px = self._close_on(pos.yahoo_ticker, bar_date)
                 if px is not None:
@@ -554,12 +627,9 @@ class NiftyCandleBacktestEngine:
                 continue
             if bullish_signal(
                 ohlc,
-                indicator=ind,
-                candle_mode=mode,
                 as_of=bar_ts,
-                period=period,
-                supertrend_multiplier=st_mult,
-                timeframe=self.config.timeframe,
+                standard_ohlc=self._standard_ohlc_for(cand.yahoo_ticker),
+                **sig_kw,
             ):
                 entered = self._enter_position(cand, bar_date)
                 if entered is not None:

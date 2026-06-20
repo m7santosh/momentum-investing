@@ -94,7 +94,7 @@ def indicator_ohlc(
     candle_mode: CandleMode,
     timeframe: Timeframe = "day",
 ) -> pd.DataFrame:
-    """OHLC series used to compute an indicator (matches chart candle type)."""
+    """OHLC series used to compute an indicator (HA OHLC when chart mode is HA)."""
     base = normalize_ohlc(ohlc)
     if ohlc_uses_precomputed_ha(timeframe, candle_mode):
         return base
@@ -123,65 +123,230 @@ def compute_supertrend(
 ) -> pd.DataFrame:
     """Return supertrend line and direction (+1 bullish, -1 bearish).
 
-    Matches TradingView's built-in Supertrend (hl2 source, Wilder ATR/RMA bands).
+    Matches TradingView ``ta.supertrend`` (Pine Script reference implementation).
     """
     base = normalize_ohlc(ohlc)
     if base.empty:
         return pd.DataFrame(columns=["supertrend", "direction"])
 
+    src = (base["High"] + base["Low"]) / 2.0
     close = base["Close"].astype(float)
-    hl2 = (base["High"] + base["Low"]) / 2.0
     atr = _atr(base, atr_period)
-    basic_upper = hl2 + multiplier * atr
-    basic_lower = hl2 - multiplier * atr
 
-    basic_upper_v = basic_upper.to_numpy(dtype=float)
-    basic_lower_v = basic_lower.to_numpy(dtype=float)
+    lower = (src - multiplier * atr).to_numpy(dtype=float).copy()
+    upper = (src + multiplier * atr).to_numpy(dtype=float).copy()
+    close_v = close.to_numpy(dtype=float)
+    atr_v = atr.to_numpy(dtype=float)
 
     n = len(base)
-    final_upper = basic_upper_v.copy()
-    final_lower = basic_lower_v.copy()
-    supertrend = np.full(n, np.nan)
-    direction = np.ones(n, dtype=int)
-    close_v = close.to_numpy(dtype=float)
+    # Pine: direction -1 = up/bull, +1 = down/bear
+    pine_dir = np.zeros(n, dtype=int)
+    st = np.full(n, np.nan)
 
     for i in range(n):
-        if i == 0:
-            supertrend[i] = final_lower[i]
-            direction[i] = 1
-            continue
+        if i > 0:
+            prev_lower = lower[i - 1]
+            prev_upper = upper[i - 1]
+            if lower[i] > prev_lower or close_v[i - 1] < prev_lower:
+                pass
+            else:
+                lower[i] = prev_lower
+            if upper[i] < prev_upper or close_v[i - 1] > prev_upper:
+                pass
+            else:
+                upper[i] = prev_upper
 
-        prev_upper = final_upper[i - 1]
-        prev_lower = final_lower[i - 1]
-        prev_close = close_v[i - 1]
+        prev_st = st[i - 1] if i > 0 else np.nan
+        prev_upper = upper[i - 1] if i > 0 else upper[i]
 
-        if basic_lower_v[i] > prev_lower or prev_close < prev_lower:
-            final_lower[i] = basic_lower_v[i]
+        if i == 0 or np.isnan(atr_v[i - 1]):
+            pine_dir[i] = 1
+        elif prev_st == prev_upper:
+            pine_dir[i] = -1 if close_v[i] > upper[i] else 1
         else:
-            final_lower[i] = prev_lower
+            pine_dir[i] = 1 if close_v[i] < lower[i] else -1
 
-        if basic_upper_v[i] < prev_upper or prev_close > prev_upper:
-            final_upper[i] = basic_upper_v[i]
-        else:
-            final_upper[i] = prev_upper
+        st[i] = lower[i] if pine_dir[i] == -1 else upper[i]
 
-        if direction[i - 1] == -1 and close_v[i] > prev_upper:
-            direction[i] = 1
-        elif direction[i - 1] == 1 and close_v[i] < prev_lower:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i - 1]
-
-        supertrend[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
-
+    direction = np.where(pine_dir == -1, 1, -1)
     return pd.DataFrame(
-        {"supertrend": supertrend, "direction": direction},
+        {"supertrend": st, "direction": direction},
         index=base.index,
     )
 
 
 def _slice_as_of(frame: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
     return frame[frame.index <= as_of]
+
+
+def _uses_weekly_ha_supertrend(
+    indicator: IndicatorKind,
+    candle_mode: CandleMode,
+    timeframe: Timeframe,
+) -> bool:
+    return indicator == "supertrend" and candle_mode == "heikin_ashi" and timeframe == "week"
+
+
+def _is_monday_holiday_week_bar(bar_ts: pd.Timestamp) -> bool:
+    """Weekly bar dated Tuesday — first NSE session after a Monday holiday."""
+    return pd.Timestamp(bar_ts).normalize().dayofweek == 1
+
+
+def _supertrend_direction_at(
+    ohlc: pd.DataFrame,
+    *,
+    as_of: pd.Timestamp,
+    period: int,
+    supertrend_multiplier: float,
+    candle_mode: CandleMode,
+    timeframe: Timeframe,
+) -> int | None:
+    src = indicator_ohlc(
+        ohlc,
+        indicator="supertrend",
+        candle_mode=candle_mode,
+        timeframe=timeframe,
+    )
+    st = compute_supertrend(
+        src,
+        atr_period=period,
+        multiplier=supertrend_multiplier,
+    )
+    st = _slice_as_of(st, as_of)
+    if st.empty:
+        return None
+    return int(st["direction"].iloc[-1])
+
+
+def supertrend_weekly_ha_directions(
+    ha_ohlc: pd.DataFrame,
+    std_ohlc: pd.DataFrame,
+    *,
+    period: int = DEFAULT_SUPERTREND_ATR,
+    supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
+) -> pd.Series:
+    """Weekly HA Supertrend chart/backtest direction (matches TradingView in/out coloring)."""
+    ha = normalize_ohlc(ha_ohlc)
+    std = normalize_ohlc(std_ohlc)
+    if ha.empty or std.empty:
+        return pd.Series(dtype=int)
+
+    in_position = False
+    out: list[int] = []
+    for ts in ha.index:
+        as_of = pd.Timestamp(ts)
+        bull = _weekly_ha_supertrend_bullish(
+            ha,
+            std,
+            as_of=as_of,
+            period=period,
+            supertrend_multiplier=supertrend_multiplier,
+        )
+        bear = _weekly_ha_supertrend_bearish(
+            ha,
+            std,
+            as_of=as_of,
+            period=period,
+            supertrend_multiplier=supertrend_multiplier,
+        )
+        if not in_position and bull:
+            in_position = True
+            out.append(1)
+        elif in_position and bear:
+            in_position = False
+            out.append(-1)
+        elif in_position:
+            out.append(1)
+        else:
+            out.append(-1)
+    return pd.Series(out, index=ha.index, dtype=int)
+
+
+def supertrend_weekly_ha_frame(
+    ha_ohlc: pd.DataFrame,
+    std_ohlc: pd.DataFrame,
+    *,
+    period: int = DEFAULT_SUPERTREND_ATR,
+    supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
+) -> pd.DataFrame:
+    """HA Supertrend line for charts with TV-aligned bull/bear direction."""
+    ha = normalize_ohlc(ha_ohlc)
+    if ha.empty:
+        return pd.DataFrame(columns=["supertrend", "direction"])
+
+    line = compute_supertrend(ha, atr_period=period, multiplier=supertrend_multiplier)
+    directions = supertrend_weekly_ha_directions(
+        ha,
+        std_ohlc,
+        period=period,
+        supertrend_multiplier=supertrend_multiplier,
+    )
+    return pd.DataFrame(
+        {"supertrend": line["supertrend"], "direction": directions.reindex(line.index)},
+        index=line.index,
+    )
+
+
+def _weekly_ha_supertrend_bullish(
+    ha_ohlc: pd.DataFrame,
+    std_ohlc: pd.DataFrame,
+    *,
+    as_of: pd.Timestamp,
+    period: int,
+    supertrend_multiplier: float,
+) -> bool:
+    ha_dir = _supertrend_direction_at(
+        ha_ohlc,
+        as_of=as_of,
+        period=period,
+        supertrend_multiplier=supertrend_multiplier,
+        candle_mode="heikin_ashi",
+        timeframe="week",
+    )
+    std_dir = _supertrend_direction_at(
+        std_ohlc,
+        as_of=as_of,
+        period=period,
+        supertrend_multiplier=supertrend_multiplier,
+        candle_mode="candlestick",
+        timeframe="week",
+    )
+    if ha_dir is None or std_dir is None:
+        return False
+    return ha_dir == 1 and std_dir == 1
+
+
+def _weekly_ha_supertrend_bearish(
+    ha_ohlc: pd.DataFrame,
+    std_ohlc: pd.DataFrame,
+    *,
+    as_of: pd.Timestamp,
+    period: int,
+    supertrend_multiplier: float,
+) -> bool:
+    ha_dir = _supertrend_direction_at(
+        ha_ohlc,
+        as_of=as_of,
+        period=period,
+        supertrend_multiplier=supertrend_multiplier,
+        candle_mode="heikin_ashi",
+        timeframe="week",
+    )
+    if ha_dir is None:
+        return False
+    if ha_dir == -1:
+        return True
+    if _is_monday_holiday_week_bar(as_of):
+        std_dir = _supertrend_direction_at(
+            std_ohlc,
+            as_of=as_of,
+            period=period,
+            supertrend_multiplier=supertrend_multiplier,
+            candle_mode="candlestick",
+            timeframe="week",
+        )
+        return std_dir == -1
+    return False
 
 
 def bullish_signal(
@@ -193,6 +358,7 @@ def bullish_signal(
     period: int = DEFAULT_INDICATOR_PERIOD,
     supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
     timeframe: Timeframe = "day",
+    standard_ohlc: pd.DataFrame | None = None,
 ) -> bool:
     """True when the selected indicator is bullish on/before *as_of*."""
     if indicator == "candle":
@@ -222,6 +388,18 @@ def bullish_signal(
         return bool(pd.notna(ma) and close > float(ma))
 
     if indicator == "supertrend":
+        if (
+            _uses_weekly_ha_supertrend(indicator, candle_mode, timeframe)
+            and standard_ohlc is not None
+            and not standard_ohlc.empty
+        ):
+            return _weekly_ha_supertrend_bullish(
+                base,
+                standard_ohlc,
+                as_of=as_of,
+                period=period,
+                supertrend_multiplier=supertrend_multiplier,
+            )
         src = indicator_ohlc(
             base,
             indicator=indicator,
@@ -250,6 +428,7 @@ def bearish_signal(
     period: int = DEFAULT_INDICATOR_PERIOD,
     supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
     timeframe: Timeframe = "day",
+    standard_ohlc: pd.DataFrame | None = None,
 ) -> bool:
     """True when the selected indicator is bearish on/before *as_of*."""
     if indicator == "candle":
@@ -263,6 +442,20 @@ def bearish_signal(
         end_idx = len(sliced) - 1
         return not is_bullish_bar(sliced["Open"], sliced["Close"], end_idx)
 
+    if (
+        indicator == "supertrend"
+        and _uses_weekly_ha_supertrend(indicator, candle_mode, timeframe)
+        and standard_ohlc is not None
+        and not standard_ohlc.empty
+    ):
+        return _weekly_ha_supertrend_bearish(
+            normalize_ohlc(ohlc),
+            standard_ohlc,
+            as_of=as_of,
+            period=period,
+            supertrend_multiplier=supertrend_multiplier,
+        )
+
     return not bullish_signal(
         ohlc,
         indicator=indicator,
@@ -271,7 +464,64 @@ def bearish_signal(
         period=period,
         supertrend_multiplier=supertrend_multiplier,
         timeframe=timeframe,
+        standard_ohlc=standard_ohlc,
     )
+
+
+def entry_signal(
+    ohlc: pd.DataFrame,
+    *,
+    indicator: IndicatorKind,
+    candle_mode: CandleMode,
+    as_of: pd.Timestamp,
+    prev_bull: bool | None,
+    period: int = DEFAULT_INDICATOR_PERIOD,
+    supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
+    timeframe: Timeframe = "day",
+    standard_ohlc: pd.DataFrame | None = None,
+) -> bool:
+    """True on a bullish flip (matches chart entry markers)."""
+    if prev_bull is None:
+        return False
+    bull = bullish_signal(
+        ohlc,
+        indicator=indicator,
+        candle_mode=candle_mode,
+        as_of=as_of,
+        period=period,
+        supertrend_multiplier=supertrend_multiplier,
+        timeframe=timeframe,
+        standard_ohlc=standard_ohlc,
+    )
+    return bull and not prev_bull
+
+
+def exit_signal(
+    ohlc: pd.DataFrame,
+    *,
+    indicator: IndicatorKind,
+    candle_mode: CandleMode,
+    as_of: pd.Timestamp,
+    prev_bull: bool | None,
+    period: int = DEFAULT_INDICATOR_PERIOD,
+    supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
+    timeframe: Timeframe = "day",
+    standard_ohlc: pd.DataFrame | None = None,
+) -> bool:
+    """True on a bearish flip (matches chart exit markers)."""
+    if prev_bull is None:
+        return False
+    bull = bullish_signal(
+        ohlc,
+        indicator=indicator,
+        candle_mode=candle_mode,
+        as_of=as_of,
+        period=period,
+        supertrend_multiplier=supertrend_multiplier,
+        timeframe=timeframe,
+        standard_ohlc=standard_ohlc,
+    )
+    return not bull and prev_bull
 
 
 def indicator_series(

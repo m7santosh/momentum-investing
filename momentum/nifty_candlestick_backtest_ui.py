@@ -43,7 +43,6 @@ from momentum.index.nifty_indices import (  # noqa: E402
     NIFTY_INDICES,
 )
 from momentum.index.candle_plot import CandleChartHover, plot_index_with_indicator  # noqa: E402
-from momentum.rrg_backtest_ui import backtest_drawdown_pct_series  # noqa: E402
 from momentum.rrg_core import rrg_format_date, rrg_parse_user_date  # noqa: E402
 from momentum.rrg_ui_copy import install_copy_support  # noqa: E402
 from utils.nse_bhavcopy import today_ist  # noqa: E402
@@ -284,11 +283,19 @@ def open_nifty_candlestick_backtest(
 
     log_frame = tk.LabelFrame(body, text="Index log", padx=4, pady=4)
     body.add(log_frame, weight=2)
-    log_cols = ("Bar", "Date", "Held", "Entries", "Exits", "Port%", "Bench%", "DD%", "Value")
+    log_cols = ("Date", "Action", "Index", "Entry", "Exit", "P/L %")
     log_tree = ttk.Treeview(log_frame, columns=log_cols, show="headings", height=14, selectmode="browse")
+    _log_col_widths = {
+        "Date": 96,
+        "Action": 56,
+        "Index": 140,
+        "Entry": 88,
+        "Exit": 88,
+        "P/L %": 72,
+    }
     for col in log_cols:
         log_tree.heading(col, text=col)
-        log_tree.column(col, width=88 if col != "Date" else 96, stretch=True)
+        log_tree.column(col, width=_log_col_widths.get(col, 88), stretch=col == "Index")
     log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=log_tree.yview)
     log_tree.configure(yscrollcommand=log_scroll.set)
     log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -513,32 +520,22 @@ def open_nifty_candlestick_backtest(
             return "candlestick"
         return _chart_candle_mode()
 
-    def _sync_engine_context_from_ui() -> bool:
-        """Align engine bar series with chart controls (timeframe, candles, indicator params)."""
+    def _sync_engine_context_from_ui(*, raise_on_error: bool = False) -> bool:
+        """Align engine with all UI inputs (dates, indices, indicator, timeframe, chart)."""
         eng = _active_engine()
         if eng is None or not eng.loaded:
             return False
-        period = _parse_period()
-        if period is None:
+        try:
+            _require_period()
+            if _indicator_key() == "supertrend":
+                _require_supertrend_multiplier()
+            eng.apply_run_context(_build_config(_engine_candle_mode()))
+            if compare_engine is not None and compare_engine.loaded:
+                compare_engine.apply_run_context(_build_config("heikin_ashi"))
+        except ValueError as exc:
+            if raise_on_error:
+                raise
             return False
-        st_mult = (
-            _parse_supertrend_multiplier()
-            if _indicator_key() == "supertrend"
-            else None
-        )
-        eng.reapply_chart_context(
-            timeframe=_timeframe_key(),  # type: ignore[arg-type]
-            candle_mode=_engine_candle_mode(),  # type: ignore[arg-type]
-            indicator_period=period,
-            supertrend_multiplier=st_mult,
-        )
-        if compare_engine is not None and compare_engine.loaded:
-            compare_engine.reapply_chart_context(
-                timeframe=_timeframe_key(),  # type: ignore[arg-type]
-                candle_mode="heikin_ashi",
-                indicator_period=period,
-                supertrend_multiplier=st_mult,
-            )
         return True
 
     def _update_index_chart() -> None:
@@ -598,31 +595,63 @@ def open_nifty_candlestick_backtest(
                     "Click Run All for backtest."
                 )
 
+    def _trade_log_rows(trades_df: pd.DataFrame) -> list[tuple[str, ...]]:
+        """One row per entry/exit event (not every bar)."""
+        rows: list[tuple[str, ...]] = []
+        if trades_df.empty:
+            return rows
+        for _, period in trades_df.iterrows():
+            bar_ts = pd.Timestamp(period["Bar_Date"]).normalize()
+            new_entries = set(period.get("New_Entry_Tickers") or [])
+            for pr in period.get("Position_Rows") or []:
+                status = str(pr.get("status", ""))
+                ticker = str(pr.get("ticker", "—"))
+                entry_px = pr.get("entry")
+                exit_px = pr.get("exit")
+                pl_pct = pr.get("pl_pct")
+
+                if status == "Exit":
+                    rows.append(
+                        (
+                            rrg_format_date(bar_ts),
+                            "Exit",
+                            ticker,
+                            f"{float(entry_px):,.2f}" if entry_px is not None else "—",
+                            f"{float(exit_px):,.2f}" if exit_px is not None else "—",
+                            f"{float(pl_pct):+.2f}" if pl_pct is not None else "—",
+                        )
+                    )
+                    continue
+
+                if status != "Open" or ticker not in new_entries:
+                    continue
+                entry_date = pr.get("entry_date")
+                if entry_date is None or pd.Timestamp(entry_date).normalize() != bar_ts:
+                    continue
+                rows.append(
+                    (
+                        rrg_format_date(bar_ts),
+                        "Entry",
+                        ticker,
+                        f"{float(entry_px):,.2f}" if entry_px is not None else "—",
+                        "—",
+                        "—",
+                    )
+                )
+        return rows
+
     def _refresh_log_table() -> None:
         for item in log_tree.get_children():
             log_tree.delete(item)
         eng = _active_engine()
         if eng is None or eng.trades_df.empty:
             return
-        dd_vals = backtest_drawdown_pct_series(eng.trades_df["Port_Return"]).values
-        for pos, (_, row) in enumerate(eng.trades_df.iterrows()):
-            dd_pct = float(dd_vals[pos]) if pos < len(dd_vals) else 0.0
-            log_tree.insert(
-                "",
-                tk.END,
-                iid=str(row["Period"]),
-                values=(
-                    row["Period"],
-                    rrg_format_date(row["Bar_Date"]),
-                    row.get("Held", "—"),
-                    row.get("New_Entries", "—"),
-                    row.get("Signal_Exits", "—"),
-                    f"{row['Port_Return'] * 100:+.2f}",
-                    f"{row['Bench_Return'] * 100:+.2f}",
-                    f"{dd_pct:+.2f}",
-                    f"{row['Portfolio_Value']:,.0f}",
-                ),
-            )
+        trade_rows = _trade_log_rows(eng.trades_df)
+        if not trade_rows:
+            log_tree.insert("", tk.END, values=("—", "—", "No entries or exits", "—", "—", "—"))
+            return
+        for idx, values in enumerate(trade_rows):
+            log_tree.insert("", tk.END, iid=str(idx), values=values)
         log_tree.yview_moveto(1.0)
 
     def _after_load(*, ran_backtest: bool = False) -> None:
@@ -708,6 +737,11 @@ def open_nifty_candlestick_backtest(
         eng = _active_engine()
         if _busy or eng is None or not eng.loaded:
             return
+        try:
+            _sync_engine_context_from_ui(raise_on_error=True)
+        except ValueError as exc:
+            messagebox.showerror("Invalid parameters", str(exc), parent=win)
+            return
         _set_busy(True)
         status_var.set("Running backtest...")
 
@@ -739,6 +773,9 @@ def open_nifty_candlestick_backtest(
         status_var.set("Run reset.")
 
     index_listbox.bind("<<ListboxSelect>>", _on_chart_controls_changed)
+    start_var.trace_add("write", lambda *_: _on_chart_controls_changed())
+    end_var.trace_add("write", lambda *_: _on_chart_controls_changed())
+    benchmark_var.trace_add("write", lambda *_: _on_chart_controls_changed())
     timeframe_var.trace_add("write", lambda *_: _on_chart_controls_changed())
     period_var.trace_add("write", lambda *_: _on_chart_controls_changed())
     st_mult_var.trace_add("write", lambda *_: _on_chart_controls_changed())

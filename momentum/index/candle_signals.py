@@ -60,16 +60,44 @@ def ohlc_uses_precomputed_ha(timeframe: Timeframe, candle_mode: CandleMode) -> b
     return candle_mode == "heikin_ashi"
 
 
+def _calendar_week_monday(ts: pd.Timestamp) -> pd.Timestamp:
+    """Monday at 00:00 for the calendar week containing *ts* (Mon–Sun)."""
+    ts = pd.Timestamp(ts).normalize()
+    return ts - pd.Timedelta(days=int(ts.dayofweek))
+
+
+def _weekly_bar_start(week_monday: pd.Timestamp, sessions: pd.DatetimeIndex) -> pd.Timestamp:
+    """First NSE session in the calendar week (TradingView weekly bar date).
+
+    When Monday is an NSE holiday the week still belongs to that calendar week,
+    but the bar is dated the next trading day — e.g. Republic Day Mon 26-Jan-2026
+    → bar dated Tue 27-Jan-2026 with sessions Tue–Fri only (not Mon 26–Fri 30).
+    """
+    if len(sessions) == 0:
+        raise ValueError("weekly bar requires at least one session")
+    return pd.Timestamp(sessions[0]).normalize()
+
+
 def _resample_weekly_tradingview(base: pd.DataFrame) -> pd.DataFrame:
     """Weekly OHLC grouped by calendar week, labeled by first NSE session (TradingView)."""
-    tmp = base.copy()
-    tmp["_cal_mon"] = tmp.index - pd.to_timedelta(tmp.index.dayofweek, unit="D")
+    base = normalize_ohlc(base)
+    if base.empty:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+
+    idx = pd.DatetimeIndex(base.index).sort_values()
+    week_sessions: dict[pd.Timestamp, list[pd.Timestamp]] = {}
+    for ts in idx:
+        week_mon = _calendar_week_monday(ts)
+        week_sessions.setdefault(week_mon, []).append(ts)
+
     rows: list[dict] = []
-    for _, grp in tmp.groupby("_cal_mon", sort=True):
-        grp = grp.sort_index()
+    for week_mon in sorted(week_sessions):
+        days = sorted(week_sessions[week_mon])
+        grp = base.loc[days]
+        week_start = _weekly_bar_start(week_mon, pd.DatetimeIndex(days))
         rows.append(
             {
-                "Date": grp.index[0],
+                "Date": week_start,
                 "Open": float(grp["Open"].iloc[0]),
                 "High": float(grp["High"].max()),
                 "Low": float(grp["Low"].min()),
