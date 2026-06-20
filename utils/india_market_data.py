@@ -596,12 +596,20 @@ def prepare_india_market_data_range(
     end_date,
     *,
     reset_stats: bool = True,
+    include_cm_bhavcopy: bool = True,
+    include_index_archive: bool = True,
     cancel_check=None,
 ) -> IndiaMarketDataRunStats:
     """Warm NSE day archives for a date window; reset per-run symbol stats when requested."""
     if reset_stats:
         reset_india_market_data_run_stats()
         _LOAD_META.clear()
-    warm_nse_eod_caches(start_date, end_date, cancel_check=cancel_check)
+    warm_nse_eod_caches(
+        start_date,
+        end_date,
+        include_cm_bhavcopy=include_cm_bhavcopy,
+        include_index_archive=include_index_archive,
+        cancel_check=cancel_check,
+    )
     return get_india_market_data_run_stats()
 

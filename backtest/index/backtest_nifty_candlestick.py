@@ -459,7 +459,12 @@ class NiftyCandleBacktestEngine:
                 f"{format_range_label(start, end)} ({tf_label} bars)"
             )
         prepare_india_market_data_range(
-            load_start, end, reset_stats=True, cancel_check=self.cancel_check
+            load_start,
+            end,
+            reset_stats=True,
+            include_cm_bhavcopy=False,
+            include_index_archive=True,
+            cancel_check=self.cancel_check,
         )
 
         self._ohlc_daily.clear()
