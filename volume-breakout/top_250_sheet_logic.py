@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import io
 import time
-import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
@@ -226,25 +224,9 @@ def _parse_bhavcopy_day(date_obj: date, df: pd.DataFrame) -> BhavcopyDayData:
 
 
 def _download_bhavcopy_df(date_obj: date) -> pd.DataFrame | None:
-    from utils.nse_bhavcopy import _bhavcopy_urls, _session
+    from utils.nse_bhavcopy import fetch_bhavcopy_df
 
-    sess = _session()
-    for url in _bhavcopy_urls(date_obj):
-        try:
-            response = sess.get(url, timeout=30)
-            if response.status_code != 200:
-                continue
-            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                csv_names = [n for n in z.namelist() if n.lower().endswith(".csv")]
-                if not csv_names:
-                    continue
-                with z.open(csv_names[0]) as f:
-                    df = pd.read_csv(f)
-            if df is not None and not df.empty:
-                return df
-        except Exception:
-            continue
-    return None
+    return fetch_bhavcopy_df(date_obj)
 
 
 def load_bhavcopy_day(date_obj: date) -> BhavcopyDayData | None:

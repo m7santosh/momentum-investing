@@ -13,3 +13,12 @@ wheels/
 
 # Configuration files (may contain sensitive settings)
 config/
+
+# NSE bhavcopy local cache (one CSV per trading session)
+data/nse/bhavcopy/
+
+# NSE index EOD local cache (ind_close_all CSV per trading session)
+data/nse/index_eod/
+
+# Final result directory
+final_result/

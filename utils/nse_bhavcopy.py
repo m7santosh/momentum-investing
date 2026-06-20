@@ -5,6 +5,11 @@ Momentum screeners and India ETF backtests load OHLCV via ``utils.india_market_d
   - Past dates: NSE EOD (CM bhavcopy / index archive) when available, else Yahoo.
   - Today: Yahoo; bhavcopy/live only if Yahoo Close is NaN.
 
+CM bhavcopy CSV files are persisted under ``data/nse/bhavcopy/YYYY/`` (override with
+``NSE_BHAVCOPY_CACHE_DIR``). Index EOD ``ind_close_all`` CSV files persist under
+``data/nse/index_eod/YYYY/`` (override with ``NSE_INDEX_EOD_CACHE_DIR``). Each run
+checks local storage before downloading from NSE.
+
 Fallback chain for today's NaN row:
   1. Bhavcopy — official EOD CSV, available ~7 PM IST after close.
   2. Live quotes — NSE API (Nifty 500 + ETFs), works during market hours
@@ -13,9 +18,11 @@ Fallback chain for today's NaN row:
 """
 
 import io
+import os
 import time
 import zipfile
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -66,6 +73,110 @@ def _session() -> requests.Session:
 
 def today_ist() -> date:
     return datetime.now(_IST).date()
+
+
+def bhavcopy_cache_dir() -> Path:
+    """Root directory for persisted CM bhavcopy CSV files (``data/nse/bhavcopy`` by default)."""
+    override = os.environ.get("NSE_BHAVCOPY_CACHE_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / "data" / "nse" / "bhavcopy"
+
+
+def bhavcopy_local_csv_path(trade_date: date) -> Path:
+    """Path to the cached CSV for one session — open in Excel to inspect any ticker."""
+    return bhavcopy_cache_dir() / str(trade_date.year) / f"bhavcopy_{trade_date:%Y%m%d}.csv"
+
+
+def has_local_bhavcopy(trade_date: date) -> bool:
+    """True when a cached bhavcopy CSV exists for *trade_date*."""
+    return bhavcopy_local_csv_path(trade_date).is_file()
+
+
+def list_local_bhavcopy_dates(*, year: int | None = None) -> list[date]:
+    """Sorted trade dates with a local bhavcopy file (optional *year* filter)."""
+    root = bhavcopy_cache_dir()
+    if not root.is_dir():
+        return []
+    out: list[date] = []
+    years = [root / str(year)] if year is not None else sorted(root.iterdir())
+    for year_dir in years:
+        if not year_dir.is_dir():
+            continue
+        for path in year_dir.glob("bhavcopy_*.csv"):
+            try:
+                out.append(datetime.strptime(path.stem.split("_", 1)[1], "%Y%m%d").date())
+            except ValueError:
+                continue
+    return sorted(out)
+
+
+def _load_bhavcopy_df_from_disk(trade_date: date) -> pd.DataFrame | None:
+    path = bhavcopy_local_csv_path(trade_date)
+    if not path.is_file():
+        return None
+    try:
+        df = pd.read_csv(path)
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
+    return None
+
+
+def _save_bhavcopy_df_to_disk(trade_date: date, df: pd.DataFrame) -> None:
+    path = bhavcopy_local_csv_path(trade_date)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+
+
+def _download_bhavcopy_df_from_nse(trade_date: date) -> pd.DataFrame | None:
+    sess = _session()
+    for url in _bhavcopy_urls(trade_date):
+        try:
+            resp = sess.get(url, timeout=30)
+            if resp.status_code != 200:
+                continue
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                if not csv_names:
+                    continue
+                df = pd.read_csv(zf.open(csv_names[0]))
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            continue
+    return None
+
+
+def fetch_bhavcopy_df(trade_date: date) -> pd.DataFrame | None:
+    """Full CM bhavcopy CSV for one session — local disk cache first, then NSE download."""
+    cached = _load_bhavcopy_df_from_disk(trade_date)
+    if cached is not None:
+        if trade_date not in _ANNOUNCED:
+            print(
+                f"  [NSE Bhavcopy] {trade_date}: loaded from local cache "
+                f"({len(cached)} rows, {bhavcopy_local_csv_path(trade_date)})"
+            )
+            _ANNOUNCED.add(trade_date)
+        return cached
+
+    df = _download_bhavcopy_df_from_nse(trade_date)
+    if df is None or df.empty:
+        return None
+
+    try:
+        _save_bhavcopy_df_to_disk(trade_date, df)
+    except OSError:
+        pass
+
+    if trade_date not in _ANNOUNCED:
+        print(
+            f"  [NSE Bhavcopy] {trade_date}: downloaded CM EOD file "
+            f"({len(df)} rows, saved to {bhavcopy_local_csv_path(trade_date)})"
+        )
+        _ANNOUNCED.add(trade_date)
+    return df
 
 
 def _bhavcopy_urls(trade_date: date) -> list[str]:
@@ -138,33 +249,15 @@ def fetch_bhavcopy(
 
 
 def _download_bhavcopy_day(trade_date: date) -> dict[str, dict] | None:
-    sess = _session()
-    for url in _bhavcopy_urls(trade_date):
-        try:
-            resp = sess.get(url, timeout=30)
-            if resp.status_code != 200:
-                continue
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-                if not csv_names:
-                    continue
-                df = pd.read_csv(zf.open(csv_names[0]))
-            result = _parse_bhavcopy_df(df)
-            if result:
-                if trade_date not in _ANNOUNCED:
-                    print(
-                        f"  [NSE Bhavcopy] {trade_date}: downloaded CM EOD file "
-                        f"({len(result)} EQ symbols in archive)"
-                    )
-                    _ANNOUNCED.add(trade_date)
-                return result
-        except Exception:
-            continue
+    df = fetch_bhavcopy_df(trade_date)
+    if df is None or df.empty:
+        if trade_date not in _ANNOUNCED:
+            print(f"  [NSE Bhavcopy] Not available for {trade_date} — trying live quotes")
+            _ANNOUNCED.add(trade_date)
+        return None
 
-    if trade_date not in _ANNOUNCED:
-        print(f"  [NSE Bhavcopy] Not available for {trade_date} — trying live quotes")
-        _ANNOUNCED.add(trade_date)
-    return None
+    result = _parse_bhavcopy_df(df)
+    return result or None
 
 
 def _safe_float(val: object) -> float:
@@ -333,6 +426,138 @@ def _ind_close_all_url(trade_date: date) -> str:
     )
 
 
+def index_eod_cache_dir() -> Path:
+    """Root directory for persisted ``ind_close_all`` CSV files (``data/nse/index_eod`` by default)."""
+    override = os.environ.get("NSE_INDEX_EOD_CACHE_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / "data" / "nse" / "index_eod"
+
+
+def index_eod_local_csv_path(trade_date: date) -> Path:
+    """Path to the cached index EOD CSV for one session — open to inspect any index."""
+    return index_eod_cache_dir() / str(trade_date.year) / f"ind_close_all_{trade_date:%Y%m%d}.csv"
+
+
+def has_local_index_eod(trade_date: date) -> bool:
+    """True when a cached ``ind_close_all`` CSV exists for *trade_date*."""
+    return index_eod_local_csv_path(trade_date).is_file()
+
+
+def list_local_index_eod_dates(*, year: int | None = None) -> list[date]:
+    """Sorted trade dates with a local index EOD file (optional *year* filter)."""
+    root = index_eod_cache_dir()
+    if not root.is_dir():
+        return []
+    out: list[date] = []
+    years = [root / str(year)] if year is not None else sorted(root.iterdir())
+    for year_dir in years:
+        if not year_dir.is_dir():
+            continue
+        for path in year_dir.glob("ind_close_all_*.csv"):
+            try:
+                out.append(datetime.strptime(path.stem.rsplit("_", 1)[1], "%Y%m%d").date())
+            except (ValueError, IndexError):
+                continue
+    return sorted(out)
+
+
+def _load_index_eod_text_from_disk(trade_date: date) -> str | None:
+    path = index_eod_local_csv_path(trade_date)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if text and "Closing Index Value" in text:
+            return text
+    except OSError:
+        pass
+    return None
+
+
+def _save_index_eod_text_to_disk(trade_date: date, text: str) -> None:
+    path = index_eod_local_csv_path(trade_date)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _download_index_eod_text_from_nse(trade_date: date) -> str | None:
+    sess = _session()
+    url = _ind_close_all_url(trade_date)
+    try:
+        resp = sess.get(url, timeout=30)
+        if resp.status_code == 200 and resp.text and "Closing Index Value" in resp.text:
+            return resp.text
+    except Exception:
+        pass
+    return None
+
+
+def _log_index_eod_session(
+    trade_date: date,
+    index_count_in_file: int,
+    *,
+    from_cache: bool,
+    index_count: int | None = None,
+) -> None:
+    path = index_eod_local_csv_path(trade_date)
+    if from_cache:
+        print(
+            f"  [NSE Index EOD] {trade_date}: loaded from local cache "
+            f"({index_count_in_file} indices, {path})"
+        )
+        return
+    if index_count is not None:
+        print(
+            f"  [NSE Index EOD] {trade_date}: downloaded index archive "
+            f"({index_count_in_file} names in file; {index_count} requested, saved to {path})"
+        )
+    else:
+        print(
+            f"  [NSE Index EOD] {trade_date}: downloaded index archive "
+            f"({index_count_in_file} indices, saved to {path})"
+        )
+
+
+def fetch_index_eod_text(
+    trade_date: date,
+    *,
+    quiet: bool = False,
+    index_count: int | None = None,
+) -> str | None:
+    """Full ``ind_close_all`` CSV for one session — local disk cache first, then NSE download."""
+    cached = _load_index_eod_text_from_disk(trade_date)
+    if cached is not None:
+        if not quiet and trade_date not in _INDEX_CLOSE_ANNOUNCED:
+            _log_index_eod_session(
+                trade_date,
+                len(_parse_ind_close_all_ohlc(cached)),
+                from_cache=True,
+                index_count=index_count,
+            )
+            _INDEX_CLOSE_ANNOUNCED.add(trade_date)
+        return cached
+
+    text = _download_index_eod_text_from_nse(trade_date)
+    if not text:
+        return None
+
+    try:
+        _save_index_eod_text_to_disk(trade_date, text)
+    except OSError:
+        pass
+
+    if not quiet and trade_date not in _INDEX_CLOSE_ANNOUNCED:
+        _log_index_eod_session(
+            trade_date,
+            len(_parse_ind_close_all_ohlc(text)),
+            from_cache=False,
+            index_count=index_count,
+        )
+        _INDEX_CLOSE_ANNOUNCED.add(trade_date)
+    return text
+
+
 def _parse_ind_close_all_ohlc(text: str) -> dict[str, _IndexOhlcRow]:
     """``Index Name`` → OHLCV from NSE ``ind_close_all`` CSV."""
     result: dict[str, _IndexOhlcRow] = {}
@@ -367,26 +592,15 @@ def _fetch_index_day_ohlc(
     if trade_date in _INDEX_DAY_CACHE:
         return _INDEX_DAY_CACHE[trade_date] or {}
 
-    sess = _session()
-    url = _ind_close_all_url(trade_date)
-    try:
-        resp = sess.get(url, timeout=30)
-        if resp.status_code == 200 and resp.text and "Closing Index Value" in resp.text:
-            result = _parse_ind_close_all_ohlc(resp.text)
-            if result:
-                _INDEX_DAY_CACHE[trade_date] = result
-                if not quiet and trade_date not in _INDEX_CLOSE_ANNOUNCED:
-                    if index_count is not None:
-                        print(
-                            f"  [NSE Index EOD] {trade_date}: downloaded index archive "
-                            f"({len(result)} names in file; {index_count} requested)"
-                        )
-                    else:
-                        print(f"  [NSE Index EOD] {trade_date} ({len(result)} indices)")
-                    _INDEX_CLOSE_ANNOUNCED.add(trade_date)
-                return result
-    except Exception:
-        pass
+    text = fetch_index_eod_text(trade_date, quiet=quiet, index_count=index_count)
+    if not text:
+        _INDEX_DAY_CACHE[trade_date] = None
+        return {}
+
+    result = _parse_ind_close_all_ohlc(text)
+    if result:
+        _INDEX_DAY_CACHE[trade_date] = result
+        return result
 
     _INDEX_DAY_CACHE[trade_date] = None
     return {}

@@ -10,7 +10,8 @@ Policy:
 Cache:
   - Each ticker stores the exact ``[start, end)`` window last downloaded.
   - Same window again → reuse. Any date change → fresh download for that ticker.
-  - NSE bhavcopy/index day archives stay cached per trading day (shared across tickers).
+  - NSE CM bhavcopy and index EOD CSV files persist on disk under ``data/nse/`` (see
+    ``utils.nse_bhavcopy``); in-memory day caches are shared across tickers per run.
 """
 
 from __future__ import annotations
