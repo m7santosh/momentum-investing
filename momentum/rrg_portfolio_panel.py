@@ -694,6 +694,7 @@ def portfolio_panel_dates_line(
     subtitle: str = "",
     exits_through_label: str | None = None,
     mode: str = "week",
+    rebalance_preview: bool = False,
 ) -> str:
     if exit_below_9ema:
         through = exits_through_label or rebalance_label
@@ -707,7 +708,8 @@ def portfolio_panel_dates_line(
             f"{pick_part} (★ order){exits_note}  ·  {subtitle}"
         )
     pick_part = pick_shortfall or f"Top N {rebal_n} this week"
+    preview_note = " · weekly @ latest Fri" if rebalance_preview else ""
     return (
-        f"Rebalance {rebalance_label}  ·  Was {was_n} from {was_label}  ·  "
+        f"Rebalance {rebalance_label}{preview_note}  ·  Was {was_n} from {was_label}  ·  "
         f"{pick_part} (★ order){exits_note}  ·  {subtitle}"
     )

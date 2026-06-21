@@ -327,6 +327,64 @@ def panel_rebal_bar_index(
     return max(tail_n, end_i - 1)
 
 
+def weekly_preview_rebalance_bar_index(
+    weekly_index: pd.DatetimeIndex,
+    as_of_ts: pd.Timestamp,
+    tail_bars: int,
+) -> int | None:
+    """
+    Weekly bar index of the last rebalance for Preview today's picks.
+
+    Change window is last rebalance → as-of trading day (daily EOD). Mid-week
+    (e.g. 17-Jun between 12-Jun and 19-Jun) → rebalance bar 12-Jun.
+    """
+    wi = pd.DatetimeIndex(weekly_index).sort_values()
+    if not len(wi):
+        return None
+    tail_n = max(1, int(tail_bars))
+    as_of = pd.Timestamp(as_of_ts).normalize()
+    pos = int(wi.get_indexer([as_of], method="ffill")[0])
+    if pos < 0 or pos < tail_n:
+        return None
+    if pos + 1 < len(wi):
+        next_bar = pd.Timestamp(wi[pos + 1]).normalize()
+        if as_of < next_bar:
+            if as_of == pd.Timestamp(wi[pos]).normalize():
+                return panel_rebal_bar_index(wi, as_of, tail_n)
+            return pos
+    if as_of > pd.Timestamp(wi[pos]).normalize():
+        return pos
+    return panel_rebal_bar_index(wi, as_of, tail_n)
+
+
+def forward_rebal_at_latest_active(
+    weekly_index: pd.DatetimeIndex,
+    slider_idx: int,
+    tail_bars: int,
+    *,
+    enabled: bool = True,
+) -> bool:
+    """
+    True when Rebalance @ latest bar should show weekly Top N at the slider bar.
+
+    Requires slider on the latest weekly bar and a prior hold-week rebalance
+    (e.g. slider 19-Jun → show picks at 19-Jun, not default 12-Jun).
+    Does not require daily EOD to reach that Friday — weekly bar data is enough.
+    """
+    if not enabled:
+        return False
+    wi = pd.DatetimeIndex(weekly_index).sort_values()
+    if not len(wi):
+        return False
+    tail_n = max(1, int(tail_bars))
+    max_idx = len(wi) - 1
+    idx = int(slider_idx)
+    if idx < max_idx or idx <= tail_n:
+        return False
+    normal = panel_rebal_bar_index(wi, pd.Timestamp(wi[idx]), tail_n)
+    return normal < idx
+
+
 def rrg_build_slider_date_index(
     bench: pd.Series,
     *,
