@@ -24,7 +24,9 @@ Ranking (swing / all-weather blend):
 
 Market_Regime: ^CRSLDX vs 50 / 200 EMA (Trend_Up / Trend_Down / Mixed_Above50 / Mixed_Below50 / Unknown).
 
-Close_Below_9EMA: per ETF, Exit if last **regular Close** is below the 9 EMA of **Close**, else Hold (matches typical broker / TradingView “Close” charts). Trend gate and Return_* still use **Adj Close** (total return).
+Close_Below_9EMA: per ETF, Exit if last **regular Close** is below the 9 EMA of **Close**, else Hold.
+Above_9EMA_Since / Pct_Above_9EMA: date and % gain since the most recent cross from below to at/above 9 EMA (regular Close).
+Trend gate and Return_* still use **Adj Close** (total return).
 
 How to read Volatility_Score (informational):
 - It is stdev of daily % returns over the last LB_1M sessions, ×100; higher = choppier last month.
@@ -60,6 +62,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from utils.output_paths import FINAL_RESULT_ETF_DIR
 from utils.nse_bhavcopy import fetch_bhavcopy, fetch_nse_live_quotes, nse_symbol_from_yahoo, today_ist
+from momentum.etf.ema9_metrics import compute_ema9_metrics
 
 # --- Configuration ---
 BENCHMARK_TICKER = "^CRSLDX"
@@ -83,7 +86,6 @@ BENCH_EMA_FAST = 50
 BENCH_EMA_SLOW = 200
 
 # Short EMA for per-ETF “close below 9?” flag (regular Close, not Adj Close)
-ETF_EMA_9 = 9
 
 TOP_N = 30
 OUT_FILENAME = "momentum_rs_etfs.xlsx"
@@ -241,9 +243,7 @@ def main() -> None:
 
             # Short swing flag: 9 EMA of **Close** vs last **Close** (chart/broker parity; not Adj Close).
             close_on_adj_index = _close_series(df).reindex(adj.index).ffill().bfill()
-            ema9_close = float(close_on_adj_index.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
-            last_close = float(close_on_adj_index.iloc[-1])
-            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+            ema9 = compute_ema9_metrics(close_on_adj_index)
 
             # Peak proximity: avg(last/52w_high, last/max_in_window) → Rank_vs_Peak later
             high_ath = float(adj.max())
@@ -279,9 +279,11 @@ def main() -> None:
             summary.append(
                 {
                     "Symbol": _symbol_for_excel(sym),
-                    "Close": round(last_close, 2),
-                    "9EMA": round(ema9_close, 2),
-                    "Close_Below_9EMA": close_below_9ema,
+                    "Close": ema9["last_close"],
+                    "9EMA": ema9["ema9_close"],
+                    "Close_Below_9EMA": ema9["close_below_9ema"],
+                    "Above_9EMA_Since": ema9["above_9ema_since"],
+                    "Pct_Above_9EMA": ema9["pct_since_cross"],
                     "Peak_Proximity_Score": peak_proximity_score,
                     "Return_1W": return_1w,
                     "Return_2W": return_2w,
@@ -365,6 +367,8 @@ def main() -> None:
         "9EMA",
         # "Market_Regime",
         "Close_Below_9EMA",
+        "Above_9EMA_Since",
+        "Pct_Above_9EMA",
         # "Blended_Rank",
         # "Rank_vs_Peak",
         "Volatility_Score",

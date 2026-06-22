@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, scrolledtext, ttk
 
 import pandas as pd
 
@@ -23,6 +23,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from momentum.etf.etf_momentum_recommendations import recommendations_dataframe  # noqa: E402
+from momentum.etf.etf_momentum_screen_sort import (  # noqa: E402
+    TreeSortState,
+    apply_tree_sort,
+    reset_tree_sort_state,
+    update_etf_momentum_tree_headings,
+    wire_etf_momentum_tree_sort,
+)
 from momentum.etf.etf_momentum_engine import EtfMomentumSnapshot, fetch_etf_momentum_snapshot  # noqa: E402
 from momentum.rrg_busy import RrgBusyOverlay  # noqa: E402
 from momentum.rrg_core import rrg_config_date_str, rrg_format_date  # noqa: E402
@@ -36,19 +44,19 @@ ABS_COLUMNS = (
     "Close",
     "9EMA",
     "Close_Below_9EMA",
+    "Above_9EMA_Since",
+    "Pct_Above_9EMA",
     "Return_1W",
     "Return_2W",
     "Return_1M",
-    "Rank_1W",
-    "Rank_2W",
-    "Rank_1M",
-    "Final_Rank",
 )
 
 ABS_COLUMN_LABELS = {
     "Close": "Price",
     "9EMA": "9 EMA",
     "Close_Below_9EMA": "9 EMA Close",
+    "Above_9EMA_Since": "9 EMA Cross Date",
+    "Pct_Above_9EMA": "Since 9 EMA Cross %",
 }
 
 RS_BLENDED_COLUMNS = (
@@ -57,14 +65,12 @@ RS_BLENDED_COLUMNS = (
     "Close",
     "9EMA",
     "Close_Below_9EMA",
-    "Volatility_Score",
+    "Above_9EMA_Since",
+    "Pct_Above_9EMA",
     "Return_1W",
     "Return_2W",
     "Return_1M",
     "Return_3M",
-    "RS_1W_vs_N500",
-    "RS_2W_vs_N500",
-    "RS_1M_vs_N500",
 )
 
 RS_ADAPTIVE_COLUMNS = (
@@ -73,14 +79,12 @@ RS_ADAPTIVE_COLUMNS = (
     "Close",
     "9EMA",
     "Close_Below_9EMA",
-    "Weighted_RS_pct",
+    "Above_9EMA_Since",
+    "Pct_Above_9EMA",
     "Return_1W",
     "Return_2W",
     "Return_1M",
     "Return_3M",
-    "RS_1W_vs_N500",
-    "RS_2W_vs_N500",
-    "RS_1M_vs_N500",
 )
 
 _COLUMN_WIDTHS: dict[str, int] = {
@@ -89,26 +93,19 @@ _COLUMN_WIDTHS: dict[str, int] = {
     "Close": 72,
     "9EMA": 72,
     "Close_Below_9EMA": 110,
-    "Weighted_RS_pct": 110,
-    "Volatility_Score": 100,
+    "Above_9EMA_Since": 108,
+    "Pct_Above_9EMA": 118,
     "Return_1W": 76,
     "Return_2W": 76,
     "Return_1M": 76,
     "Return_3M": 76,
-    "RS_1W_vs_N500": 100,
-    "RS_2W_vs_N500": 100,
-    "RS_1M_vs_N500": 100,
-    "Rank_1W": 64,
-    "Rank_2W": 64,
-    "Rank_1M": 64,
-    "Final_Rank": 80,
 }
 
 
 def _cell(value: object, heading: str) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
-    if heading in ("Position", "Symbol", "Close_Below_9EMA"):
+    if heading in ("Position", "Symbol", "Close_Below_9EMA", "Above_9EMA_Since"):
         if heading == "Position" and isinstance(value, (int, float)):
             return str(int(value))
         return str(value)
@@ -135,7 +132,7 @@ def _make_tree(
     for col_id, heading in zip(col_ids, headings, strict=True):
         tree.heading(col_id, text=label_map.get(heading, heading))
         width = _COLUMN_WIDTHS.get(heading, 88)
-        anchor = "w" if heading in ("Symbol", "Name", "Close_Below_9EMA") else "e"
+        anchor = "w" if heading in ("Symbol", "Name", "Close_Below_9EMA", "Above_9EMA_Since") else "e"
         if heading == "Position":
             anchor = "center"
         tree.column(col_id, width=width, stretch=False, minwidth=width, anchor=anchor)
@@ -148,20 +145,6 @@ def _make_tree(
     xscroll.grid(row=1, column=0, sticky="ew")
     parent.rowconfigure(0, weight=1)
     parent.columnconfigure(0, weight=1)
-    return tree
-
-
-def _make_kv_tree(parent: tk.Misc, *, height: int = 12) -> ttk.Treeview:
-    cols = ("Field", "Value")
-    tree = ttk.Treeview(parent, columns=cols, show="headings", height=height, selectmode="none")
-    tree.heading("Field", text="Field")
-    tree.heading("Value", text="Value")
-    tree.column("Field", width=200, stretch=False)
-    tree.column("Value", width=360, stretch=True)
-    scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=tree.yview)
-    tree.configure(yscrollcommand=scroll.set)
-    tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    scroll.pack(side=tk.RIGHT, fill=tk.Y)
     return tree
 
 
@@ -183,32 +166,49 @@ def _fill_tree(tree: ttk.Treeview, df: pd.DataFrame | None, headings: tuple[str,
         tree.insert("", tk.END, values=values, tags=(tag,) if tag else ())
 
 
-def _fill_kv_tree(tree: ttk.Treeview, rows: dict[str, object] | None) -> None:
-    for item in tree.get_children():
-        tree.delete(item)
-    if not rows:
-        tree.insert("", tk.END, values=("—", "No data yet."))
-        return
-    for key, value in rows.items():
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            val_s = ""
-        elif isinstance(value, float):
-            val_s = f"{value:.2f}"
-        else:
-            val_s = str(value)
-        tree.insert("", tk.END, values=(key, val_s))
+def _make_picks_panel(parent: tk.Misc) -> scrolledtext.ScrolledText:
+    text = scrolledtext.ScrolledText(
+        parent,
+        wrap=tk.WORD,
+        width=44,
+        height=28,
+        font=("Segoe UI", 9),
+        state=tk.DISABLED,
+        relief=tk.FLAT,
+        padx=6,
+        pady=6,
+    )
+    text.tag_configure("pick_head", font=("Segoe UI", 9, "bold"))
+    text.pack(fill=tk.BOTH, expand=True)
+    return text
+
+
+def _fill_picks_panel(text: scrolledtext.ScrolledText, df: pd.DataFrame | None) -> None:
+    text.config(state=tk.NORMAL)
+    text.delete("1.0", tk.END)
+    if df is None:
+        text.insert(tk.END, "Refresh to load recommendations.")
+    elif df.empty:
+        text.insert(tk.END, "No ETFs above 9 EMA qualify for recommendations.")
+    else:
+        for _, row in df.iterrows():
+            text.insert(tk.END, f"#{int(row['Rank'])}  {row['Symbol']}\n", "pick_head")
+            text.insert(tk.END, f"{row['Reason']}\n\n")
+    text.config(state=tk.DISABLED)
 
 
 class EtfMomentumScreenApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("India ETF Momentum")
-        self.root.geometry("1320x760")
-        self.root.minsize(1000, 560)
+        self.root.geometry("1680x760")
+        self.root.minsize(1200, 560)
 
         self._snapshot: EtfMomentumSnapshot | None = None
         self._busy = False
         self._overlay = RrgBusyOverlay(root, default_message="Fetching ETF data…")
+        self._tree_sort_states: dict[int, TreeSortState] = {}
+        self._tree_views: list[tuple[ttk.Treeview, tuple[str, ...], dict[str, str]]] = []
 
         toolbar = tk.Frame(root, padx=10, pady=8)
         toolbar.pack(fill=tk.X)
@@ -248,18 +248,19 @@ class EtfMomentumScreenApp:
 
         left = tk.Frame(body)
         body.add(left, weight=3)
+
         notebook = ttk.Notebook(left)
         notebook.pack(fill=tk.BOTH, expand=True)
 
         self._abs_tree = self._add_tab(
-            notebook, "Abs Momentum (top 10)", ABS_COLUMNS, labels=ABS_COLUMN_LABELS
+            notebook, "Abs Momentum", ABS_COLUMNS, labels=ABS_COLUMN_LABELS
         )
-        self._rs_tree = self._add_tab(notebook, "RS Blended (top 30)", RS_BLENDED_COLUMNS)
-        self._adaptive_tree = self._add_tab(notebook, "RS Adaptive (top 30)", RS_ADAPTIVE_COLUMNS)
+        self._rs_tree = self._add_tab(notebook, "RS Blended", RS_BLENDED_COLUMNS, labels=ABS_COLUMN_LABELS)
+        self._adaptive_tree = self._add_tab(notebook, "RS Adaptive", RS_ADAPTIVE_COLUMNS, labels=ABS_COLUMN_LABELS)
 
-        info_frame = tk.LabelFrame(body, text="Run Info", padx=6, pady=6)
-        body.add(info_frame, weight=1)
-        self._info_tree = _make_kv_tree(info_frame, height=16)
+        picks_frame = tk.LabelFrame(body, text="Top 10 Picks", padx=6, pady=6)
+        body.add(picks_frame, weight=1)
+        self._picks_panel = _make_picks_panel(picks_frame)
 
         for tree in (self._abs_tree, self._rs_tree, self._adaptive_tree):
             tree.tag_configure("exit", foreground="#b71c1c")
@@ -278,7 +279,15 @@ class EtfMomentumScreenApp:
     ) -> ttk.Treeview:
         frame = tk.Frame(notebook)
         notebook.add(frame, text=title)
-        return _make_tree(frame, headings, labels=labels)
+        label_map = labels or {}
+        tree = _make_tree(frame, headings, labels=label_map)
+        state = TreeSortState()
+        self._tree_sort_states[id(tree)] = state
+        self._tree_views.append((tree, headings, label_map))
+        wire_etf_momentum_tree_sort(
+            tree, headings, label_map, state, self._apply_filter
+        )
+        return tree
 
     def _on_backtest(self) -> None:
         from momentum.etf_momentum_backtest_ui import open_etf_momentum_backtest
@@ -332,14 +341,15 @@ class EtfMomentumScreenApp:
             return
         assert snap is not None
         self._snapshot = snap
+        for tree, headings, label_map in self._tree_views:
+            state = self._tree_sort_states[id(tree)]
+            reset_tree_sort_state(state)
+            update_etf_momentum_tree_headings(tree, headings, label_map, state)
         self._apply_filter()
         top_adaptive = ""
         if not snap.rs_adaptive.empty:
             row0 = snap.rs_adaptive.iloc[0]
-            top_adaptive = (
-                f"  Top adaptive: {row0['Symbol']} "
-                f"({row0['Weighted_RS_pct']:.2f}%)"
-            )
+            top_adaptive = f"  Top adaptive: {row0['Symbol']}"
         self._status_var.set(
             f"Run {snap.run_date}  |  Market_Regime={snap.market_regime}  |  "
             f"Abs={len(snap.abs_momentum)}  RS blended={len(snap.rs_blended)}  "
@@ -359,10 +369,20 @@ class EtfMomentumScreenApp:
             mask = df["Symbol"].astype(str).str.upper().str.contains(needle, na=False)
             return df.loc[mask].reset_index(drop=True)
 
-        _fill_tree(self._abs_tree, _filter_df(snap.abs_momentum), ABS_COLUMNS)
-        _fill_tree(self._rs_tree, _filter_df(snap.rs_blended), RS_BLENDED_COLUMNS)
-        _fill_tree(self._adaptive_tree, _filter_df(snap.rs_adaptive), RS_ADAPTIVE_COLUMNS)
-        _fill_kv_tree(self._info_tree, snap.run_info)
+        def _display_df(tree: ttk.Treeview, df: pd.DataFrame, headings: tuple[str, ...]) -> None:
+            state = self._tree_sort_states[id(tree)]
+            _fill_tree(tree, apply_tree_sort(df, state), headings)
+
+        _display_df(self._abs_tree, _filter_df(snap.abs_momentum), ABS_COLUMNS)
+        _display_df(self._rs_tree, _filter_df(snap.rs_blended), RS_BLENDED_COLUMNS)
+        _display_df(self._adaptive_tree, _filter_df(snap.rs_adaptive), RS_ADAPTIVE_COLUMNS)
+
+        picks_df = recommendations_dataframe(
+            snap.abs_momentum,
+            snap.rs_blended,
+            snap.rs_adaptive,
+        )
+        _fill_picks_panel(self._picks_panel, picks_df)
 
 
 def main() -> int:

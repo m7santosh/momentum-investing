@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from momentum.etf.ema9_metrics import compute_ema9_metrics
 from momentum.etf.universes import us_universe
 
 BENCHMARK_TICKER = "^GSPC"
@@ -27,7 +28,6 @@ EMA_SPAN = 200
 PROXIMITY_OF_52W_HIGH = 0.7
 BENCH_EMA_FAST = 50
 BENCH_EMA_SLOW = 200
-ETF_EMA_9 = 9
 
 MIN_HISTORY_SESSIONS = LB_3M
 TOP_N = 30
@@ -178,9 +178,7 @@ def _collect_rs_rows(
                 continue
 
             close = _close_series(df).reindex(adj.index).ffill().bfill()
-            ema9_close = float(close.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
-            last_close = float(close.iloc[-1])
-            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+            ema9 = compute_ema9_metrics(close)
 
             return_1w, return_2w, return_1m, return_3m, rs_1w, rs_2w, rs_1m, rs_3m = (
                 _rs_vs_benchmark(adj, bench_adj)
@@ -190,9 +188,11 @@ def _collect_rs_rows(
                 {
                     "Symbol": ticker,
                     "Name": _etf_name(ticker),
-                    "Close": round(last_close, 2),
-                    "9EMA": round(ema9_close, 2),
-                    "Close_Below_9EMA": close_below_9ema,
+                    "Close": ema9["last_close"],
+                    "9EMA": ema9["ema9_close"],
+                    "Close_Below_9EMA": ema9["close_below_9ema"],
+                    "Above_9EMA_Since": ema9["above_9ema_since"],
+                    "Pct_Above_9EMA": ema9["pct_since_cross"],
                     "Return_1W": return_1w,
                     "Return_2W": return_2w,
                     "Return_1M": return_1m,
@@ -220,17 +220,17 @@ def _compute_abs_momentum(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
                 continue
 
             close = _close_series(df).reindex(adj.index).ffill().bfill()
-            ema9_close = float(close.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
-            last_close = float(close.iloc[-1])
-            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+            ema9 = compute_ema9_metrics(close)
 
             summary.append(
                 {
                     "Symbol": ticker,
                     "Name": _etf_name(ticker),
-                    "Close": round(last_close, 2),
-                    "9EMA": round(ema9_close, 2),
-                    "Close_Below_9EMA": close_below_9ema,
+                    "Close": ema9["last_close"],
+                    "9EMA": ema9["ema9_close"],
+                    "Close_Below_9EMA": ema9["close_below_9ema"],
+                    "Above_9EMA_Since": ema9["above_9ema_since"],
+                    "Pct_Above_9EMA": ema9["pct_since_cross"],
                     "Return_1W": (adj.iloc[-1] / adj.iloc[-LB_1W] - 1) * 100,
                     "Return_2W": (adj.iloc[-1] / adj.iloc[-LB_2W] - 1) * 100,
                     "Return_1M": (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100,
@@ -266,6 +266,8 @@ def _compute_abs_momentum(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
         "Close",
         "9EMA",
         "Close_Below_9EMA",
+        "Above_9EMA_Since",
+        "Pct_Above_9EMA",
         "Return_1W",
         "Return_2W",
         "Return_1M",
@@ -326,13 +328,12 @@ def _compute_rs_blended(df_summary: pd.DataFrame) -> pd.DataFrame:
         "Close",
         "9EMA",
         "Close_Below_9EMA",
+        "Above_9EMA_Since",
+        "Pct_Above_9EMA",
         "Return_1W",
         "Return_2W",
         "Return_1M",
         "Return_3M",
-        "RS_1W_vs_SP500",
-        "RS_2W_vs_SP500",
-        "RS_1M_vs_SP500",
         "RS_3M_vs_SP500",
     ]
     return df_out[cols]
@@ -386,14 +387,12 @@ def _compute_rs_adaptive(df_summary: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         "Close",
         "9EMA",
         "Close_Below_9EMA",
-        "Weighted_RS_pct",
+        "Above_9EMA_Since",
+        "Pct_Above_9EMA",
         "Return_1W",
         "Return_2W",
         "Return_1M",
         "Return_3M",
-        "RS_1W_vs_SP500",
-        "RS_2W_vs_SP500",
-        "RS_1M_vs_SP500",
     ]
     return df_out[cols], len(df_ranked)
 

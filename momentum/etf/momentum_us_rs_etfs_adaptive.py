@@ -28,6 +28,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from momentum.etf.universes import us_universe
 from utils.output_paths import FINAL_RESULT_ETF_DIR
+from momentum.etf.ema9_metrics import compute_ema9_metrics
 
 BENCHMARK_TICKER = "^GSPC"
 
@@ -41,7 +42,6 @@ EMA_SPAN = 200
 
 BENCH_EMA_FAST = 50
 BENCH_EMA_SLOW = 200
-ETF_EMA_9 = 9
 MIN_HISTORY_SESSIONS = LB_3M
 TOP_N = 10
 OUT_FILENAME = "momentum_us_rs_etfs_adaptive.xlsx"
@@ -71,6 +71,8 @@ FINAL_COLS = [
     "Close",
     "9EMA",
     "Close_Below_9EMA",
+    "Above_9EMA_Since",
+    "Pct_Above_9EMA",
     "Weighted_RS_pct",
     "Return_1W",
     "Return_2W",
@@ -171,9 +173,7 @@ def _collect_etf_rows(
                 continue
 
             close = _close_series(df).reindex(adj.index).ffill().bfill()
-            ema9_close = float(close.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
-            last_close = float(close.iloc[-1])
-            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+            ema9 = compute_ema9_metrics(close)
 
             return_1w, return_2w, return_1m, return_3m, rs_1w, rs_2w, rs_1m, rs_3m = (
                 _rs_vs_benchmark(adj, bench_adj)
@@ -182,9 +182,11 @@ def _collect_etf_rows(
             summary.append(
                 {
                     "Symbol": ticker,
-                    "Close": round(last_close, 2),
-                    "9EMA": round(ema9_close, 2),
-                    "Close_Below_9EMA": close_below_9ema,
+                    "Close": ema9["last_close"],
+                    "9EMA": ema9["ema9_close"],
+                    "Close_Below_9EMA": ema9["close_below_9ema"],
+                    "Above_9EMA_Since": ema9["above_9ema_since"],
+                    "Pct_Above_9EMA": ema9["pct_since_cross"],
                     "Return_1W": return_1w,
                     "Return_2W": return_2w,
                     "Return_1M": return_1m,

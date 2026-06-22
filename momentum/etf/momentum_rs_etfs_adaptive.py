@@ -30,6 +30,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from momentum.etf.universes.india import tickers
 from utils.nse_bhavcopy import fetch_bhavcopy, fetch_nse_live_quotes, nse_symbol_from_yahoo, today_ist
 from utils.output_paths import FINAL_RESULT_ETF_DIR
+from momentum.etf.ema9_metrics import compute_ema9_metrics
 
 BENCHMARK_TICKER = "^CRSLDX"
 
@@ -43,7 +44,6 @@ EMA_SPAN = 200
 PROXIMITY_OF_52W_HIGH = 0.7
 BENCH_EMA_FAST = 50
 BENCH_EMA_SLOW = 200
-ETF_EMA_9 = 9
 
 MIN_HISTORY_SESSIONS = LB_3M
 MIN_ADTV_NEW_ETF_CRORES = 2.5
@@ -79,6 +79,8 @@ FINAL_COLS = [
     "Close",
     "9EMA",
     "Close_Below_9EMA",
+    "Above_9EMA_Since",
+    "Pct_Above_9EMA",
     "Weighted_RS_pct",
     "Return_1W",
     "Return_2W",
@@ -229,11 +231,7 @@ def _collect_etf_rows(
             last = adj.iloc[-1]
 
             close_on_adj_index = _close_series(df).reindex(adj.index).ffill().bfill()
-            ema9_close = float(
-                close_on_adj_index.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1]
-            )
-            last_close = float(close_on_adj_index.iloc[-1])
-            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+            ema9 = compute_ema9_metrics(close_on_adj_index)
 
             high_ath = float(adj.max())
             ratio_52w = last / high_52w
@@ -265,9 +263,11 @@ def _collect_etf_rows(
             summary.append(
                 {
                     "Symbol": _symbol_for_excel(sym),
-                    "Close": round(last_close, 2),
-                    "9EMA": round(ema9_close, 2),
-                    "Close_Below_9EMA": close_below_9ema,
+                    "Close": ema9["last_close"],
+                    "9EMA": ema9["ema9_close"],
+                    "Close_Below_9EMA": ema9["close_below_9ema"],
+                    "Above_9EMA_Since": ema9["above_9ema_since"],
+                    "Pct_Above_9EMA": ema9["pct_since_cross"],
                     "Peak_Proximity_Score": peak_proximity_score,
                     "Return_1W": return_1w,
                     "Return_2W": return_2w,

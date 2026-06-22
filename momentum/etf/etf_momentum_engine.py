@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from momentum.etf.ema9_metrics import compute_ema9_metrics
 from momentum.etf.universes.india import tickers
 from utils.india_market_data import (
     MIN_BARS_NS_BHAVCOPY_FIRST,
@@ -34,14 +35,10 @@ EMA_SPAN = 200
 PROXIMITY_OF_52W_HIGH = 0.7
 BENCH_EMA_FAST = 50
 BENCH_EMA_SLOW = 200
-ETF_EMA_9 = 9
 
 MIN_HISTORY_SESSIONS = LB_3M
 MIN_ADTV_NEW_ETF_CRORES = 2.5
 ADTV_LOOKBACK = 20
-
-TOP_N_ABS = 10
-TOP_N_RS = 30
 
 W_RS_BLEND = (0.10, 0.10, 0.25, 0.55)
 W_RS_ADAPTIVE = (0.20, 0.40, 0.40)
@@ -147,11 +144,7 @@ def _compute_abs_momentum(
 
             if adj.iloc[-1] >= df["EMA200"].iloc[-1] and within_30_pct_high:
                 close_on_adj = _close_series(df).reindex(adj.index).ffill().bfill()
-                ema9_close = float(
-                    close_on_adj.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1]
-                )
-                last_close = float(close_on_adj.iloc[-1])
-                close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+                ema9 = compute_ema9_metrics(close_on_adj)
 
                 return_1m = (adj.iloc[-1] / adj.iloc[-LB_1M] - 1) * 100
                 return_1w = (adj.iloc[-1] / adj.iloc[-LB_1W] - 1) * 100
@@ -159,9 +152,11 @@ def _compute_abs_momentum(
                 summary.append(
                     {
                         "Symbol": _symbol_display(ticker),
-                        "Close": round(last_close, 2),
-                        "9EMA": round(ema9_close, 2),
-                        "Close_Below_9EMA": close_below_9ema,
+                        "Close": ema9["last_close"],
+                        "9EMA": ema9["ema9_close"],
+                        "Close_Below_9EMA": ema9["close_below_9ema"],
+                        "Above_9EMA_Since": ema9["above_9ema_since"],
+                        "Pct_Above_9EMA": ema9["pct_since_cross"],
                         "Return_1M": return_1m,
                         "Return_2W": return_2w,
                         "Return_1W": return_1w,
@@ -187,7 +182,7 @@ def _compute_abs_momentum(
         + 0.2 * df_summary["Rank_1M"]
     )
 
-    df_out = df_summary.sort_values("Final_Rank").head(TOP_N_ABS).copy()
+    df_out = df_summary.sort_values("Final_Rank").copy()
     df_out.insert(0, "Position", np.arange(1, len(df_out) + 1))
     final_cols = [
         "Position",
@@ -195,13 +190,11 @@ def _compute_abs_momentum(
         "Close",
         "9EMA",
         "Close_Below_9EMA",
+        "Above_9EMA_Since",
+        "Pct_Above_9EMA",
         "Return_1W",
         "Return_2W",
         "Return_1M",
-        "Rank_1W",
-        "Rank_2W",
-        "Rank_1M",
-        "Final_Rank",
     ]
     return df_out[final_cols].reset_index(drop=True)
 
@@ -257,11 +250,7 @@ def _collect_rs_rows(
             last = adj.iloc[-1]
 
             close_on_adj_index = _close_series(df).reindex(adj.index).ffill().bfill()
-            ema9_close = float(
-                close_on_adj_index.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1]
-            )
-            last_close = float(close_on_adj_index.iloc[-1])
-            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+            ema9 = compute_ema9_metrics(close_on_adj_index)
 
             high_ath = float(adj.max())
             ratio_52w = last / high_52w
@@ -293,9 +282,11 @@ def _collect_rs_rows(
             summary.append(
                 {
                     "Symbol": _symbol_display(sym),
-                    "Close": round(last_close, 2),
-                    "9EMA": round(ema9_close, 2),
-                    "Close_Below_9EMA": close_below_9ema,
+                    "Close": ema9["last_close"],
+                    "9EMA": ema9["ema9_close"],
+                    "Close_Below_9EMA": ema9["close_below_9ema"],
+                    "Above_9EMA_Since": ema9["above_9ema_since"],
+                    "Pct_Above_9EMA": ema9["pct_since_cross"],
                     "Peak_Proximity_Score": peak_proximity_score,
                     "Return_1W": return_1w,
                     "Return_2W": return_2w,
@@ -364,7 +355,7 @@ def _compute_rs_blended(df_summary: pd.DataFrame) -> pd.DataFrame:
         df_summary["Abs_Momentum_Rank"] + df_summary["Relative_Strength_Rank"]
     ) / 2
 
-    df_out = df_summary.sort_values("Blended_Rank").head(TOP_N_RS).reset_index(drop=True)
+    df_out = df_summary.sort_values("Blended_Rank").reset_index(drop=True)
     df_out.insert(0, "Position", np.arange(1, len(df_out) + 1))
 
     final_cols = [
@@ -373,14 +364,12 @@ def _compute_rs_blended(df_summary: pd.DataFrame) -> pd.DataFrame:
         "Close",
         "9EMA",
         "Close_Below_9EMA",
-        "Volatility_Score",
+        "Above_9EMA_Since",
+        "Pct_Above_9EMA",
         "Return_1W",
         "Return_2W",
         "Return_1M",
         "Return_3M",
-        "RS_1W_vs_N500",
-        "RS_2W_vs_N500",
-        "RS_1M_vs_N500",
     ]
     return df_out[final_cols]
 
@@ -416,19 +405,12 @@ def _compute_rs_adaptive(df_summary: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         df_summary[c] = df_summary[c].round(2)
 
     df_summary["Weighted_RS_pct"] = df_summary.apply(_weighted_excess_return, axis=1)
-    df_ranked = df_summary.dropna(subset=["Weighted_RS_pct"]).copy()
-    if df_ranked.empty:
+    etfs_ranked = int(df_summary["Weighted_RS_pct"].notna().sum())
+    if etfs_ranked == 0:
         return pd.DataFrame(), 0
 
-    df_ranked["Rank_vs_Peak"] = (
-        df_ranked["Peak_Proximity_Score"]
-        .rank(ascending=False, method="min", na_option="bottom")
-        .astype(int)
-    )
-
     df_out = (
-        df_ranked.sort_values("Weighted_RS_pct", ascending=False)
-        .head(TOP_N_RS)
+        df_summary.sort_values("Weighted_RS_pct", ascending=False, na_position="last")
         .reset_index(drop=True)
     )
     df_out.insert(0, "Position", np.arange(1, len(df_out) + 1))
@@ -440,16 +422,14 @@ def _compute_rs_adaptive(df_summary: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         "Close",
         "9EMA",
         "Close_Below_9EMA",
-        "Weighted_RS_pct",
+        "Above_9EMA_Since",
+        "Pct_Above_9EMA",
         "Return_1W",
         "Return_2W",
         "Return_1M",
         "Return_3M",
-        "RS_1W_vs_N500",
-        "RS_2W_vs_N500",
-        "RS_1M_vs_N500",
     ]
-    return df_out[final_cols], len(df_ranked)
+    return df_out[final_cols], etfs_ranked
 
 
 def fetch_etf_momentum_snapshot(as_of_date: str | None = None) -> EtfMomentumSnapshot:

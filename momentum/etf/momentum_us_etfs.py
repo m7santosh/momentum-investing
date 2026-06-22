@@ -21,8 +21,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.output_paths import FINAL_RESULT_ETF_DIR
-
-ETF_EMA_9 = 9
+from momentum.etf.ema9_metrics import compute_ema9_metrics
 
 # Universe: edit tickers in momentum/etf/universes/us.py
 from momentum.etf.universes import us_universe
@@ -80,9 +79,7 @@ for ticker, df in data.items():
             if isinstance(close, pd.DataFrame):
                 close = close.iloc[:, 0]
             close = close.squeeze().reindex(adj.index).ffill().bfill()
-            ema9_close = float(close.ewm(span=ETF_EMA_9, adjust=False).mean().iloc[-1])
-            last_close = float(close.iloc[-1])
-            close_below_9ema = "Exit" if last_close < ema9_close else "Hold"
+            ema9 = compute_ema9_metrics(close)
 
             # Calculate returns (short / medium horizons)
             return_1w = (adj.iloc[-1] / adj.iloc[-6] - 1) * 100  # 5 trading sessions (~1 calendar week)
@@ -92,9 +89,11 @@ for ticker, df in data.items():
 
             summary.append({
                 "Symbol": ticker,
-                "Close": round(last_close, 2),
-                "9EMA": round(ema9_close, 2),
-                "Close_Below_9EMA": close_below_9ema,
+                "Close": ema9["last_close"],
+                "9EMA": ema9["ema9_close"],
+                "Close_Below_9EMA": ema9["close_below_9ema"],
+                "Above_9EMA_Since": ema9["above_9ema_since"],
+                "Pct_Above_9EMA": ema9["pct_since_cross"],
                 "Return_1W": return_1w,
                 "Return_2W": return_2w,
                 "Return_1M": return_1m,
@@ -138,6 +137,8 @@ cols = [
     "Close",
     "9EMA",
     "Close_Below_9EMA",
+    "Above_9EMA_Since",
+    "Pct_Above_9EMA",
     "Return_1W",
     "Return_2W",
     "Return_1M",

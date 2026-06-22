@@ -22,6 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.output_paths import FINAL_RESULT_ETF_DIR
+from momentum.etf.ema9_metrics import compute_ema9_metrics
 
 
 def _symbol_for_excel(yahoo_ticker: str) -> str:
@@ -97,6 +98,12 @@ for ticker, df in data.items():
             within_30_pct_high
             ): # check if the price has increased more than 45% days in the last 6 months
 
+            close = df["Close"]
+            if isinstance(close, pd.DataFrame):
+                close = close.iloc[:, 0]
+            close = close.squeeze().reindex(adj.index).ffill().bfill()
+            ema9 = compute_ema9_metrics(close)
+
             # Calculate returns (short horizons only)
             return_1m = (adj.iloc[-1] / adj.iloc[-21] - 1) * 100 # calculate the return in the last month
             return_1w = (adj.iloc[-1] / adj.iloc[-6] - 1) * 100  # 5 trading sessions (~1 calendar week)
@@ -104,6 +111,11 @@ for ticker, df in data.items():
 
             summary.append({
                 "Symbol": _symbol_for_excel(ticker),
+                "Close": ema9["last_close"],
+                "9EMA": ema9["ema9_close"],
+                "Close_Below_9EMA": ema9["close_below_9ema"],
+                "Above_9EMA_Since": ema9["above_9ema_since"],
+                "Pct_Above_9EMA": ema9["pct_since_cross"],
                 'Return_1M': return_1m,
                 'Return_2W': return_2w,
                 'Return_1W': return_1w,
@@ -140,6 +152,24 @@ df_summary_sorted = df_summary.sort_values('Final_Rank').head(10) # get the top 
 
 # Assign position based on final rank
 df_summary_sorted['Position'] = np.arange(1, len(df_summary_sorted) + 1) # assign the position based on the final rank
+
+cols = [
+    "Position",
+    "Symbol",
+    "Close",
+    "9EMA",
+    "Close_Below_9EMA",
+    "Above_9EMA_Since",
+    "Pct_Above_9EMA",
+    "Return_1W",
+    "Return_2W",
+    "Return_1M",
+    "Rank_1W",
+    "Rank_2W",
+    "Rank_1M",
+    "Final_Rank",
+]
+df_summary_sorted = df_summary_sorted[cols]
 
 FINAL_RESULT_ETF_DIR.mkdir(parents=True, exist_ok=True)
 out_path = FINAL_RESULT_ETF_DIR / "momentum_etfs_ranked.xlsx"
