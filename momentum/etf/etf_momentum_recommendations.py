@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-TOP_PICKS = 10
+TOP_PICKS = 15
+SCREEN_TOP_N = 15
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,7 @@ class EtfPick:
     symbol: str
     reason: str
     score: float
+    name: str | None = None
 
 
 def _position_map(df: pd.DataFrame) -> dict[str, float]:
@@ -29,6 +31,11 @@ def _position_map(df: pd.DataFrame) -> dict[str, float]:
     return out
 
 
+def _top_n_position_map(df: pd.DataFrame, *, top_n: int = SCREEN_TOP_N) -> dict[str, float]:
+    """Symbol → Position for ETFs ranked in the top *top_n* on one screen."""
+    return {sym: pos for sym, pos in _position_map(df).items() if pos <= top_n}
+
+
 def _row_map(df: pd.DataFrame) -> dict[str, pd.Series]:
     if df is None or df.empty:
         return {}
@@ -41,14 +48,30 @@ def _fmt_pct(value: object) -> str | None:
     return f"{float(value):+.1f}%"
 
 
+def _fmt_cross_date(value: object) -> str | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _row_name(row: pd.Series) -> str | None:
+    name = row.get("Name")
+    if name is None or (isinstance(name, float) and pd.isna(name)):
+        return None
+    text = str(name).strip()
+    return text or None
+
+
 def _build_reason(
     *,
     abs_pos: float | None,
     blend_pos: float | None,
     adapt_pos: float | None,
+    screen_count: int,
     row: pd.Series,
 ) -> str:
-    parts: list[str] = []
+    parts = [f"on {screen_count}/3 screens"]
     if abs_pos is not None:
         parts.append(f"Abs #{int(abs_pos)}")
     if blend_pos is not None:
@@ -56,14 +79,20 @@ def _build_reason(
     if adapt_pos is not None:
         parts.append(f"RS Adaptive #{int(adapt_pos)}")
 
-    pct_since = row.get("Pct_Above_9EMA")
-    pct_s = _fmt_pct(pct_since)
-    if pct_s:
-        parts.append(f"above 9 EMA ({pct_s} since cross)")
-    else:
-        parts.append("above 9 EMA")
+    cross = _fmt_cross_date(row.get("Above_9EMA_Since"))
+    pct_s = _fmt_pct(row.get("Pct_Above_9EMA"))
+    if cross and pct_s:
+        parts.append(f"9 EMA cross {cross} ({pct_s})")
+    elif cross:
+        parts.append(f"9 EMA cross {cross}")
+    elif pct_s:
+        parts.append(f"{pct_s} since 9 EMA cross")
 
-    for label, col in (("1W", "Return_1W"), ("1M", "Return_1M"), ("3M", "Return_3M")):
+    for label, col in (
+        ("1W", "Return_1W"),
+        ("2W", "Return_2W"),
+        ("1M", "Return_1M"),
+    ):
         ret = _fmt_pct(row.get(col))
         if ret:
             parts.append(f"{label} {ret}")
@@ -76,24 +105,28 @@ def _score_pick(
     abs_pos: float | None,
     blend_pos: float | None,
     adapt_pos: float | None,
+    screen_count: int,
     row: pd.Series,
 ) -> float:
-    score = 0.0
-    screens = sum(p is not None for p in (abs_pos, blend_pos, adapt_pos))
-    score += screens * 40.0
+    """Prefer more screens, stronger ranks, then recent returns."""
+    score = screen_count * 50.0
 
     for pos in (abs_pos, blend_pos, adapt_pos):
         if pos is not None:
             score += max(0.0, 35.0 - pos)
 
-    score += 12.0
     pct = row.get("Pct_Above_9EMA")
     if pct is not None and not pd.isna(pct):
-        score += min(float(pct), 25.0) * 0.2
+        score += min(float(pct), 25.0) * 0.15
 
-    ret_1m = row.get("Return_1M")
-    if ret_1m is not None and not pd.isna(ret_1m):
-        score += float(ret_1m) * 0.15
+    for col, weight in (
+        ("Return_1W", 0.12),
+        ("Return_2W", 0.10),
+        ("Return_1M", 0.15),
+    ):
+        ret = row.get(col)
+        if ret is not None and not pd.isna(ret):
+            score += float(ret) * weight
 
     return score
 
@@ -102,31 +135,54 @@ def _scored_candidates(
     abs_df: pd.DataFrame,
     rs_blended_df: pd.DataFrame,
     rs_adaptive_df: pd.DataFrame,
+    *,
+    screen_top_n: int = SCREEN_TOP_N,
 ) -> list[EtfPick]:
-    """All above-9-EMA ETFs scored across Abs / RS Blended / RS Adaptive screens."""
-    abs_pos = _position_map(abs_df)
-    blend_pos = _position_map(rs_blended_df)
-    adapt_pos = _position_map(rs_adaptive_df)
+    """ETFs in any screener top *screen_top_n*, above 9 EMA; rank by screen overlap + metrics."""
+    abs_top = _top_n_position_map(abs_df, top_n=screen_top_n)
+    blend_top = _top_n_position_map(rs_blended_df, top_n=screen_top_n)
+    adapt_top = _top_n_position_map(rs_adaptive_df, top_n=screen_top_n)
+
+    symbols = set(abs_top) | set(blend_top) | set(adapt_top)
+    if not symbols:
+        return []
 
     rows = _row_map(rs_adaptive_df)
     rows.update(_row_map(rs_blended_df))
     rows.update(_row_map(abs_df))
-
-    symbols = set(abs_pos) | set(blend_pos) | set(adapt_pos)
-    if not symbols:
-        return []
 
     candidates: list[EtfPick] = []
     for sym in symbols:
         row = rows[sym]
         if row.get("Close_Below_9EMA") != "Hold":
             continue
-        a_pos = abs_pos.get(sym)
-        b_pos = blend_pos.get(sym)
-        d_pos = adapt_pos.get(sym)
-        reason = _build_reason(abs_pos=a_pos, blend_pos=b_pos, adapt_pos=d_pos, row=row)
-        score = _score_pick(abs_pos=a_pos, blend_pos=b_pos, adapt_pos=d_pos, row=row)
-        candidates.append(EtfPick(rank=0, symbol=sym, reason=reason, score=score))
+        a_pos = abs_top.get(sym)
+        b_pos = blend_top.get(sym)
+        d_pos = adapt_top.get(sym)
+        screen_count = sum(p is not None for p in (a_pos, b_pos, d_pos))
+        reason = _build_reason(
+            abs_pos=a_pos,
+            blend_pos=b_pos,
+            adapt_pos=d_pos,
+            screen_count=screen_count,
+            row=row,
+        )
+        score = _score_pick(
+            abs_pos=a_pos,
+            blend_pos=b_pos,
+            adapt_pos=d_pos,
+            screen_count=screen_count,
+            row=row,
+        )
+        candidates.append(
+            EtfPick(
+                rank=0,
+                symbol=sym,
+                reason=reason,
+                score=score,
+                name=_row_name(row),
+            )
+        )
 
     candidates.sort(key=lambda p: (-p.score, p.symbol))
     return candidates
@@ -138,12 +194,23 @@ def recommend_top_etfs(
     rs_adaptive_df: pd.DataFrame,
     *,
     top_n: int = TOP_PICKS,
+    screen_top_n: int = SCREEN_TOP_N,
 ) -> list[EtfPick]:
-    """Rank ETFs above 9 EMA that appear on any screen; prefer multi-screen leaders."""
-    candidates = _scored_candidates(abs_df, rs_blended_df, rs_adaptive_df)
+    """Top ETFs from screener top lists; favor multi-screen overlap, ranks, and returns."""
+    candidates = _scored_candidates(
+        abs_df, rs_blended_df, rs_adaptive_df, screen_top_n=screen_top_n
+    )
     out: list[EtfPick] = []
     for i, pick in enumerate(candidates[:top_n], start=1):
-        out.append(EtfPick(rank=i, symbol=pick.symbol, reason=pick.reason, score=pick.score))
+        out.append(
+            EtfPick(
+                rank=i,
+                symbol=pick.symbol,
+                reason=pick.reason,
+                score=pick.score,
+                name=pick.name,
+            )
+        )
     return out
 
 
@@ -151,9 +218,13 @@ def recommendation_rank_dataframe(
     abs_df: pd.DataFrame,
     rs_blended_df: pd.DataFrame,
     rs_adaptive_df: pd.DataFrame,
+    *,
+    screen_top_n: int = SCREEN_TOP_N,
 ) -> pd.DataFrame:
-    """Backtest ranking: all scored above-9-EMA candidates with ``Rank_Position``."""
-    candidates = _scored_candidates(abs_df, rs_blended_df, rs_adaptive_df)
+    """Backtest ranking: scored top-screen ETFs above 9 EMA with ``Rank_Position``."""
+    candidates = _scored_candidates(
+        abs_df, rs_blended_df, rs_adaptive_df, screen_top_n=screen_top_n
+    )
     if not candidates:
         return pd.DataFrame(columns=["Symbol", "Rank_Position"])
     return pd.DataFrame(
@@ -170,10 +241,25 @@ def recommendations_dataframe(
     rs_adaptive_df: pd.DataFrame,
     *,
     top_n: int = TOP_PICKS,
+    screen_top_n: int = SCREEN_TOP_N,
+    include_name: bool = False,
 ) -> pd.DataFrame:
-    picks = recommend_top_etfs(abs_df, rs_blended_df, rs_adaptive_df, top_n=top_n)
-    if not picks:
-        return pd.DataFrame(columns=["Rank", "Symbol", "Reason"])
-    return pd.DataFrame(
-        [{"Rank": p.rank, "Symbol": p.symbol, "Reason": p.reason} for p in picks]
+    picks = recommend_top_etfs(
+        abs_df,
+        rs_blended_df,
+        rs_adaptive_df,
+        top_n=top_n,
+        screen_top_n=screen_top_n,
     )
+    if not picks:
+        cols = ["Rank", "Symbol", "Reason"]
+        if include_name:
+            cols.insert(2, "Name")
+        return pd.DataFrame(columns=cols)
+    rows: list[dict[str, object]] = []
+    for p in picks:
+        row: dict[str, object] = {"Rank": p.rank, "Symbol": p.symbol, "Reason": p.reason}
+        if include_name:
+            row["Name"] = p.name or ""
+        rows.append(row)
+    return pd.DataFrame(rows)

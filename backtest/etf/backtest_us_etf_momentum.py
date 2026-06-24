@@ -32,6 +32,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from momentum.etf.ema9_metrics import compute_ema9_metrics  # noqa: E402
+from momentum.etf.etf_momentum_recommendations import recommendation_rank_dataframe  # noqa: E402
 from momentum.etf.etf_us_momentum_engine import (  # noqa: E402
     BENCH_EMA_FAST,
     BENCH_EMA_SLOW,
@@ -72,12 +74,14 @@ STRATEGY_KEYS = (
     "momentum_us_etfs",
     "momentum_us_rs_etfs",
     "momentum_us_rs_etfs_adaptive",
+    "momentum_us_etfs_recommended",
 )
 
 STRATEGY_LABELS: dict[str, str] = {
     "momentum_us_etfs": "Abs Momentum",
     "momentum_us_rs_etfs": "RS Blended",
     "momentum_us_rs_etfs_adaptive": "RS Adaptive",
+    "momentum_us_etfs_recommended": "Top N Recommended",
 }
 
 
@@ -189,7 +193,7 @@ def _download_adj_vol_close(
 
 
 def strategy_defaults(strategy_key: str) -> dict[str, Any]:
-    return {
+    defaults = {
         "portfolio_size": 7,
         "entry_rank_depth": 7,
         "exit_rank_threshold": 10,
@@ -200,6 +204,9 @@ def strategy_defaults(strategy_key: str) -> dict[str, Any]:
         "park_empty_slots": True,
         "park_slot_etf": DEFAULT_PARK_SLOT_ETF,
     }
+    if strategy_key == "momentum_us_etfs_recommended":
+        defaults["entry_rank_depth"] = 15
+    return defaults
 
 
 def _strip_park_slots(holdings: list[str]) -> list[str]:
@@ -442,6 +449,65 @@ def _rank_rs_adaptive_at_date(
     return out
 
 
+def _screen_df_from_rank(
+    rank_df: pd.DataFrame,
+    daily_close: dict[str, pd.Series],
+    as_of: pd.Timestamp,
+) -> pd.DataFrame:
+    if rank_df.empty:
+        return rank_df
+    rows: list[dict[str, object]] = []
+    for _, row in rank_df.iterrows():
+        sym = str(row["Symbol"])
+        close_s = daily_close.get(sym)
+        ema9 = compute_ema9_metrics(close_s.loc[:as_of]) if close_s is not None else {}
+        rows.append(
+            {
+                "Position": int(row["Rank_Position"]),
+                "Symbol": sym,
+                "Close_Below_9EMA": ema9.get("close_below_9ema", ""),
+                "Above_9EMA_Since": ema9.get("above_9ema_since"),
+                "Pct_Above_9EMA": ema9.get("pct_since_cross"),
+                "Return_1W": row.get("Return_1W"),
+                "Return_2W": row.get("Return_2W"),
+                "Return_1M": row.get("Return_1M"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _rank_recommended_at_date(
+    etf_adj: dict[str, pd.Series],
+    etf_vol: dict[str, pd.Series],
+    bench_adj: pd.Series,
+    as_of: pd.Timestamp,
+    daily_close: dict[str, pd.Series],
+    *,
+    proximity_of_52w_high: float,
+) -> pd.DataFrame:
+    abs_rank = _rank_abs_at_date(
+        etf_adj, as_of, proximity_of_52w_high=proximity_of_52w_high
+    )
+    blend_rank = _rank_rs_blended_at_date(
+        etf_adj,
+        etf_vol,
+        bench_adj,
+        as_of,
+        proximity_of_52w_high=proximity_of_52w_high,
+    )
+    adapt_rank = _rank_rs_adaptive_at_date(
+        etf_adj,
+        etf_vol,
+        bench_adj,
+        as_of,
+        proximity_of_52w_high=proximity_of_52w_high,
+    )
+    abs_df = _screen_df_from_rank(abs_rank, daily_close, as_of)
+    blend_df = _screen_df_from_rank(blend_rank, daily_close, as_of)
+    adapt_df = _screen_df_from_rank(adapt_rank, daily_close, as_of)
+    return recommendation_rank_dataframe(abs_df, blend_df, adapt_df)
+
+
 def rank_at_date(
     strategy_key: str,
     etf_adj: dict[str, pd.Series],
@@ -450,6 +516,7 @@ def rank_at_date(
     as_of: pd.Timestamp,
     *,
     proximity_of_52w_high: float,
+    daily_close: dict[str, pd.Series] | None = None,
 ) -> pd.DataFrame:
     if strategy_key == "momentum_us_etfs":
         return _rank_abs_at_date(
@@ -469,6 +536,17 @@ def rank_at_date(
             etf_vol,
             bench_adj,
             as_of,
+            proximity_of_52w_high=proximity_of_52w_high,
+        )
+    if strategy_key == "momentum_us_etfs_recommended":
+        if daily_close is None:
+            raise ValueError("Top N Recommended strategy requires daily_close")
+        return _rank_recommended_at_date(
+            etf_adj,
+            etf_vol,
+            bench_adj,
+            as_of,
+            daily_close,
             proximity_of_52w_high=proximity_of_52w_high,
         )
     raise ValueError(f"Unknown strategy {strategy_key!r}")
@@ -1205,6 +1283,11 @@ class EtfMomentumBacktestEngine:
             self._bench_adj.loc[:rebal_date], BENCH_EMA_FAST, BENCH_EMA_SLOW
         )
         go_cash = cfg.use_regime_filter and regime == "Trend_Down"
+        rank_daily_close = (
+            self._daily_close_excel()
+            if cfg.strategy_key == "momentum_us_etfs_recommended"
+            else None
+        )
 
         ranked_df = pd.DataFrame()
         if go_cash:
@@ -1215,6 +1298,7 @@ class EtfMomentumBacktestEngine:
                 self._bench_adj,
                 rebal_date,
                 proximity_of_52w_high=cfg.proximity_of_52w_high,
+                daily_close=rank_daily_close,
             )
             holdings = []
         else:
@@ -1225,6 +1309,7 @@ class EtfMomentumBacktestEngine:
                 self._bench_adj,
                 rebal_date,
                 proximity_of_52w_high=cfg.proximity_of_52w_high,
+                daily_close=rank_daily_close,
             )
             need_9ema = cfg.entry_above_9ema or cfg.exit_below_9ema
             holdings = _select_holdings(

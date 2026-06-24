@@ -23,7 +23,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from momentum.etf.etf_momentum_recommendations import recommendations_dataframe  # noqa: E402
+from momentum.etf.etf_momentum_recommendations import (  # noqa: E402
+    TOP_PICKS,
+    recommendations_dataframe,
+)
 from momentum.etf.etf_momentum_screen_sort import (  # noqa: E402
     TreeSortState,
     apply_tree_sort,
@@ -178,7 +181,6 @@ def _make_picks_panel(parent: tk.Misc) -> scrolledtext.ScrolledText:
         padx=6,
         pady=6,
     )
-    text.tag_configure("pick_head", font=("Segoe UI", 9, "bold"))
     text.pack(fill=tk.BOTH, expand=True)
     return text
 
@@ -189,10 +191,10 @@ def _fill_picks_panel(text: scrolledtext.ScrolledText, df: pd.DataFrame | None) 
     if df is None:
         text.insert(tk.END, "Refresh to load recommendations.")
     elif df.empty:
-        text.insert(tk.END, "No ETFs above 9 EMA qualify for recommendations.")
+        text.insert(tk.END, f"No ETFs in screener top {TOP_PICKS} qualify for recommendations.")
     else:
         for _, row in df.iterrows():
-            text.insert(tk.END, f"#{int(row['Rank'])}  {row['Symbol']}\n", "pick_head")
+            text.insert(tk.END, f"#{int(row['Rank'])}  {row['Symbol']}\n")
             text.insert(tk.END, f"{row['Reason']}\n\n")
     text.config(state=tk.DISABLED)
 
@@ -258,9 +260,20 @@ class EtfMomentumScreenApp:
         self._rs_tree = self._add_tab(notebook, "RS Blended", RS_BLENDED_COLUMNS, labels=ABS_COLUMN_LABELS)
         self._adaptive_tree = self._add_tab(notebook, "RS Adaptive", RS_ADAPTIVE_COLUMNS, labels=ABS_COLUMN_LABELS)
 
-        picks_frame = tk.LabelFrame(body, text="Top 10 Picks", padx=6, pady=6)
-        body.add(picks_frame, weight=1)
-        self._picks_panel = _make_picks_panel(picks_frame)
+        picks_outer = tk.Frame(body, padx=6, pady=6)
+        body.add(picks_outer, weight=1)
+        picks_title = tk.Frame(picks_outer)
+        picks_title.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(picks_title, text=f"Top {TOP_PICKS} Picks", font=("Segoe UI", 9, "bold")).pack(
+            side=tk.LEFT
+        )
+        tk.Label(
+            picks_title,
+            text="Above 9 EMA only",
+            font=("Segoe UI", 8),
+            fg="#555555",
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        self._picks_panel = _make_picks_panel(picks_outer)
 
         for tree in (self._abs_tree, self._rs_tree, self._adaptive_tree):
             tree.tag_configure("exit", foreground="#b71c1c")

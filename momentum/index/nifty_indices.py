@@ -1,53 +1,11 @@
-"""Nifty sector / thematic indices and benchmark presets for candlestick backtests."""
+"""Nifty sector / thematic indices for candlestick backtests."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from momentum.etf.universes import india
-from utils.nse_bhavcopy import nse_index_data_ticker
-
-
-@dataclass(frozen=True)
-class NiftyBenchmark:
-    key: str
-    label: str
-    yahoo_ticker: str
-
-
-NIFTY_BENCHMARKS: dict[str, NiftyBenchmark] = {
-    "nifty_50": NiftyBenchmark("nifty_50", "Nifty 50", "^NSEI"),
-    "nifty_250": NiftyBenchmark("nifty_250", "Nifty 250", "NIFTY_LARGEMID250.NS"),
-    "midcap_150": NiftyBenchmark("midcap_150", "Midcap 150", "NIFTYMIDCAP150.NS"),
-    "smallcap_250": NiftyBenchmark("smallcap_250", "Smallcap 250", "NIFTYSMLCAP250.NS"),
-    "nifty_500": NiftyBenchmark("nifty_500", "Nifty 500", "^CRSLDX"),
-}
-
-DEFAULT_BENCHMARK_KEY = "nifty_50"
-BENCHMARK_KEYS: tuple[str, ...] = tuple(NIFTY_BENCHMARKS.keys())
-
-_DEFAULT_BENCHMARK = NIFTY_BENCHMARKS[DEFAULT_BENCHMARK_KEY]
-BENCHMARK_YAHOO = _DEFAULT_BENCHMARK.yahoo_ticker
-BENCHMARK_LABEL = _DEFAULT_BENCHMARK.label
-
-
-def resolve_benchmark(value: str) -> NiftyBenchmark:
-    """Resolve preset key, display label, or Yahoo ticker to a benchmark."""
-    raw = (value or "").strip()
-    if not raw:
-        return _DEFAULT_BENCHMARK
-    if raw in NIFTY_BENCHMARKS:
-        return NIFTY_BENCHMARKS[raw]
-    by_label = {b.label.lower(): b for b in NIFTY_BENCHMARKS.values()}
-    if raw.lower() in by_label:
-        return by_label[raw.lower()]
-    by_yahoo = {b.yahoo_ticker.upper(): b for b in NIFTY_BENCHMARKS.values()}
-    if raw.upper() in by_yahoo:
-        return by_yahoo[raw.upper()]
-    raise ValueError(
-        f"Unknown benchmark: {value!r}. "
-        f"Choose: {', '.join(b.label for b in NIFTY_BENCHMARKS.values())}"
-    )
+from utils.nse_bhavcopy import list_nse_index_names, nse_index_data_ticker
 
 
 @dataclass(frozen=True)
@@ -58,21 +16,27 @@ class NiftyIndex:
 
 
 def build_nifty_index_universe() -> list[NiftyIndex]:
-    """Nifty indices using NSE index EOD (Yahoo index symbol or ``NSEIDX:`` — never ETF)."""
-    out: list[NiftyIndex] = []
+    """All NSE ``ind_close_all`` indices (local cache) plus ETF-mapped names."""
     seen: set[str] = set()
+    names: list[str] = []
     for index_name in dict.fromkeys(v for v in india.ETF_TO_NSE_INDEX.values() if v):
         if index_name in seen:
             continue
         seen.add(index_name)
-        out.append(
-            NiftyIndex(
-                index_id=index_name,
-                yahoo_ticker=nse_index_data_ticker(index_name),
-                label=index_name,
-            )
+        names.append(index_name)
+    for index_name in list_nse_index_names():
+        if index_name in seen:
+            continue
+        seen.add(index_name)
+        names.append(index_name)
+    return [
+        NiftyIndex(
+            index_id=index_name,
+            yahoo_ticker=nse_index_data_ticker(index_name),
+            label=index_name,
         )
-    return out
+        for index_name in names
+    ]
 
 
 NIFTY_INDICES: list[NiftyIndex] = build_nifty_index_universe()

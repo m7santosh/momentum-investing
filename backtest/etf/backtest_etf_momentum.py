@@ -199,7 +199,7 @@ def strategy_defaults(strategy_key: str) -> dict[str, Any]:
         "park_slot_etf": DEFAULT_PARK_SLOT_ETF,
     }
     if strategy_key == "momentum_etfs_recommended":
-        defaults["entry_rank_depth"] = 10
+        defaults["entry_rank_depth"] = 15
     return defaults
 
 
@@ -477,10 +477,11 @@ def _screen_df_from_rank(
                 "Position": int(row["Rank_Position"]),
                 "Symbol": sym,
                 "Close_Below_9EMA": ema9.get("close_below_9ema", ""),
+                "Above_9EMA_Since": ema9.get("above_9ema_since"),
                 "Pct_Above_9EMA": ema9.get("pct_since_cross"),
                 "Return_1W": row.get("Return_1W"),
+                "Return_2W": row.get("Return_2W"),
                 "Return_1M": row.get("Return_1M"),
-                "Return_3M": row.get("Return_3M"),
             }
         )
     return pd.DataFrame(rows)

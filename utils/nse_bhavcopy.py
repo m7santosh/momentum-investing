@@ -631,6 +631,29 @@ def fetch_index_close_all(
     return {name: row["close"] for name, row in day_map.items()}
 
 
+def list_nse_index_names(
+    *,
+    trade_date: date | None = None,
+    allow_download: bool = False,
+) -> list[str]:
+    """Sorted index names from a cached or downloaded ``ind_close_all`` session."""
+    if trade_date is None:
+        local_dates = list_local_index_eod_dates()
+        if not local_dates:
+            if not allow_download:
+                return []
+            trade_date = today_ist()
+        else:
+            trade_date = local_dates[-1]
+
+    text = _load_index_eod_text_from_disk(trade_date)
+    if text is None and allow_download:
+        text = fetch_index_eod_text(trade_date, quiet=True)
+    if not text:
+        return []
+    return sorted(_parse_ind_close_all_ohlc(text).keys())
+
+
 def resolve_index_name(requested: str, available: dict[str, float]) -> str | None:
     """Match *requested* to a key in *available* (case/spacing insensitive, exact only)."""
     if not available:

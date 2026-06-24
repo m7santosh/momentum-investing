@@ -37,10 +37,8 @@ from momentum.index.index_indicators import (  # noqa: E402
     resolve_indicator,
 )
 from momentum.index.nifty_indices import (  # noqa: E402
-    DEFAULT_BENCHMARK_KEY,
     DEFAULT_SELECTED_INDEX_IDS,
-    NIFTY_BENCHMARKS,
-    NIFTY_INDICES,
+    build_nifty_index_universe,
 )
 from momentum.index.candle_plot import CandleChartHover, plot_index_with_indicator  # noqa: E402
 from momentum.rrg_core import rrg_format_date, rrg_parse_user_date  # noqa: E402
@@ -184,18 +182,6 @@ def open_nifty_candlestick_backtest(
     st_mult_label.grid(row=1, column=6, sticky="w", pady=(8, 0))
     st_mult_entry.grid(row=1, column=7, padx=(4, 16), pady=(8, 0), sticky="w")
 
-    tk.Label(params, text="Benchmark:").grid(row=2, column=0, sticky="w", pady=(8, 0))
-    _bench_labels = [b.label for b in NIFTY_BENCHMARKS.values()]
-    benchmark_var = tk.StringVar(value=NIFTY_BENCHMARKS[DEFAULT_BENCHMARK_KEY].label)
-    benchmark_combo = ttk.Combobox(
-        params,
-        textvariable=benchmark_var,
-        values=_bench_labels,
-        width=14,
-        state="readonly",
-    )
-    benchmark_combo.grid(row=2, column=1, padx=(4, 16), pady=(8, 0), sticky="w")
-
     index_row = tk.Frame(win, padx=10)
     index_row.pack(fill=tk.X, pady=(0, 4))
 
@@ -203,8 +189,9 @@ def open_nifty_candlestick_backtest(
     index_list_frame = tk.Frame(index_row)
     index_list_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 8))
 
-    _index_labels = sorted(i.label for i in NIFTY_INDICES)
-    _index_label_to_id = {i.label: i.index_id for i in NIFTY_INDICES}
+    _nifty_indices = build_nifty_index_universe()
+    _index_labels = sorted(i.label for i in _nifty_indices)
+    _index_label_to_id = {i.label: i.index_id for i in _nifty_indices}
 
     index_listbox = tk.Listbox(
         index_list_frame,
@@ -221,7 +208,7 @@ def open_nifty_candlestick_backtest(
         index_listbox.insert(tk.END, label)
 
     _default_label_set = {
-        i.label for i in NIFTY_INDICES if i.index_id in DEFAULT_SELECTED_INDEX_IDS
+        i.label for i in _nifty_indices if i.index_id in DEFAULT_SELECTED_INDEX_IDS
     }
     for pos, label in enumerate(_index_labels):
         if label in _default_label_set:
@@ -421,13 +408,6 @@ def open_nifty_candlestick_backtest(
     def _parse_capital() -> float:
         return float(capital_var.get().replace(",", "").strip())
 
-    def _benchmark_key() -> str:
-        label = benchmark_var.get().strip()
-        for bench in NIFTY_BENCHMARKS.values():
-            if bench.label == label:
-                return bench.key
-        return DEFAULT_BENCHMARK_KEY
-
     def _selected_index_ids() -> tuple[str, ...]:
         sel = index_listbox.curselection()
         if not sel:
@@ -450,7 +430,6 @@ def open_nifty_candlestick_backtest(
             ),
             initial_capital=_parse_capital(),
             timeframe=_timeframe_key(),  # type: ignore[arg-type]
-            benchmark_key=_benchmark_key(),
         )
 
     def _active_engine() -> NiftyCandleBacktestEngine | None:
@@ -488,7 +467,7 @@ def open_nifty_candlestick_backtest(
             m2 = compute_metrics(compare_engine.trades_df, cap)
             rows["--- Heikin Ashi ---"] = ""
             for k, v in m2.items():
-                if k in ("Benchmark", "Period", "Timeframe", "Indices", "Index_List", "Indicator", "Candle_Mode"):
+                if k in ("Period", "Timeframe", "Indices", "Index_List", "Indicator", "Candle_Mode"):
                     continue
                 rows[f"HA {k}"] = str(v)
         _fill_kv_tree(metrics_tree, rows, empty="Click Run All after Load Data.")
@@ -775,7 +754,6 @@ def open_nifty_candlestick_backtest(
     index_listbox.bind("<<ListboxSelect>>", _on_chart_controls_changed)
     start_var.trace_add("write", lambda *_: _on_chart_controls_changed())
     end_var.trace_add("write", lambda *_: _on_chart_controls_changed())
-    benchmark_var.trace_add("write", lambda *_: _on_chart_controls_changed())
     timeframe_var.trace_add("write", lambda *_: _on_chart_controls_changed())
     period_var.trace_add("write", lambda *_: _on_chart_controls_changed())
     st_mult_var.trace_add("write", lambda *_: _on_chart_controls_changed())

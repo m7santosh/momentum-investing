@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, scrolledtext, ttk
 
 from datetime import date
 
@@ -25,6 +25,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from momentum.etf.etf_momentum_recommendations import (  # noqa: E402
+    TOP_PICKS,
+    recommendations_dataframe,
+)
 from momentum.etf.etf_momentum_screen_sort import (  # noqa: E402
     TreeSortState,
     apply_tree_sort,
@@ -177,12 +181,52 @@ def _fill_tree(tree: ttk.Treeview, df: pd.DataFrame | None, headings: tuple[str,
         tree.insert("", tk.END, values=values, tags=(tag,) if tag else ())
 
 
+def _make_picks_panel(parent: tk.Misc) -> scrolledtext.ScrolledText:
+    text = scrolledtext.ScrolledText(
+        parent,
+        wrap=tk.WORD,
+        width=44,
+        height=28,
+        font=("Segoe UI", 9),
+        state=tk.DISABLED,
+        relief=tk.FLAT,
+        padx=6,
+        pady=6,
+    )
+    text.pack(fill=tk.BOTH, expand=True)
+    return text
+
+
+def _fill_picks_panel(
+    text: scrolledtext.ScrolledText,
+    df: pd.DataFrame | None,
+    *,
+    include_name: bool = False,
+) -> None:
+    text.config(state=tk.NORMAL)
+    text.delete("1.0", tk.END)
+    if df is None:
+        text.insert(tk.END, "Refresh to load recommendations.")
+    elif df.empty:
+        text.insert(tk.END, f"No ETFs in screener top {TOP_PICKS} qualify for recommendations.")
+    else:
+        for _, row in df.iterrows():
+            header = f"#{int(row['Rank'])}  {row['Symbol']}"
+            if include_name:
+                name = str(row.get("Name", "")).strip()
+                if name:
+                    header += f"  —  {name}"
+            text.insert(tk.END, f"{header}\n")
+            text.insert(tk.END, f"{row['Reason']}\n\n")
+    text.config(state=tk.DISABLED)
+
+
 class UsEtfMomentumScreenApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("US ETF Momentum")
-        self.root.geometry("1480x760")
-        self.root.minsize(1000, 560)
+        self.root.geometry("1680x760")
+        self.root.minsize(1200, 560)
 
         self._snapshot: UsEtfMomentumSnapshot | None = None
         self._busy = False
@@ -223,8 +267,14 @@ class UsEtfMomentumScreenApp:
         status = tk.Label(root, textvariable=self._status_var, anchor="w", padx=10, pady=4)
         status.pack(fill=tk.X)
 
-        notebook = ttk.Notebook(root)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        body = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        left = tk.Frame(body)
+        body.add(left, weight=3)
+
+        notebook = ttk.Notebook(left)
+        notebook.pack(fill=tk.BOTH, expand=True)
 
         self._abs_tree = self._add_tab(
             notebook, f"Abs Momentum (top {TOP_N})", ABS_COLUMNS, labels=ABS_COLUMN_LABELS
@@ -235,6 +285,21 @@ class UsEtfMomentumScreenApp:
         self._adaptive_tree = self._add_tab(
             notebook, f"RS Adaptive (top {TOP_N})", RS_ADAPTIVE_COLUMNS, labels=ABS_COLUMN_LABELS
         )
+
+        picks_outer = tk.Frame(body, padx=6, pady=6)
+        body.add(picks_outer, weight=1)
+        picks_title = tk.Frame(picks_outer)
+        picks_title.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(picks_title, text=f"Top {TOP_PICKS} Picks", font=("Segoe UI", 9, "bold")).pack(
+            side=tk.LEFT
+        )
+        tk.Label(
+            picks_title,
+            text="Above 9 EMA only",
+            font=("Segoe UI", 8),
+            fg="#555555",
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        self._picks_panel = _make_picks_panel(picks_outer)
 
         for tree in (self._abs_tree, self._rs_tree, self._adaptive_tree):
             tree.tag_configure("exit", foreground="#b71c1c")
@@ -355,6 +420,14 @@ class UsEtfMomentumScreenApp:
         _display_df(self._abs_tree, _filter_df(snap.abs_momentum), ABS_COLUMNS)
         _display_df(self._rs_tree, _filter_df(snap.rs_blended), RS_BLENDED_COLUMNS)
         _display_df(self._adaptive_tree, _filter_df(snap.rs_adaptive), RS_ADAPTIVE_COLUMNS)
+
+        picks_df = recommendations_dataframe(
+            snap.abs_momentum,
+            snap.rs_blended,
+            snap.rs_adaptive,
+            include_name=True,
+        )
+        _fill_picks_panel(self._picks_panel, picks_df, include_name=True)
 
 
 def main() -> int:

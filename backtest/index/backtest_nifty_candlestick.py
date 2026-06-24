@@ -49,12 +49,8 @@ from momentum.index.index_indicators import (  # noqa: E402
     resolve_indicator,
 )
 from momentum.index.nifty_indices import (  # noqa: E402
-    BENCHMARK_KEYS,
-    BENCHMARK_LABEL,
-    DEFAULT_BENCHMARK_KEY,
     DEFAULT_SELECTED_INDEX_IDS,
     NiftyIndex,
-    resolve_benchmark,
     resolve_selected_indices,
 )
 from utils.india_market_data import (  # noqa: E402
@@ -103,15 +99,8 @@ class NiftyCandleBacktestConfig:
     indicator_period: int = DEFAULT_INDICATOR_PERIOD
     supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER
     initial_capital: float = 500_000.0
-    benchmark_key: str = DEFAULT_BENCHMARK_KEY
-    benchmark_yahoo: str = field(init=False)
-    benchmark_label: str = field(init=False)
 
     def __post_init__(self) -> None:
-        bench = resolve_benchmark(self.benchmark_key)
-        object.__setattr__(self, "benchmark_key", bench.key)
-        object.__setattr__(self, "benchmark_yahoo", bench.yahoo_ticker)
-        object.__setattr__(self, "benchmark_label", bench.label)
         tf = _TIMEFRAME_ALIASES.get(str(self.timeframe).lower(), self.timeframe)
         if tf not in TIMEFRAME_LABELS:
             tf = "day"
@@ -198,7 +187,6 @@ class NiftyCandleBacktestEngine:
     _ohlc_std: dict[str, pd.DataFrame] = field(default_factory=dict)
     _closes: dict[str, pd.Series] = field(default_factory=dict)
     _universe: list[NiftyIndex] = field(default_factory=list)
-    _bench: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     _bar_dates: list[date] = field(default_factory=list)
     _positions: dict[str, OpenPosition] = field(default_factory=dict)
     _cash: float = 0.0
@@ -264,10 +252,6 @@ class NiftyCandleBacktestEngine:
         if not self._records:
             return pd.DataFrame()
         df = pd.DataFrame(self._records)
-        if "Port_Return" in df.columns and len(df):
-            df["Bench_Value"] = self.config.initial_capital * (
-                (1 + df["Bench_Return"]).cumprod()
-            )
         df.attrs["candle_mode"] = self.config.candle_mode
         df.attrs["timeframe"] = self.config.timeframe
         df.attrs["selected_indices"] = list(self.config.selected_index_ids)
@@ -279,8 +263,6 @@ class NiftyCandleBacktestEngine:
             period=self.config.indicator_period,
             multiplier=self.config.supertrend_multiplier,
         )
-        df.attrs["benchmark_key"] = self.config.benchmark_key
-        df.attrs["benchmark_label"] = self.config.benchmark_label
         return df
 
     def reset_run(self) -> None:
@@ -313,11 +295,6 @@ class NiftyCandleBacktestEngine:
             raise ValueError(
                 f"End date {_format_display_date(config.backtest_end)} is beyond loaded data "
                 f"({_format_display_date(loaded_end.date())}). Click Load Data."
-            )
-
-        if config.benchmark_yahoo not in self._ohlc_daily:
-            raise ValueError(
-                f"Benchmark {config.benchmark_label} is not loaded. Click Load Data."
             )
 
         selected = config.selected_indices()
@@ -363,7 +340,6 @@ class NiftyCandleBacktestEngine:
                 else self.config.supertrend_multiplier
             ),
             initial_capital=self.config.initial_capital,
-            benchmark_key=self.config.benchmark_key,
         )
         self.apply_run_context(updated)
 
@@ -387,19 +363,6 @@ class NiftyCandleBacktestEngine:
             if px is not None:
                 total += pos.shares * px
         return total
-
-    def _bench_return(self, start_date: date, end_date: date) -> float:
-        if self._bench.empty:
-            return 0.0
-        s = self._bench[self._bench.index <= pd.Timestamp(start_date)]
-        e = self._bench[self._bench.index <= pd.Timestamp(end_date)]
-        if s.empty or e.empty:
-            return 0.0
-        start_px = float(s.iloc[-1])
-        end_px = float(e.iloc[-1])
-        if start_px <= 0:
-            return 0.0
-        return end_px / start_px - 1.0
 
     def _exit_position(self, index_id: str, exit_date: date, exit_price: float) -> dict:
         pos = self._positions.pop(index_id)
@@ -482,13 +445,6 @@ class NiftyCandleBacktestEngine:
                     self._ohlc_std[ticker] = std_frame
             self._closes[ticker] = resampled["Close"].astype(float)
 
-        bench_daily = self._ohlc_daily.get(self.config.benchmark_yahoo)
-        if bench_daily is not None and not bench_daily.empty:
-            bench_frame = ohlc_for_timeframe(bench_daily, tf, mode)
-            self._bench = bench_frame["Close"].astype(float) if not bench_frame.empty else pd.Series(dtype=float)
-        else:
-            self._bench = pd.Series(dtype=float)
-
         start = pd.Timestamp(normalize_backtest_date(self.config.backtest_start))
         end = pd.Timestamp(normalize_backtest_date(self.config.backtest_end))
         bar_dates: set[date] = set()
@@ -512,13 +468,13 @@ class NiftyCandleBacktestEngine:
         tf_label = TIMEFRAME_LABELS[self.config.timeframe]
         if load_start < start:
             self._log(
-                f"Loading {len(self._universe)} index(es) + benchmark — "
+                f"Loading {len(self._universe)} index(es) — "
                 f"{format_range_label(start, end)} ({tf_label} bars) "
                 f"[warmup from {load_start.date()}]"
             )
         else:
             self._log(
-                f"Loading {len(self._universe)} index(es) + benchmark — "
+                f"Loading {len(self._universe)} index(es) — "
                 f"{format_range_label(start, end)} ({tf_label} bars)"
             )
         prepare_india_market_data_range(
@@ -539,10 +495,6 @@ class NiftyCandleBacktestEngine:
                 self._log(f"  Skip {idx.label}: no OHLC")
                 continue
             self._ohlc_daily[idx.yahoo_ticker] = df
-
-        bench_df = get_india_market_data(self.config.benchmark_yahoo, load_start, end)
-        if bench_df is not None and not bench_df.empty:
-            self._ohlc_daily[self.config.benchmark_yahoo] = bench_df
 
         self._apply_timeframe()
         self._loaded = True
@@ -639,9 +591,6 @@ class NiftyCandleBacktestEngine:
         port_ret = (val_end / val_start - 1.0) if val_start > 0 else 0.0
         self._portfolio_value = val_end
 
-        bench_start = before if before is not None else bar_date
-        bench_ret = self._bench_return(bench_start, bar_date)
-
         open_rows = [self._open_position_row(pos, bar_date) for pos in self._positions.values()]
         position_rows = period_exits + open_rows
 
@@ -661,7 +610,6 @@ class NiftyCandleBacktestEngine:
             "New_Entries": len(new_entries),
             "Signal_Exits": len(period_exits),
             "Port_Return": port_ret,
-            "Bench_Return": bench_ret,
             "Portfolio_Value": val_end,
             "Open_Tickers": open_tickers,
             "New_Entry_Tickers": new_entries,
@@ -684,23 +632,17 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
         return {}
 
     port_rets = df["Port_Return"].values
-    bench_rets = df["Bench_Return"].values
     n_periods = len(port_rets)
     tf_key = str(df.attrs.get("timeframe", "day"))
     periods_per_year = _PERIODS_PER_YEAR.get(tf_key, 252)
 
     total_ret = df["Portfolio_Value"].iloc[-1] / capital - 1
-    bench_total = df["Bench_Value"].iloc[-1] / capital - 1
     years = n_periods / periods_per_year if periods_per_year > 0 else 0.0
 
     cagr = (1 + total_ret) ** (1 / years) - 1 if years > 0 else 0.0
-    bench_cagr = (1 + bench_total) ** (1 / years) - 1 if years > 0 else 0.0
 
     cum = (1 + pd.Series(port_rets)).cumprod()
     max_dd = float((cum / cum.cummax() - 1).min())
-
-    bench_cum = (1 + pd.Series(bench_rets)).cumprod()
-    bench_max_dd = float((bench_cum / bench_cum.cummax() - 1).min())
 
     ann_vol = (
         float(np.std(port_rets, ddof=1) * np.sqrt(periods_per_year))
@@ -717,7 +659,6 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
     )
     sortino = cagr / downside_vol if downside_vol > 0 else 0.0
     calmar = cagr / abs(max_dd) if max_dd != 0 else 0.0
-    alpha = cagr - bench_cagr
 
     mode = CANDLE_MODE_LABELS.get(str(df.attrs.get("candle_mode", "candlestick")), "Candlestick")
     tf = TIMEFRAME_LABELS.get(tf_key, "Daily")
@@ -731,7 +672,6 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
         "Timeframe": tf,
         "Indices": len(selected),
         "Index_List": selected_s,
-        "Benchmark": str(df.attrs.get("benchmark_label", BENCHMARK_LABEL)),
         "Period": (
             f"{_format_display_date(df['Bar_Date'].iloc[0])} to "
             f"{_format_display_date(df['Bar_Date'].iloc[-1])}"
@@ -744,16 +684,11 @@ def compute_metrics(df: pd.DataFrame, capital: float) -> dict:
         "Avg_Bar_Return_%": round(float(np.mean(port_rets) * 100), 2),
         "Entries": int(df["New_Entries"].sum()),
         "Exits": int(df["Signal_Exits"].sum()),
-        "Bench_Total_Return_%": round(bench_total * 100, 2),
-        "Bench_CAGR_%": round(bench_cagr * 100, 2),
-        "Bench_Max_Drawdown_%": round(bench_max_dd * 100, 2),
         "Final_Value": round(float(df["Portfolio_Value"].iloc[-1]), 2),
-        "Bench_Final_Value": round(float(df["Bench_Value"].iloc[-1]), 2),
         "Sharpe": round(sharpe, 2),
         "Sortino": round(sortino, 2),
         "Calmar": round(calmar, 2),
         "Ann_Volatility_%": round(ann_vol * 100, 2),
-        "Alpha_%": round(alpha * 100, 2),
     }
 
 
@@ -768,7 +703,6 @@ def run_backtest(
     indicator_period: int = DEFAULT_INDICATOR_PERIOD,
     supertrend_multiplier: float = DEFAULT_SUPERTREND_MULTIPLIER,
     initial_capital: float = 500_000.0,
-    benchmark_key: str = DEFAULT_BENCHMARK_KEY,
     progress_cb: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> pd.DataFrame:
@@ -783,7 +717,6 @@ def run_backtest(
             indicator_period=indicator_period,
             supertrend_multiplier=supertrend_multiplier,
             initial_capital=initial_capital,
-            benchmark_key=benchmark_key,
         ),
         progress_cb=progress_cb,
         cancel_check=cancel_check,
@@ -824,11 +757,6 @@ def main() -> int:
         default="daily",
         choices=["daily", "weekly", "monthly", "day", "week", "month"],
     )
-    parser.add_argument(
-        "--benchmark",
-        default=DEFAULT_BENCHMARK_KEY,
-        choices=list(BENCHMARK_KEYS),
-    )
     args = parser.parse_args()
 
     end = args.end or pd.Timestamp(today_ist()).strftime("%Y-%m-%d")
@@ -857,7 +785,6 @@ def main() -> int:
         indicator_period=indicator_period,
         supertrend_multiplier=args.supertrend_multiplier,
         initial_capital=args.capital,
-        benchmark_key=args.benchmark,
         progress_cb=print,
     )
     if df.empty:
