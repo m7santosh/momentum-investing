@@ -1,4 +1,4 @@
-name: Update NSE Stocks to Google Sheet
+name: Update NSE Tickers to GSheet
 
 on:
   schedule:
@@ -16,10 +16,10 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Install Libraries
-        run: pip install gspread oauth2client pandas requests
+        run: pip install dotenv matplotlib pandas pyotp requests rich scipy yfinance gspread oauth2client
 
       - name: Run Python Script
         env:
