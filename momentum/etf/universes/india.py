@@ -33,6 +33,8 @@ DEFAULT_VISIBLE = {
     'PHARMABEES.NS',
     'PSUBNKBEES.NS',
     'PVTBANIETF.NS',
+    'MOSERVICE.NS',
+    'FINIETF.NS'
 }
 
 tickers = [
@@ -76,6 +78,8 @@ tickers = [
     'SMALLCAP.NS',
     'CHEMICAL.NS',
     'GROWWNET.NS',
+    'MOSERVICE.NS',
+    'FINIETF.NS'
 ]
 
 ETF_TO_NSE_INDEX = {
@@ -120,6 +124,8 @@ ETF_TO_NSE_INDEX = {
     'SMALLCAP.NS': 'Nifty Smallcap250 Momentum Quality 100',
     'CHEMICAL.NS': 'Nifty Chemicals',
     'GROWWNET.NS': 'Nifty India Internet',
+    'MOSERVICE.NS': 'Nifty Service',
+    'FINIETF.NS': 'Nifty Financial Services',
 }
 
 ETF_LABELS = {
