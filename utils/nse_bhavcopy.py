@@ -379,6 +379,21 @@ YAHOO_TO_NSE_INDEX: dict[str, str] = {
     "NIFTY_OIL_AND_GAS.NS": "Nifty Oil & Gas",
     "NIFTY_CHEMICALS.NS": "Nifty Chemicals",
     "NIFTYM150MOMNTM50.NS": "Nifty Midcap150 Momentum 50",
+    "MOSERVICE.NS": "Nifty Service"
+}
+
+# Historical / alias index names used in older NSE index archives.
+INDEX_NAME_ALIASES: dict[str, list[str]] = {
+    "NIFTY 50": ["CNX NIFTY", "S&P CNX NIFTY", "S AND P CNX NIFTY"],
+    "NIFTY BANK": ["CNX BANK"],
+    "NIFTY IT": ["CNX IT"],
+    "NIFTY PHARMA": ["CNX PHARMA"],
+    "NIFTY AUTO": ["CNX AUTO"],
+    "NIFTY ENERGY": ["CNX ENERGY"],
+    "NIFTY FMCG": ["CNX FMCG"],
+    "NIFTY METAL": ["CNX METAL"],
+    "NIFTY REALTY": ["CNX REALTY"],
+    "NIFTY 500": ["CNX 500", "NIFTY 500"],
 }
 
 # Synthetic tickers for index backtests: ``NSEIDX:<exact NSE index name>`` → NSE EOD only.
@@ -655,12 +670,25 @@ def list_nse_index_names(
 
 
 def resolve_index_name(requested: str, available: dict[str, float]) -> str | None:
-    """Match *requested* to a key in *available* (case/spacing insensitive, exact only)."""
+    """Match *requested* to a key in *available* (case/spacing insensitive).
+
+    Supports exact normalized matches and a limited set of historical index
+    aliases used by NSE index archives.
+    """
     if not available:
         return None
+
     req = _normalize_index_key(requested)
     by_norm = {_normalize_index_key(k): k for k in available}
-    return by_norm.get(req)
+    if req in by_norm:
+        return by_norm[req]
+
+    for alias in INDEX_NAME_ALIASES.get(req, []):
+        normalized_alias = _normalize_index_key(alias)
+        if normalized_alias in by_norm:
+            return by_norm[normalized_alias]
+
+    return None
 
 
 def fetch_index_close_history(
@@ -714,9 +742,7 @@ def fetch_index_ohlc_histories(
             if day_map:
                 sessions_loaded += 1
                 for name in index_names:
-                    if resolved[name] is None:
-                        resolved[name] = resolve_index_name(name, day_map)
-                    canonical = resolved[name]
+                    canonical = resolve_index_name(name, day_map)
                     if canonical and canonical in day_map:
                         buckets[name].append((pd.Timestamp(d), day_map[canonical]))
         d += timedelta(days=1)

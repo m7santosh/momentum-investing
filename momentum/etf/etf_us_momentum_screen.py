@@ -26,7 +26,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from momentum.etf.etf_momentum_recommendations import (  # noqa: E402
-    TOP_PICKS,
+    US_TOP_PICKS,
     recommendations_dataframe,
 )
 from momentum.etf.etf_momentum_screen_sort import (  # noqa: E402
@@ -208,7 +208,7 @@ def _fill_picks_panel(
     if df is None:
         text.insert(tk.END, "Refresh to load recommendations.")
     elif df.empty:
-        text.insert(tk.END, f"No ETFs in screener top {TOP_PICKS} qualify for recommendations.")
+        text.insert(tk.END, f"No ETFs in screener top {US_TOP_PICKS} qualify for recommendations.")
     else:
         for _, row in df.iterrows():
             header = f"#{int(row['Rank'])}  {row['Symbol']}"
@@ -290,7 +290,7 @@ class UsEtfMomentumScreenApp:
         body.add(picks_outer, weight=1)
         picks_title = tk.Frame(picks_outer)
         picks_title.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(picks_title, text=f"Top {TOP_PICKS} Picks", font=("Segoe UI", 9, "bold")).pack(
+        tk.Label(picks_title, text=f"Top {US_TOP_PICKS} Picks", font=("Segoe UI", 9, "bold")).pack(
             side=tk.LEFT
         )
         tk.Label(
@@ -425,6 +425,7 @@ class UsEtfMomentumScreenApp:
             snap.abs_momentum,
             snap.rs_blended,
             snap.rs_adaptive,
+            top_n=US_TOP_PICKS,
             include_name=True,
         )
         _fill_picks_panel(self._picks_panel, picks_df, include_name=True)

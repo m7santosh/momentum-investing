@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-TOP_PICKS = 15
+TOP_PICKS = 20
+US_TOP_PICKS = 30
 SCREEN_TOP_N = 15
 
 
@@ -71,16 +72,10 @@ def _build_reason(
     screen_count: int,
     row: pd.Series,
 ) -> str:
-    parts = [f"on {screen_count}/3 screens"]
-    if abs_pos is not None:
-        parts.append(f"Abs #{int(abs_pos)}")
-    if blend_pos is not None:
-        parts.append(f"RS Blended #{int(blend_pos)}")
-    if adapt_pos is not None:
-        parts.append(f"RS Adaptive #{int(adapt_pos)}")
-
     cross = _fmt_cross_date(row.get("Above_9EMA_Since"))
     pct_s = _fmt_pct(row.get("Pct_Above_9EMA"))
+    parts: list[str] = []
+
     if cross and pct_s:
         parts.append(f"9 EMA cross {cross} ({pct_s})")
     elif cross:
@@ -96,6 +91,14 @@ def _build_reason(
         ret = _fmt_pct(row.get(col))
         if ret:
             parts.append(f"{label} {ret}")
+
+    parts.append(f"{screen_count}/3 screens")
+    if abs_pos is not None:
+        parts.append(f"Abs #{int(abs_pos)}")
+    if blend_pos is not None:
+        parts.append(f"RS Blended #{int(blend_pos)}")
+    if adapt_pos is not None:
+        parts.append(f"RS Adaptive #{int(adapt_pos)}")
 
     return " · ".join(parts)
 
@@ -197,8 +200,12 @@ def recommend_top_etfs(
     screen_top_n: int = SCREEN_TOP_N,
 ) -> list[EtfPick]:
     """Top ETFs from screener top lists; favor multi-screen overlap, ranks, and returns."""
+    effective_screen_top_n = max(screen_top_n, top_n)
     candidates = _scored_candidates(
-        abs_df, rs_blended_df, rs_adaptive_df, screen_top_n=screen_top_n
+        abs_df,
+        rs_blended_df,
+        rs_adaptive_df,
+        screen_top_n=effective_screen_top_n,
     )
     out: list[EtfPick] = []
     for i, pick in enumerate(candidates[:top_n], start=1):

@@ -25,7 +25,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from momentum.etf.etf_momentum_engine import fetch_etf_momentum_snapshot  # noqa: E402
-from momentum.etf.etf_momentum_recommendations import recommendations_dataframe  # noqa: E402
+from momentum.etf.etf_momentum_recommendations import (  # noqa: E402
+    TOP_PICKS,
+    recommendations_dataframe,
+)
 from utils.nse_bhavcopy import today_ist  # noqa: E402
 
 
@@ -113,6 +116,7 @@ def main():
         snapshot.abs_momentum,
         snapshot.rs_blended,
         snapshot.rs_adaptive,
+        top_n=TOP_PICKS,
     )
     ws_picks = get_or_create_worksheet("ETF Top Picks")
     update_sheet(ws_picks, "Top Picks", picks_df)
