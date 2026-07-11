@@ -1,6 +1,15 @@
 name: Update IN ETF Momentum to GSheet
 
 on:
+  schedule:
+    # 08:30 UTC = 14:00 IST
+    - cron: '30 8 * * 1-5'
+    # 09:00 UTC = 14:30 IST
+    - cron: '0 9 * * 1-5'
+    # 09:30 UTC = 15:00 IST
+    - cron: '30 9 * * 1-5'
+    # 09:45 UTC = 15:15 IST
+    - cron: '45 9 * * 1-5'
   workflow_dispatch:
 
 jobs:
