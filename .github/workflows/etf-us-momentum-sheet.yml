@@ -1,15 +1,6 @@
 name: Update US ETF Momentum to GSheet
 
 on:
-  schedule:
-    # 14:00 UTC = 19:30 IST (7:30 PM)
-    - cron: '0 14 * * 1-5'
-    # 16:30 UTC = 22:00 IST (10:00 PM)
-    - cron: '30 16 * * 1-5'
-    # 17:30 UTC = 23:00 IST (11:00 PM)
-    - cron: '30 17 * * 1-5'
-    # 18:30 UTC = 00:00 IST (12:00 AM / midnight)
-    - cron: '30 18 * * 0-4'
   workflow_dispatch:
 
 jobs:
