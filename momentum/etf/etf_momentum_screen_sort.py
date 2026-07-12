@@ -84,7 +84,7 @@ def sort_etf_momentum_df_multi(
     for col, asc in valid_keys:
         if col == "Above_9EMA_Since":
             key_col = f"_sort_{col}"
-            work[key_col] = pd.to_datetime(work[col], errors="coerce")
+            work[key_col] = pd.to_datetime(work[col], errors="coerce", dayfirst=True)
             by.append(key_col)
             temp_cols.append(key_col)
         else:

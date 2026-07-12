@@ -20,11 +20,22 @@ def _most_recent_cross_above_ts(close: pd.Series, ema9: pd.Series) -> pd.Timesta
     return cross_ts
 
 
+def _most_recent_cross_below_ts(close: pd.Series, ema9: pd.Series) -> pd.Timestamp | None:
+    """Return the session when Close last crossed from above 9 EMA to below it."""
+    below = close < ema9
+    cross_ts: pd.Timestamp | None = None
+    for i in range(1, len(below)):
+        if bool(below.iloc[i]) and not bool(below.iloc[i - 1]):
+            cross_ts = pd.Timestamp(below.index[i])
+    return cross_ts
+
+
 def compute_ema9_metrics(close: pd.Series, *, span: int = ETF_EMA_9_SPAN) -> dict:
     """Compute 9 EMA metrics from a regular Close series (oldest → newest).
 
-    - ``close_below_9ema``: Hold if last Close >= 9 EMA, else Exit.
-    - ``above_9ema_since``: YYYY-MM-DD of the most recent cross from below to at/above
+    - ``close_below_9ema``: Hold if last Close >= 9 EMA, else Exit plus the exit date
+      in DD-MM-YYYY format.
+    - ``above_9ema_since``: DD-MM-YYYY of the most recent cross from below to at/above
       9 EMA (Close on that bar vs 9 EMA on prior bar). If the ETF was above 9 EMA on
       every bar in the lookback, the first bar's date is used.
     - ``pct_since_cross``: (last Close / Close on cross bar - 1) * 100.
@@ -42,7 +53,13 @@ def compute_ema9_metrics(close: pd.Series, *, span: int = ETF_EMA_9_SPAN) -> dic
     ema9 = close.ewm(span=span, adjust=False).mean()
     last_close = float(close.iloc[-1])
     ema9_close = float(ema9.iloc[-1])
-    close_below = "Exit" if last_close < ema9_close else "Hold"
+    close_below = "Hold"
+    if last_close < ema9_close:
+        exit_ts = _most_recent_cross_below_ts(close, ema9)
+        if exit_ts is not None:
+            close_below = f"Exit {exit_ts.strftime('%d-%m-%Y')}"
+        else:
+            close_below = "Exit"
 
     cross_ts = _most_recent_cross_above_ts(close, ema9)
 
@@ -50,7 +67,7 @@ def compute_ema9_metrics(close: pd.Series, *, span: int = ETF_EMA_9_SPAN) -> dic
     pct_since = float("nan")
     if cross_ts is not None:
         cross_close = float(close.loc[cross_ts])
-        above_since = cross_ts.strftime("%Y-%m-%d")
+        above_since = cross_ts.strftime("%d-%m-%Y")
         if cross_close > 0:
             pct_since = round((last_close / cross_close - 1) * 100, 2)
 

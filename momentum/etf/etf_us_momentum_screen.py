@@ -64,7 +64,7 @@ ABS_COLUMNS = (
 ABS_COLUMN_LABELS = {
     "Close": "Price",
     "9EMA": "9 EMA",
-    "Close_Below_9EMA": "9 EMA Close",
+    "Close_Below_9EMA": "9 EMA Close / Exit Date",
     "Above_9EMA_Since": "9 EMA Cross Date",
     "Pct_Above_9EMA": "Since 9 EMA Cross %",
 }
@@ -106,7 +106,7 @@ _COLUMN_WIDTHS: dict[str, int] = {
     "Name": 240,
     "Close": 72,
     "9EMA": 72,
-    "Close_Below_9EMA": 110,
+    "Close_Below_9EMA": 150,
     "Above_9EMA_Since": 108,
     "Pct_Above_9EMA": 118,
     "Return_1W": 76,
@@ -173,8 +173,8 @@ def _fill_tree(tree: ttk.Treeview, df: pd.DataFrame | None, headings: tuple[str,
         values = tuple(_cell(row.get(h), h) for h in headings)
         tag = ""
         if "Close_Below_9EMA" in headings:
-            flag = row.get("Close_Below_9EMA")
-            if flag == "Exit":
+            flag = str(row.get("Close_Below_9EMA") or "").strip()
+            if flag.startswith("Exit"):
                 tag = "exit"
             elif flag == "Hold":
                 tag = "hold"

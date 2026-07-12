@@ -32,6 +32,32 @@ from momentum.etf.etf_momentum_recommendations import (  # noqa: E402
 from utils.nse_bhavcopy import today_ist  # noqa: E402
 
 
+def _format_sheet_value(value: object) -> object:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%d-%m-%Y")
+    if isinstance(value, datetime):
+        return value.strftime("%d-%m-%Y")
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+    except Exception:
+        return text
+    if pd.notna(parsed):
+        return parsed.strftime("%d-%m-%Y")
+    return text
+
+
+def _format_sheet_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "Above_9EMA_Since" in out.columns:
+        out["Above_9EMA_Since"] = out["Above_9EMA_Since"].apply(_format_sheet_value)
+    return out
+
+
 def setup_gsheet_client():
     """Setup Google Sheets client using GCP credentials from environment."""
     creds_json = os.environ.get('ETF_MOMENTUM_CREDENTIAL')
@@ -59,7 +85,7 @@ def update_sheet(ws, title: str, df: pd.DataFrame) -> None:
     values = [headers]
     for _, row in df.iterrows():
         values.append([
-            row[col] if not pd.isna(row[col]) else ""
+            _format_sheet_value(row[col]) if not pd.isna(row[col]) else ""
             for col in headers
         ])
 
@@ -103,13 +129,13 @@ def main():
 
     # Update each sheet
     ws_abs = get_or_create_worksheet("ETF Abs Momentum")
-    update_sheet(ws_abs, "Abs Momentum", snapshot.abs_momentum)
+    update_sheet(ws_abs, "Abs Momentum", _format_sheet_dataframe(snapshot.abs_momentum))
 
     ws_rs = get_or_create_worksheet("ETF RS Blended")
-    update_sheet(ws_rs, "RS Blended", snapshot.rs_blended)
+    update_sheet(ws_rs, "RS Blended", _format_sheet_dataframe(snapshot.rs_blended))
 
     ws_adaptive = get_or_create_worksheet("ETF RS Adaptive")
-    update_sheet(ws_adaptive, "RS Adaptive", snapshot.rs_adaptive)
+    update_sheet(ws_adaptive, "RS Adaptive", _format_sheet_dataframe(snapshot.rs_adaptive))
 
     # Update picks
     picks_df = recommendations_dataframe(
@@ -119,7 +145,7 @@ def main():
         top_n=TOP_PICKS,
     )
     ws_picks = get_or_create_worksheet("ETF Top Picks")
-    update_sheet(ws_picks, "Top Picks", picks_df)
+    update_sheet(ws_picks, "Top Picks", _format_sheet_dataframe(picks_df))
 
     # Update summary
     ist = timezone(timedelta(hours=5, minutes=30))
